@@ -139,7 +139,7 @@ mod tests {
 
     /// Confirms the premise behind "typst_set is trivially stable under
     /// round-trip by construction" (plan.md M3): preserving a `#set` rule
-    /// verbatim (src-tauri/src/ast.rs, src/typstAst.ts) only matters because
+    /// verbatim (src-tauri/src/ast.rs, src/spokes/typstAst.ts) only matters because
     /// it actually changes the compiled output. This proves that half —
     /// that dropping the rule (what would happen without this feature)
     /// visibly changes the real Typst compiler's rendered SVG — using
@@ -344,7 +344,7 @@ $ x^2 $
     #[test]
     fn diagnostics_resolve_correctly_past_cjk_text_on_earlier_lines() {
         // A regression guard for the earlier UTF-16/UTF-8 offset bug (see
-        // src/offsets.ts): line/column here must come from typst-syntax's
+        // src/util/offsets.ts): line/column here must come from typst-syntax's
         // own character-counting (Lines::byte_to_line_column), not from
         // anything that could conflate UTF-8 bytes with UTF-16 units.
         let result = compile_typst("= 一级标题\n\n#unknown_function()".into());

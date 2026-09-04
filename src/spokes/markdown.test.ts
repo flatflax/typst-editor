@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { docToMarkdown, markdownToDoc } from "./markdown";
 import { pmDocToTypst } from "./typstAst";
-import { schema } from "./schema";
+import { schema } from "../model/schema";
 
 // Unlike the Typst spoke (typstAst.test.ts), remark runs in this process —
 // there's no cross-language boundary to split around — so these fixtures

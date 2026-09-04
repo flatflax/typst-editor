@@ -15,7 +15,7 @@ import {
   deleteRow,
   goToNextCell,
 } from "prosemirror-tables";
-import { schema } from "./schema";
+import { schema } from "../model/schema";
 
 export const toggleStrong = toggleMark(schema.marks.strong);
 export const toggleEm = toggleMark(schema.marks.em);

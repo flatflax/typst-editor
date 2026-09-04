@@ -16,10 +16,10 @@
 // -> Markdown -> WYSIWYG smoke checklist (plan.md M6) has to be run by hand
 // in `tauri dev`.
 import { describe, expect, it } from "vitest";
-import { typstAstToDoc, pmDocToTypst } from "./typstAst";
-import { docToMarkdown, markdownToDoc } from "./markdown";
-import { fixtures } from "./typstAst.fixtures";
-import type { PMDoc } from "./schema";
+import { typstAstToDoc, pmDocToTypst } from "./spokes/typstAst";
+import { docToMarkdown, markdownToDoc } from "./spokes/markdown";
+import { fixtures } from "./spokes/typstAst.fixtures";
+import type { PMDoc } from "./model/schema";
 
 // Excluded from this suite specifically: content that's a stable fixed
 // point through Typst<->model on its own (typstAst.test.ts) but *known* to
@@ -55,7 +55,7 @@ describe("Editor Model survives a round trip through Markdown", () => {
 describe("full switcher cycle, the automatable half (plan.md M6 smoke checklist)", () => {
   it("WYSIWYG -> Markdown -> WYSIWYG preserves the mixed document end to end", () => {
     // "Author in WYSIWYG" = start from a PMDoc directly, exactly as
-    // WysiwygEditor's live state already is one (src/WysiwygEditor.tsx).
+    // WysiwygEditor's live state already is one (src/editor/WysiwygEditor.tsx).
     const authored: PMDoc = typstAstToDoc(fixtures.mixed.ast);
 
     // "Switch to Markdown" (App.tsx's switchView, the wysiwyg->markdown leg

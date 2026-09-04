@@ -120,11 +120,15 @@ export const schema = new Schema({
       atom: true,
       isolating: true,
       selectable: true,
-      toDOM: (node) => [
-        "pre",
-        { "data-unsupported-block": "true", contenteditable: "false" },
-        node.attrs.raw,
-      ],
+      // No `contenteditable: "false"` here: ProseMirror already refuses to
+      // let atom nodes be edited (it intercepts mutations at the JS level),
+      // and a nested `contenteditable="false"` DOM island breaks the
+      // browser's caret-position APIs (`caretPositionFromPoint` etc.) that
+      // `view.posAtCoords` relies on, so clicks inside the island silently
+      // failed to resolve to a NodeSelection at all — no cursor, no
+      // highlight, nothing. See the sibling `image` node below, which never
+      // had this attribute and has always been click-selectable.
+      toDOM: (node) => ["pre", { "data-unsupported-block": "true" }, node.attrs.raw],
     },
 
     // A forced line break (Typst `\`, Markdown trailing double-space / `<br>`)
@@ -150,9 +154,11 @@ export const schema = new Schema({
       atom: true,
       isolating: true,
       selectable: true,
+      // See `unsupported_block` above for why `contenteditable: "false"` is
+      // deliberately omitted.
       toDOM: (node) => [
         "div",
-        { "data-typst-call": node.attrs.name, contenteditable: "false" },
+        { "data-typst-call": node.attrs.name },
         `#${node.attrs.name}(...)`,
       ],
     },
@@ -166,9 +172,11 @@ export const schema = new Schema({
       attrs: { name: { default: "" }, raw: { default: "" } },
       atom: true,
       selectable: true,
+      // See `unsupported_block` above for why `contenteditable: "false"` is
+      // deliberately omitted.
       toDOM: (node) => [
         "span",
-        { "data-typst-call": node.attrs.name, contenteditable: "false" },
+        { "data-typst-call": node.attrs.name },
         `#${node.attrs.name}(...)`,
       ],
     },
@@ -203,7 +211,7 @@ export const schema = new Schema({
     // `#table(columns: .., [cell], ...)` (plan.md M10). `columnsRaw` is the
     // verbatim source text of the `columns:` argument and `columnCount` the
     // column count it was derived for (see ast.rs's `AstBlock::Table`) — the
-    // serializer (src/typstAst.ts) re-emits `columnsRaw` verbatim only when
+    // serializer (src/spokes/typstAst.ts) re-emits `columnsRaw` verbatim only when
     // `columnCount` still matches the table's *actual* current column count
     // (the first row's cell count), falling back to a plain integer when a
     // WYSIWYG add/remove-column edit has made it stale, rather than silently

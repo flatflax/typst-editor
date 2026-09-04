@@ -1,5 +1,5 @@
 // Markdown source <-> Editor Model (plan.md M4). Unlike the Typst spoke
-// (src/typstAst.ts), remark runs directly in this process — there's no
+// (src/spokes/typstAst.ts), remark runs directly in this process — there's no
 // language boundary to cross, so `mdastToDoc`/`pmDocToMdast` map the real
 // `mdast` tree straight to/from `PMDoc`, with no separate pruned-JSON layer.
 //
@@ -47,7 +47,7 @@ import type {
   TableRow as MdTableRow,
 } from "mdast";
 import { Node as PMNode, type Mark } from "prosemirror-model";
-import { schema, type PMDoc, type TypstSet } from "./schema";
+import { schema, type PMDoc, type TypstSet } from "../model/schema";
 import { pmDocToTypst } from "./typstAst";
 
 const FENCE_CALL = "typst-call";
@@ -440,7 +440,7 @@ function withLinkMark(node: PhrasingContent, marks: readonly Mark[]): PhrasingCo
 }
 
 // Nests innermost-out as code, then em, then strong — mirrors the ordering
-// in src/typstAst.ts's serializeTextRun for consistency across both spokes.
+// in src/spokes/typstAst.ts's serializeTextRun for consistency across both spokes.
 function wrapMarks(text: string, marks: string[]): PhrasingContent {
   let node: PhrasingContent = marks.includes("code")
     ? { type: "inlineCode", value: text }

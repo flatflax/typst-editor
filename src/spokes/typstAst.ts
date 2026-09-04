@@ -2,9 +2,9 @@
 // (plan.md M3). `AstDocument`/`AstBlock`/`AstInline`/`TypstSet` mirror the
 // JSON shape produced by `src-tauri/src/ast.rs::parse_typst_ast` — Rust owns
 // recognizing Typst's real syntax tree, this module only owns mapping that
-// pruned AST into/out of the ProseMirror schema (src/schema.ts).
+// pruned AST into/out of the ProseMirror schema (src/model/schema.ts).
 import { Node as PMNode, type Mark } from "prosemirror-model";
-import { schema, type PMDoc, type TypstSet } from "./schema";
+import { schema, type PMDoc, type TypstSet } from "../model/schema";
 
 export type { TypstSet };
 

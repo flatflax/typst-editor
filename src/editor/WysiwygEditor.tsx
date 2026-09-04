@@ -15,8 +15,8 @@ import "prosemirror-view/style/prosemirror.css";
 import "prosemirror-tables/style/tables.css";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { schema, type PMDoc, type TypstSet } from "./schema";
-import { relativePath } from "./fileIO";
+import { schema, type PMDoc, type TypstSet } from "../model/schema";
+import { relativePath } from "../shell/fileIO";
 import {
   addTableColumn,
   addTableRow,

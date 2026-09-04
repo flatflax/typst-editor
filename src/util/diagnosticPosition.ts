@@ -1,6 +1,6 @@
 import type { EditorState } from "@codemirror/state";
 import type { Diagnostic as CMDiagnostic } from "@codemirror/lint";
-import type { EditorDiagnostic } from "./SourceEditor";
+import type { EditorDiagnostic } from "../editor/SourceEditor";
 
 // Typst line/column (1-indexed, counted in characters — see
 // typst_syntax::Lines::byte_to_line_column) -> CodeMirror doc offset

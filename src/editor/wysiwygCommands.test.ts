@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { splitListItem } from "prosemirror-schema-list";
-import { schema } from "./schema";
-import { pmDocToTypst } from "./typstAst";
+import { schema } from "../model/schema";
+import { pmDocToTypst } from "../spokes/typstAst";
 import {
   ensureTrailingParagraphPlugin,
   insertParagraphAfter,

@@ -3,9 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
-import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./SourceEditor";
-import WysiwygEditor, { type WysiwygEditorHandle } from "./WysiwygEditor";
-import { byteToUtf16Offset, utf16ToByteOffset } from "./offsets";
+import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./editor/SourceEditor";
+import WysiwygEditor, { type WysiwygEditorHandle } from "./editor/WysiwygEditor";
+import { byteToUtf16Offset, utf16ToByteOffset } from "./util/offsets";
 import {
   typstAstToDoc,
   pmDocToTypst,
@@ -14,12 +14,12 @@ import {
   typstOffsetToPmPos,
   type AstDocument,
   type PositionMapEntry,
-} from "./typstAst";
-import { markdownToDoc, docToMarkdown } from "./markdown";
-import { defaultFileName, dirname, spokeForPath, titleFor, withPdfExtension, type Spoke } from "./fileIO";
-import { addRecentFile, getRecentFiles, removeRecentFile } from "./recentFiles";
-import { buildAppMenu } from "./appMenu";
-import type { PMDoc } from "./schema";
+} from "./spokes/typstAst";
+import { markdownToDoc, docToMarkdown } from "./spokes/markdown";
+import { defaultFileName, dirname, spokeForPath, titleFor, withPdfExtension, type Spoke } from "./shell/fileIO";
+import { addRecentFile, getRecentFiles, removeRecentFile } from "./shell/recentFiles";
+import { buildAppMenu } from "./shell/appMenu";
+import type { PMDoc } from "./model/schema";
 import "./App.css";
 
 const INITIAL_AST: AstDocument = {

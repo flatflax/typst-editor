@@ -7,7 +7,7 @@ import {
   typstOffsetToPmPos,
 } from "./typstAst";
 import { fixtures } from "./typstAst.fixtures";
-import { schema, type PMDoc } from "./schema";
+import { schema, type PMDoc } from "../model/schema";
 
 describe("typstAstToDoc / pmDocToTypst round trip", () => {
   it.each(Object.entries(fixtures))(

@@ -24,7 +24,7 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { linter, lintGutter, lintKeymap, setDiagnostics } from "@codemirror/lint";
-import { toCMDiagnostics } from "./diagnosticPosition";
+import { toCMDiagnostics } from "../util/diagnosticPosition";
 
 // `codemirror`'s own `basicSetup` (see its source: node_modules/codemirror/
 // dist/index.js), minus `closeBrackets()`/`closeBracketsKeymap` — its own

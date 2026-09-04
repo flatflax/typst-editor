@@ -3,7 +3,7 @@
 //! prunes/simplifies the CST into the JSON shape covering only the MVP
 //! syntax subset (plan.md line 31) plus the opaque `typst_call`/
 //! `unsupported_block` escape hatches and top-level `#set` lifting. The
-//! frontend's `typstAstToDoc` (src/typstAst.ts) maps this into the Editor
+//! frontend's `typstAstToDoc` (src/spokes/typstAst.ts) maps this into the Editor
 //! Model — this module only recognizes structure, it doesn't know about
 //! ProseMirror.
 //!
@@ -47,7 +47,7 @@ pub enum AstBlock {
     /// `#table(columns: .., [cell], [cell], ...)` (plan.md M10). `cells` is
     /// the flat row-major sequence exactly as Typst's call arguments give
     /// it — `cells.len()` is always an exact multiple of `column_count`
-    /// (enforced by `as_table_call`); the frontend (src/typstAst.ts) chunks
+    /// (enforced by `as_table_call`); the frontend (src/spokes/typstAst.ts) chunks
     /// it into rows for the ProseMirror `table`/`table_row`/`table_cell`
     /// nodes. `columns_raw` is the verbatim source text of the `columns:`
     /// argument (an int or an array literal, e.g. `"3"` or `"(1fr, 2fr)"`)
@@ -75,7 +75,7 @@ pub enum AstInline {
     /// carries a URL, and its body can itself contain arbitrary marked-up
     /// inline content — so it's a recursive container instead, mirroring
     /// how `AstBlock::BulletList` nests rather than flattens. The frontend
-    /// (src/typstAst.ts) maps this onto a ProseMirror `link` *mark* applied
+    /// (src/spokes/typstAst.ts) maps this onto a ProseMirror `link` *mark* applied
     /// to every leaf produced by `children`, since ProseMirror has no
     /// separate "link node" concept for inline content.
     Link { href: String, children: Vec<AstInline> },
@@ -873,7 +873,7 @@ mod tests {
         // one PM text node later by typstAst.ts's run-merging), but the
         // premise this test exists to check is that they parse to *literal*
         // "["/"]" characters at all — the basis for escaping `[`/`]` in a
-        // link's body text on the way out (src/typstAst.ts's
+        // link's body text on the way out (src/spokes/typstAst.ts's
         // escapeTypstText), since that's the first place this codebase
         // embeds arbitrary text inside a Typst content-block `[...]`
         // delimiter pair (plan.md M9).
