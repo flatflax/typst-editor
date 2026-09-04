@@ -9,10 +9,10 @@ Goal: prove that `源码 ⇄ 编辑模型 ⇄ Typst 排版结果` can form a **s
 - switching between WYSIWYG editing / Typst source view / Markdown source view does not corrupt or drift content, proven by automated round-trip tests plus a manual smoke check.
 
 Two scope decisions already made with the user (do not revisit without asking):
-1. **WYSIWYG = rich-text editing surface + a separate accurate preview pane** (Typora/Notion-style), *not* true inline editing on top of Typst's real paginated layout. The latter is architecturally an order of magnitude harder and out of scope for an MVP.
+1. **WYSIWYG = rich-text editing surface + a separate accurate preview pane** (a split-pane approximation of Typora/Notion), *not* single-view editing on top of Typst's real paginated layout, for the MVP specifically — that remains architecturally harder and was correctly out of scope while the loop itself was unproven. The user has since confirmed single-view WYSIWYG (no separate pane) as the long-term target once the loop is stable; see **Phase 3 — Single-View WYSIWYG** below for the architecture that makes it tractable rather than an open-ended rewrite.
 2. **Markdown is a first-class second source format**, requiring real Markdown ⇄ Editor Model conversion (not just a UX inspiration) — Typst source and Markdown source are two independent "spokes" around the same Editor Model "hub."
 
-**Status: MVP (M0–M6) is complete** — the closed loop is proven: 99/99 frontend tests (vitest) and 26/26 Rust tests (cargo test) pass, including the M6 cross-spoke stability suite and mixed-content compile-diff fixture. See the "Explicitly out of scope" list below for what's next; nothing yet organized into a dedicated post-MVP roadmap section.
+**Status: MVP (M0–M6) is complete** — the closed loop is proven, including the M6 cross-spoke stability suite and mixed-content compile-diff fixture. See **Phase 2 — Post-MVP Roadmap** (content coverage + file I/O) and **Phase 3 — Single-View WYSIWYG** (the long-term target: no separate preview pane) below.
 
 ## Architecture
 
@@ -164,3 +164,33 @@ Carried over from the MVP's out-of-scope list, intentionally not attempted this 
 - **Table Typst-representation risk**: constraining `#table(...)` to a supported argument shape (M10) is a heuristic, not a full parse of Typst's argument grammar — a real-world document's table call is more likely to fall outside the supported shape (and thus become opaque) than the MVP's other opaque-fallback cases, since `#table` has many legitimate styling arguments in practice. Budget time to widen the supported shape based on real fixtures, not just the minimal one built first.
 - **Image path/security risk**: M11 is the first milestone giving the Rust backend real filesystem access (beyond the in-memory MVP World) — get the Tauri capability scoping right (document-directory-only, read-only) from the start rather than retrofitting it after a broader grant ships.
 - **Markdown fidelity gap widens**: GFM tables (cell-inline-only) and image-caption-as-alt-text (M11) are two more points where the Markdown spoke can't carry everything the Typst spoke can — consistent with the MVP's existing "two independent parsers constrain to their common subset" risk, but worth flagging that Phase 2 grows the number of these deliberate lossy-but-stable fallbacks, not just the one (`unsupported_block`) the MVP shipped with.
+
+---
+
+## Phase 3 — Single-View WYSIWYG (the long-term target)
+
+### Reframing: this is not "contenteditable on vector paths"
+
+The user's ask is a real, final-product goal, not a stretch aspiration: **one view, no separate preview pane**, backed by real Typst rendering, made feasible by incremental compilation. Earlier discussion (this conversation, pre-roadmap) framed the only path to single-view as hand-rolling cursor/selection/IME directly on top of the compiled SVG/Frame output — genuinely an open-ended rewrite, correctly rejected for the MVP. That framing was incomplete: **Typora itself doesn't do that either.** Typora's actual mechanism is *per-block focus swapping* — the block currently being edited shows a lightly-styled source/editable view, and every other block shows fully rendered output, swapped on focus/blur, not one continuous contenteditable surface pretending to be both.
+
+Applying that same mechanism here turns single-view WYSIWYG into a scoped integration problem instead of a rewrite: **ProseMirror keeps owning text editing** (cursor, selection, IME composition, undo/redo — already solved, don't touch it) **and Typst keeps owning rendering** (already solved via `compile_typst`) — the only genuinely new work is (a) fast enough incremental compilation to recompile-and-swap on every focus change/keystroke without visible lag, and (b) a block-level focus-swap UI built on ProseMirror node views, reusing the click/cursor position-mapping (`jump_from_click`/`jump_from_cursor`) already built in M1/M5 to hand off cleanly between "rendered" and "editable" states at the right character offset.
+
+### Milestones (tentative — M12 is a feasibility spike other milestones depend on)
+
+**M12 — Incremental compilation feasibility spike**
+Before designing the swap UI, establish the actual latency budget. `typst::compile` already uses `comemo`-based memoization internally (this is what makes `typst-cli --watch`/`tinymist`'s live preview fast) — benchmark whether editing one block of a realistic multi-page fixture and recompiling the *whole* document already lands comfortably under a per-keystroke budget (~16–50ms) before assuming block-scoped/partial compilation is required. If whole-doc incremental recompilation is fast enough, M13+ gets much simpler (no need to isolate a block's compiled output from document-level context). If not, this milestone's output is a concrete measurement of where the wall is, informing whether block-scoped compilation is worth the complexity it adds.
+
+**M13 — Per-block render/edit swap**
+Extend the ProseMirror schema's node views so each top-level block (paragraph, heading, list item, etc.) can present as either: (a) an inline Typst-rendered SVG fragment sized/positioned to match its place in the document flow (inactive/blurred state), or (b) today's editable rich-text node view (active/focused state) — toggling on focus/blur/click, not on every keystroke of a *different* block. The preview pane as a distinct UI element goes away; its role is absorbed into the per-block rendered fragments.
+
+**M14 — Reflow and pagination handling**
+When an edited block's compiled height changes, every later block's vertical position shifts (real Typst pagination, not CSS reflow) — the document container must reposition subsequent rendered fragments after each incremental compile. Requires an explicit, user-visible answer for a block that straddles a page break in single-view mode (Typst's pagination is real, unlike Typora's infinite scroll) — this is new UX territory the MVP's split-pane preview never had to solve, since a separate preview pane could just show real pages without the editing surface caring.
+
+**M15 — Cursor/selection continuity across swaps**
+Reuse and generalize the `jump_from_click`/`jump_from_cursor` infrastructure so a click on a rendered (inactive) block cleanly activates that block's editable node view at the corresponding character offset, and blurring re-renders it back — this promotes the M5 position-mapping work from an optional preview-sync nicety to load-bearing infrastructure that fires on every click, not just an explicit "sync" action.
+
+### Risks (flagged, not hidden)
+
+- **Cross-block layout dependencies**: a block's compiled size/appearance isn't always purely a function of its own content — earlier `#set` rules, automatic numbering, or widow/orphan control can mean an edit to one block should, in principle, affect neighboring blocks' rendering too. Full accuracy may require re-rendering a window of neighboring blocks rather than just the one edited; scope the first version to accept some inaccuracy here rather than solving it upfront.
+- **Page-boundary UX is genuinely undefined** — decide (with the user) what single-view mode does with a block that spans a page break before building M14, not during.
+- **This phase is large enough to warrant treating M12 as a hard gate**: if the feasibility spike shows incremental recompilation can't hit an acceptable latency budget even for whole-doc recompilation, the milestone plan for M13+ needs to be revisited (block-scoped partial compilation is a much bigger lift than the sketch above assumes) before committing further design or implementation time.
