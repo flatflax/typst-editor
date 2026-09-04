@@ -16,16 +16,9 @@ import {
   type PositionMapEntry,
 } from "./typstAst";
 import { markdownToDoc, docToMarkdown } from "./markdown";
-import {
-  basename,
-  defaultFileName,
-  dirname,
-  spokeForPath,
-  titleFor,
-  withPdfExtension,
-  type Spoke,
-} from "./fileIO";
+import { defaultFileName, dirname, spokeForPath, titleFor, withPdfExtension, type Spoke } from "./fileIO";
 import { addRecentFile, getRecentFiles, removeRecentFile } from "./recentFiles";
+import { buildAppMenu } from "./appMenu";
 import type { PMDoc } from "./schema";
 import "./App.css";
 
@@ -352,25 +345,33 @@ function App() {
     }
   }
 
-  // Stable keydown listener (mounted once) dispatching through a ref so it
-  // always calls the latest closures without re-subscribing every render —
-  // mirrors viewModeRef/typstTextRef/derivedRef above.
-  const commandsRef = useRef({ handleOpen, handleSave, handleSaveAs });
-  commandsRef.current = { handleOpen, handleSave, handleSaveAs };
+  // Dispatched through a ref (not captured directly by the menu-building
+  // effect below) so menu actions always call the latest closures — the
+  // effect only reruns when `recentFiles` changes, but `handleSave` etc.
+  // also close over `filePath`/`fileSpoke`/`viewMode`/... which change far
+  // more often; mirrors viewModeRef/typstTextRef/derivedRef above.
+  const commandsRef = useRef({ handleOpen, handleSave, handleSaveAs, handleExportPdf, handleOpenRecent });
+  commandsRef.current = { handleOpen, handleSave, handleSaveAs, handleExportPdf, handleOpenRecent };
 
+  // Native File menu (Ctrl+O/S/Shift+S accelerators live here now, not in a
+  // DOM keydown listener — the two would double-fire on the same keypress).
+  // Rebuilt whenever the recent-files list changes; see buildAppMenu's doc
+  // comment on why a rebuild (not an in-place update) is fine at this scale.
   useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (!(event.ctrlKey || event.metaKey)) return;
-      const key = event.key.toLowerCase();
-      if (key !== "s" && key !== "o") return;
-      event.preventDefault();
-      if (key === "o") void commandsRef.current.handleOpen();
-      else if (event.shiftKey) void commandsRef.current.handleSaveAs();
-      else void commandsRef.current.handleSave();
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+    let cancelled = false;
+    buildAppMenu(recentFiles, {
+      onOpen: () => void commandsRef.current.handleOpen(),
+      onSave: () => void commandsRef.current.handleSave(),
+      onSaveAs: () => void commandsRef.current.handleSaveAs(),
+      onExportPdf: () => void commandsRef.current.handleExportPdf(),
+      onOpenRecent: (path) => void commandsRef.current.handleOpenRecent(path),
+    })
+      .then((menu) => (cancelled ? undefined : menu.setAsAppMenu()))
+      .catch((err) => setInvokeError(String(err)));
+    return () => {
+      cancelled = true;
+    };
+  }, [recentFiles]);
 
   // Reads whichever view is currently active and returns the canonical
   // PMDoc it represents — parsing via the real Typst compiler (async, Rust)
@@ -452,40 +453,6 @@ function App() {
         <p>WYSIWYG / Typst / Markdown, one Editor Model, one live preview.</p>
         <div className="file-bar">
           <span className="file-title">{titleFor(filePath, dirty)}</span>
-          <button type="button" onClick={() => void handleOpen()}>
-            Open… (Ctrl+O)
-          </button>
-          <button type="button" onClick={() => void handleSave()}>
-            Save (Ctrl+S)
-          </button>
-          <button type="button" onClick={() => void handleSaveAs()}>
-            Save As… (Ctrl+Shift+S)
-          </button>
-          <button type="button" onClick={() => void handleExportPdf()}>
-            Export PDF…
-          </button>
-          {recentFiles.length > 0 && (
-            <label className="recent-files">
-              Recent:
-              <select
-                value=""
-                onChange={(event) => {
-                  const path = event.target.value;
-                  event.target.value = "";
-                  if (path) void handleOpenRecent(path);
-                }}
-              >
-                <option value="" disabled>
-                  Choose a file…
-                </option>
-                {recentFiles.map((path) => (
-                  <option key={path} value={path}>
-                    {basename(path)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
         </div>
         <div className="view-switcher" role="tablist">
           {(["wysiwyg", "typst", "markdown"] as const).map((mode) => (

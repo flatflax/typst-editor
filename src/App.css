@@ -47,22 +47,6 @@
   margin-right: 0.5rem;
 }
 
-.file-bar button,
-.recent-files select {
-  padding: 0.4em 0.9em;
-  border: 1px solid #ccc;
-  border-radius: 6px;
-  background: #fff;
-  cursor: pointer;
-}
-
-.recent-files {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  opacity: 0.85;
-}
-
 .view-switcher {
   display: flex;
   gap: 0.5rem;
@@ -368,9 +352,7 @@
   }
 
   .view-switcher button,
-  .wysiwyg-toolbar button,
-  .file-bar button,
-  .recent-files select {
+  .wysiwyg-toolbar button {
     background: #2f2f2f;
     border-color: #555;
     color: #f6f6f6;
