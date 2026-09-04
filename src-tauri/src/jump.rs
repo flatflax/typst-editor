@@ -66,6 +66,79 @@ mod tests {
         assert_eq!(targets[0].page, 1);
     }
 
+    /// A document mixing every MVP-subset construct plus several
+    /// out-of-subset ones (comments, `#set` rules, labels, term lists, raw
+    /// blocks) — exercises jump sync against realistic, varied content
+    /// rather than single-line fixtures.
+    const MIXED_DOCUMENT: &str = "\
+#set text(font: \"New Computer Modern\", size: 11pt)
+// a comment
+
+= Heading <a-label>
+
+Some paragraph text with *bold* and _italic_.
+
+- 苹果
+  - 子项目
++ 第一步
+
+/ Term: a definition.
+
+`inline code`
+
+```rust
+fn main() {}
+```
+";
+
+    /// `jump_from_cursor` (via `typst-ide`) only anchors to `Text`/`MathText`
+    /// syntax leaves. Comments and `#set` rules are compiler directives with
+    /// zero visual output, so there is nothing on the page to point to —
+    /// this is an inherent property of source-level (non-WYSIWYG) sync, not
+    /// a bug: everything that actually renders (headings, nested/ordered
+    /// lists, term lists, inline code, fenced code blocks, CJK text) maps
+    /// correctly.
+    #[test]
+    fn cursor_sync_covers_rendered_content_but_not_comments_or_directives() {
+        let renders_to_a_position = [
+            "Heading", "bold", "苹果", "子项目", "第一步", "Term", "inline code", "fn main",
+        ];
+        for needle in renders_to_a_position {
+            let offset = MIXED_DOCUMENT.find(needle).unwrap() + 1;
+            let targets = jump_from_cursor(MIXED_DOCUMENT.into(), offset);
+            assert!(!targets.is_empty(), "expected a render position for {needle:?}");
+        }
+
+        let has_no_visual_output = ["a comment", "#set text"];
+        for needle in has_no_visual_output {
+            let offset = MIXED_DOCUMENT.find(needle).unwrap() + 1;
+            let targets = jump_from_cursor(MIXED_DOCUMENT.into(), offset);
+            assert!(targets.is_empty(), "expected no render position for {needle:?}");
+        }
+    }
+
+    #[test]
+    fn click_round_trips_close_to_the_original_offset_for_rendered_content() {
+        for needle in ["Heading", "bold", "苹果", "子项目", "第一步", "Term", "fn main"] {
+            let offset = MIXED_DOCUMENT.find(needle).unwrap() + 1;
+            let targets = jump_from_cursor(MIXED_DOCUMENT.into(), offset);
+            let target = targets.first().unwrap_or_else(|| panic!("no target for {needle:?}"));
+
+            // `target.y_pt` is the exact glyph baseline; clicking precisely
+            // on that boundary is float-rounding-sensitive in the frame
+            // hit-test (`pos.y - size + size` isn't bit-exact to `pos.y`).
+            // A real mouse click always lands inside the glyph's visible
+            // body, a bit above the baseline — simulate that instead of the
+            // mathematical boundary point.
+            let clicked = jump_from_click(MIXED_DOCUMENT.into(), target.x_pt, target.y_pt - 1.0);
+            let clicked = clicked.unwrap_or_else(|| panic!("click found nothing for {needle:?}"));
+            assert!(
+                clicked.abs_diff(offset) <= 4,
+                "{needle:?}: click round-tripped to {clicked}, expected near {offset}"
+            );
+        }
+    }
+
     #[test]
     fn click_in_heading_maps_back_to_source() {
         let targets = jump_from_cursor("= Hello".into(), 3);
