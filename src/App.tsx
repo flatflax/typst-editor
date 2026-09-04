@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import SourceEditor, { type SourceEditorHandle } from "./SourceEditor";
+import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./SourceEditor";
 import { byteToUtf16Offset, utf16ToByteOffset } from "./offsets";
 import "./App.css";
 
@@ -18,10 +18,7 @@ automatically via the real Typst compiler.
 
 const COMPILE_DEBOUNCE_MS = 250;
 
-type CompileDiagnostic = {
-  severity: "error" | "warning";
-  message: string;
-};
+type CompileDiagnostic = EditorDiagnostic;
 
 type CompileResult = {
   svg: string | null;
@@ -118,12 +115,14 @@ function App() {
           initialValue={source}
           onChange={setSource}
           onCursorChange={handleCursorChange}
+          diagnostics={result?.diagnostics}
         />
 
         <div className="preview-pane">
           {result?.diagnostics.map((d, i) => (
             <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
-              {d.severity}: {d.message}
+              {d.severity}
+              {d.line != null ? ` at ${d.line}:${d.column}` : ""}: {d.message}
             </p>
           ))}
 

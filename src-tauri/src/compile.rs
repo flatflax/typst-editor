@@ -4,6 +4,7 @@
 use serde::Serialize;
 use typst::diag::{Severity, SourceDiagnostic};
 use typst::layout::Abs;
+use typst::{World, WorldExt};
 use typst_layout::PagedDocument;
 use typst_svg::SvgOptions;
 
@@ -13,6 +14,12 @@ use crate::typst_world::TauriWorld;
 pub struct CompileDiagnostic {
     severity: &'static str,
     message: String,
+    /// 1-indexed source line/column, when the diagnostic's span resolves to
+    /// a position in the compiled source (absent for detached spans, e.g.
+    /// some global-level errors) — lets the frontend place a gutter/inline
+    /// marker at the exact failing line instead of just listing text.
+    line: Option<usize>,
+    column: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -21,13 +28,20 @@ pub struct CompileResult {
     diagnostics: Vec<CompileDiagnostic>,
 }
 
-fn to_diagnostic(diag: &SourceDiagnostic) -> CompileDiagnostic {
+fn to_diagnostic(world: &TauriWorld, diag: &SourceDiagnostic) -> CompileDiagnostic {
+    let position = world.range(diag.span).and_then(|range| {
+        let source = world.source(world.main()).ok()?;
+        source.lines().byte_to_line_column(range.start)
+    });
+
     CompileDiagnostic {
         severity: match diag.severity {
             Severity::Error => "error",
             Severity::Warning => "warning",
         },
         message: diag.message.to_string(),
+        line: position.map(|(line, _)| line + 1),
+        column: position.map(|(_, column)| column + 1),
     }
 }
 
@@ -37,7 +51,7 @@ pub fn compile_typst(source: String) -> CompileResult {
     let warned = typst::compile::<PagedDocument>(&world);
 
     let mut diagnostics: Vec<CompileDiagnostic> =
-        warned.warnings.iter().map(to_diagnostic).collect();
+        warned.warnings.iter().map(|d| to_diagnostic(&world, d)).collect();
 
     match warned.output {
         Ok(document) => {
@@ -45,7 +59,7 @@ pub fn compile_typst(source: String) -> CompileResult {
             CompileResult { svg: Some(svg), diagnostics }
         }
         Err(errors) => {
-            diagnostics.extend(errors.iter().map(to_diagnostic));
+            diagnostics.extend(errors.iter().map(|d| to_diagnostic(&world, d)));
             CompileResult { svg: None, diagnostics }
         }
     }
@@ -77,5 +91,27 @@ mod tests {
         assert!(result.svg.is_none());
         assert!(!result.diagnostics.is_empty());
         assert_eq!(result.diagnostics[0].severity, "error");
+    }
+
+    #[test]
+    fn diagnostics_resolve_to_the_correct_1_indexed_line_and_column() {
+        let result = compile_typst("= Heading\n\n#unknown_function()".into());
+        assert_eq!(result.diagnostics.len(), 1);
+        let diagnostic = &result.diagnostics[0];
+        assert_eq!(diagnostic.line, Some(3), "message: {}", diagnostic.message);
+        assert_eq!(diagnostic.column, Some(2), "message: {}", diagnostic.message);
+    }
+
+    #[test]
+    fn diagnostics_resolve_correctly_past_cjk_text_on_earlier_lines() {
+        // A regression guard for the earlier UTF-16/UTF-8 offset bug (see
+        // src/offsets.ts): line/column here must come from typst-syntax's
+        // own character-counting (Lines::byte_to_line_column), not from
+        // anything that could conflate UTF-8 bytes with UTF-16 units.
+        let result = compile_typst("= 一级标题\n\n#unknown_function()".into());
+        assert_eq!(result.diagnostics.len(), 1);
+        let diagnostic = &result.diagnostics[0];
+        assert_eq!(diagnostic.line, Some(3), "message: {}", diagnostic.message);
+        assert_eq!(diagnostic.column, Some(2), "message: {}", diagnostic.message);
     }
 }

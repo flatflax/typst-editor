@@ -11,6 +11,9 @@ importers:
       '@codemirror/commands':
         specifier: ^6.11.0
         version: 6.11.0
+      '@codemirror/lint':
+        specifier: ^6.9.7
+        version: 6.9.7
       '@codemirror/state':
         specifier: ^6.7.2
         version: 6.7.2
