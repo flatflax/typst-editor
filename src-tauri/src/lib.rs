@@ -1,7 +1,9 @@
+mod ast;
 mod compile;
 mod jump;
 mod typst_world;
 
+use ast::parse_typst_ast;
 use compile::compile_typst;
 use jump::{jump_from_click, jump_from_cursor};
 
@@ -12,7 +14,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             compile_typst,
             jump_from_click,
-            jump_from_cursor
+            jump_from_cursor,
+            parse_typst_ast
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

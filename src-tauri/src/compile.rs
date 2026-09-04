@@ -102,6 +102,35 @@ mod tests {
         assert_eq!(diagnostic.column, Some(2), "message: {}", diagnostic.message);
     }
 
+    /// Confirms the premise behind "typst_set is trivially stable under
+    /// round-trip by construction" (plan.md M3): preserving a `#set` rule
+    /// verbatim (src-tauri/src/ast.rs, src/typstAst.ts) only matters because
+    /// it actually changes the compiled output. This proves that half —
+    /// that dropping the rule (what would happen without this feature)
+    /// visibly changes the real Typst compiler's rendered SVG — using
+    /// `parse_typst_ast` to confirm the rule is recognized in the first
+    /// place.
+    #[test]
+    fn set_rule_settings_have_a_real_visual_effect_on_the_compiled_output() {
+        use crate::ast::{TypstSet, parse_typst_ast};
+
+        let with_set = "#set text(size: 30pt)\n\nHello";
+        let without_set = "Hello";
+
+        let doc = parse_typst_ast(with_set.into());
+        assert_eq!(
+            doc.settings,
+            vec![TypstSet { function: "text".into(), raw: "#set text(size: 30pt)".into() }]
+        );
+
+        let with_set_svg = compile_typst(with_set.into()).svg.expect("valid source");
+        let without_set_svg = compile_typst(without_set.into()).svg.expect("valid source");
+        assert_ne!(
+            with_set_svg, without_set_svg,
+            "expected #set text(size: ...) to change the rendered output"
+        );
+    }
+
     #[test]
     fn diagnostics_resolve_correctly_past_cjk_text_on_earlier_lines() {
         // A regression guard for the earlier UTF-16/UTF-8 offset bug (see
