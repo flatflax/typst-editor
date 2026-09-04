@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { basename, defaultFileName, spokeForPath, titleFor } from "./fileIO";
+import { basename, defaultFileName, spokeForPath, titleFor, withPdfExtension } from "./fileIO";
 
 describe("spokeForPath", () => {
   it("selects the markdown spoke for .md and .markdown", () => {
@@ -56,5 +56,20 @@ describe("titleFor", () => {
 
   it("shows a clean basename with no marker", () => {
     expect(titleFor("/a/b/doc.typ", false)).toBe("doc.typ");
+  });
+});
+
+describe("withPdfExtension", () => {
+  it("defaults to document.pdf with no open file", () => {
+    expect(withPdfExtension(null)).toBe("document.pdf");
+  });
+
+  it("swaps the extension while keeping the directory", () => {
+    expect(withPdfExtension("/a/b/doc.typ")).toBe("/a/b/doc.pdf");
+    expect(withPdfExtension("notes.md")).toBe("notes.pdf");
+  });
+
+  it("handles Windows-style paths", () => {
+    expect(withPdfExtension("C:\\Users\\me\\doc.typ")).toBe("C:/Users/me/doc.pdf");
   });
 });

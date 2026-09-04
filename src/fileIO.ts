@@ -34,3 +34,13 @@ export function titleFor(path: string | null, dirty: boolean): string {
   const name = path == null ? "Untitled" : basename(path);
   return dirty ? `${name} •` : name;
 }
+
+/** Default path offered by the PDF export Save dialog: same directory and
+ * basename as the open file with its extension swapped to `.pdf`, or a
+ * generic name when no file is open yet (plan.md M8). */
+export function withPdfExtension(path: string | null): string {
+  if (path == null) return "document.pdf";
+  const normalized = path.replace(/\\/g, "/");
+  const withoutExtension = normalized.replace(/\.[^./]+$/, "");
+  return `${withoutExtension}.pdf`;
+}

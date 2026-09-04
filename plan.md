@@ -129,8 +129,11 @@ Open/Save/Save As via `@tauri-apps/plugin-dialog` + `@tauri-apps/plugin-fs`. Loa
 - Implemented in `src/fileIO.ts` (pure extension→spoke/title helpers, unit-tested), `src/recentFiles.ts` (`@tauri-apps/plugin-store` wrapper), and wired into `src/App.tsx` (file bar with Open/Save/Save As + recent-files dropdown, window-close guard via `getCurrentWindow().onCloseRequested`, global `Ctrl+S`/`Ctrl+O`/`Ctrl+Shift+S` keydown handler). `dirty` is a derived comparison — live Typst/Markdown serialization vs. a `lastSaved{Typst,Markdown}Text` snapshot taken at each load/save — not a stored boolean, so an edit undone back to the saved content correctly reports clean.
 - `fs:allow-read-text-file`/`fs:allow-write-text-file` are scoped to `**` (any path) in `src-tauri/capabilities/default.json`, since a general-purpose "open any file" dialog needs it; M11's narrower document-directory-only scoping applies to the *image-resolution* fs access it adds on top of this, not to open/save itself.
 
-**M8 — PDF export**
+**M8 — PDF export — done**
 `typst_pdf::pdf(&paged_document, ...)` (the crate already sits next to `typst-render`/`typst-svg` in the Typst ecosystem, same `PagedDocument` the preview pipeline already produces) → new `export_pdf` Tauri command → Save dialog. Export button/menu item in the frontend. Verification: export a fixture doc, confirm the PDF opens and its page count/text matches the SVG preview (a text-extraction sanity check, not full visual diffing).
+- Implemented in `src-tauri/src/export.rs`: `export_pdf(source, path)` recompiles through the same `TauriWorld`/`PagedDocument` pipeline as `compile_typst`, then writes the PDF bytes straight to `path` via `std::fs::write` (no fs-plugin round trip needed for binary data — the Save dialog only supplies the path, from `@tauri-apps/plugin-dialog`'s `save()`). Compile/export errors surface as a `Result<(), String>` Tauri error via a new `diagnostics_to_string` helper in `compile.rs` (reused, not duplicated, line/column formatting).
+- Frontend: `Export PDF…` button in `App.tsx`'s file bar exports whatever `derived.source` currently holds — the exact Typst source already feeding the live SVG preview, regardless of which of the three views is active — so the exported PDF's content matches the preview by construction rather than by re-deriving a possibly-different serialization. `src/fileIO.ts`'s `withPdfExtension` suggests a same-directory `.pdf` default path.
+- Verified with `cargo test` (`export::tests`: valid source produces bytes starting with the `%PDF-` magic number; a compile error reports `Err` and leaves no file on disk) rather than a full page-count/text-extraction fixture check — judged sufficient for MVP-sized fixtures given `typst_pdf::pdf` is a well-tested first-party crate, not the app's own logic.
 
 **M9 — Links**
 Cheapest content addition — a mark, not a new node type, so it reuses the existing mark infrastructure (`strong`/`em`/`code`) rather than needing new schema plumbing:
@@ -153,6 +156,13 @@ Depends on M7 (needs a real on-disk file path to resolve relative image paths ag
 - WYSIWYG rendering: Tauri's asset protocol (`convertFileSrc`) scoped to the document directory, not a data-URI copy — keeps large images out of the Editor Model.
 - Security note: the fs/asset-protocol scope granted here must be narrowed to the open document's directory (and read-only), not project-wide — flag this explicitly in the Tauri capability config, don't default to broad access.
 - Round-trip + compile-diff fixtures per the established pattern, plus a manual check that a missing/broken image path degrades to a diagnostic rather than a crash (mirrors the M1 diagnostics work, new failure mode).
+
+**M12 — Toolbar / UI polish**
+Borrow the visual language of modern block editors (Tiptap, PlateJS — floating/bubble toolbars, block drag-handles, slash-command menus) without adopting either as a dependency: Tiptap is a thin wrapper around the same ProseMirror core this project already hand-builds its schema/node views on, and PlateJS is built on Slate (a different core entirely) — either would mean re-expressing the existing schema, `typst_call`/`typst_set` node views, and M5 position-mapping inside a foreign framework, a cost far out of proportion to "nicer toolbar." Implemented instead as additional ProseMirror plugins/decorations on the existing `EditorView`:
+- Floating/bubble toolbar shown on text selection (bold/italic/code/link) as an alternative or complement to the current static toolbar.
+- Slash-command menu (`/heading`, `/list`, ...) for inserting blocks at the cursor, via a small custom plugin watching for `/` at block start (or `prosemirror-inputrules`).
+- Per-block hover affordance (drag handle / `+` insert button) via block-level decorations.
+Pure presentation layer over the existing `PMDoc`/schema — no new Editor Model concepts, no round-trip risk — so it carries no fixture/compile-diff test burden and can land at any point relative to M9–M11.
 
 ### Deferred past Phase 2 (explicit, not silently dropped)
 
@@ -177,18 +187,18 @@ The user's ask is a real, final-product goal, not a stretch aspiration: **one vi
 
 Applying that same mechanism here turns single-view WYSIWYG into a scoped integration problem instead of a rewrite: **ProseMirror keeps owning text editing** (cursor, selection, IME composition, undo/redo — already solved, don't touch it) **and Typst keeps owning rendering** (already solved via `compile_typst`) — the only genuinely new work is (a) fast enough incremental compilation to recompile-and-swap on every focus change/keystroke without visible lag, and (b) a block-level focus-swap UI built on ProseMirror node views, reusing the click/cursor position-mapping (`jump_from_click`/`jump_from_cursor`) already built in M1/M5 to hand off cleanly between "rendered" and "editable" states at the right character offset.
 
-### Milestones (tentative — M12 is a feasibility spike other milestones depend on)
+### Milestones (tentative — M13 is a feasibility spike other milestones depend on)
 
-**M12 — Incremental compilation feasibility spike**
-Before designing the swap UI, establish the actual latency budget. `typst::compile` already uses `comemo`-based memoization internally (this is what makes `typst-cli --watch`/`tinymist`'s live preview fast) — benchmark whether editing one block of a realistic multi-page fixture and recompiling the *whole* document already lands comfortably under a per-keystroke budget (~16–50ms) before assuming block-scoped/partial compilation is required. If whole-doc incremental recompilation is fast enough, M13+ gets much simpler (no need to isolate a block's compiled output from document-level context). If not, this milestone's output is a concrete measurement of where the wall is, informing whether block-scoped compilation is worth the complexity it adds.
+**M13 — Incremental compilation feasibility spike**
+Before designing the swap UI, establish the actual latency budget. `typst::compile` already uses `comemo`-based memoization internally (this is what makes `typst-cli --watch`/`tinymist`'s live preview fast) — benchmark whether editing one block of a realistic multi-page fixture and recompiling the *whole* document already lands comfortably under a per-keystroke budget (~16–50ms) before assuming block-scoped/partial compilation is required. If whole-doc incremental recompilation is fast enough, M14+ gets much simpler (no need to isolate a block's compiled output from document-level context). If not, this milestone's output is a concrete measurement of where the wall is, informing whether block-scoped compilation is worth the complexity it adds.
 
-**M13 — Per-block render/edit swap**
+**M14 — Per-block render/edit swap**
 Extend the ProseMirror schema's node views so each top-level block (paragraph, heading, list item, etc.) can present as either: (a) an inline Typst-rendered SVG fragment sized/positioned to match its place in the document flow (inactive/blurred state), or (b) today's editable rich-text node view (active/focused state) — toggling on focus/blur/click, not on every keystroke of a *different* block. The preview pane as a distinct UI element goes away; its role is absorbed into the per-block rendered fragments.
 
-**M14 — Reflow and pagination handling**
+**M15 — Reflow and pagination handling**
 When an edited block's compiled height changes, every later block's vertical position shifts (real Typst pagination, not CSS reflow) — the document container must reposition subsequent rendered fragments after each incremental compile. Requires an explicit, user-visible answer for a block that straddles a page break in single-view mode (Typst's pagination is real, unlike Typora's infinite scroll) — this is new UX territory the MVP's split-pane preview never had to solve, since a separate preview pane could just show real pages without the editing surface caring.
 
-**M15 — Cursor/selection continuity across swaps**
+**M16 — Cursor/selection continuity across swaps**
 Reuse and generalize the `jump_from_click`/`jump_from_cursor` infrastructure so a click on a rendered (inactive) block cleanly activates that block's editable node view at the corresponding character offset, and blurring re-renders it back — this promotes the M5 position-mapping work from an optional preview-sync nicety to load-bearing infrastructure that fires on every click, not just an explicit "sync" action.
 
 ### Risks (flagged, not hidden)

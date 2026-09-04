@@ -2,7 +2,7 @@
 //! the real Typst engine, and returns a merged SVG preview plus diagnostics.
 
 use serde::Serialize;
-use typst::diag::{Severity, SourceDiagnostic};
+use typst::diag::{EcoVec, Severity, SourceDiagnostic};
 use typst::layout::Abs;
 use typst::{World, WorldExt};
 use typst_layout::PagedDocument;
@@ -43,6 +43,25 @@ fn to_diagnostic(world: &TauriWorld, diag: &SourceDiagnostic) -> CompileDiagnost
         line: position.map(|(line, _)| line + 1),
         column: position.map(|(_, column)| column + 1),
     }
+}
+
+/// Formats compile/export errors as `"line:column: message"` lines (falling
+/// back to just the message for spans that don't resolve to a position),
+/// joined with newlines — used by `export_pdf` (export.rs) to surface real
+/// Typst diagnostics through a plain `Result<(), String>` Tauri error rather
+/// than duplicating `CompileDiagnostic`'s line/column plumbing there.
+pub(crate) fn diagnostics_to_string(world: &TauriWorld, diags: &EcoVec<SourceDiagnostic>) -> String {
+    diags
+        .iter()
+        .map(|d| {
+            let diag = to_diagnostic(world, d);
+            match (diag.line, diag.column) {
+                (Some(line), Some(column)) => format!("{line}:{column}: {}", diag.message),
+                _ => diag.message,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[tauri::command]

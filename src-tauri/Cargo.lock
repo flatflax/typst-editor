@@ -1326,6 +1326,9 @@ name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "fnv"
@@ -1977,6 +1980,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hayro-write"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0b3db92c4917aad24ff30d61413a9a7509ae88b27aee1ae34eff881e1d2723a"
+dependencies = [
+ "flate2",
+ "hayro-syntax",
+ "pdf-writer",
+]
+
+[[package]]
 name = "heck"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2624,6 +2638,53 @@ dependencies = [
  "bitflags 2.13.1",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "krilla"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27da593198b20eeba65caeb73c2bbeec3e53ab08fa549898312ce81c4fce5e33"
+dependencies = [
+ "base64 0.22.1",
+ "bumpalo",
+ "comemo",
+ "flate2",
+ "float-cmp",
+ "gif",
+ "hayro-write",
+ "image-webp",
+ "imagesize",
+ "indexmap 2.14.1",
+ "pdf-writer",
+ "png 0.18.1",
+ "rayon",
+ "rustc-hash",
+ "rustybuzz",
+ "siphasher",
+ "skrifa",
+ "smallvec",
+ "subsetter",
+ "tiny-skia-path",
+ "xmp-writer",
+ "yoke",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "krilla-svg"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1237d7c37b16ca9fbc2e72dde13a10d321f9a44aceee35c062bc0a43bfc7ce16"
+dependencies = [
+ "flate2",
+ "fontdb",
+ "krilla",
+ "resvg",
+ "skrifa",
+ "smallvec",
+ "tiny-skia",
+ "usvg",
 ]
 
 [[package]]
@@ -3279,6 +3340,18 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pdf-writer"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753"
+dependencies = [
+ "bitflags 2.13.1",
+ "itoa",
+ "memchr",
+ "ryu",
+]
 
 [[package]]
 name = "peniko"
@@ -4453,6 +4526,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "subsetter"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38803281d1c23166c5ebcb455439a5d2afe711cc909cf88af72448c297756ad6"
+dependencies = [
+ "kurbo",
+ "rustc-hash",
+ "skrifa",
+ "write-fonts",
+]
+
+[[package]]
 name = "svgtypes"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5422,6 +5507,7 @@ dependencies = [
  "typst-ide",
  "typst-kit",
  "typst-layout",
+ "typst-pdf",
  "typst-render",
  "typst-svg",
  "typst-syntax",
@@ -5625,6 +5711,35 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "typst-pdf"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3aef841ff3e606542f3057ce5dd0ff264d53a439e00ed4a91ec00ec8568b3b7f"
+dependencies = [
+ "az",
+ "bytemuck",
+ "codex",
+ "comemo",
+ "ecow",
+ "flate2",
+ "image",
+ "indexmap 2.14.1",
+ "infer",
+ "krilla",
+ "krilla-svg",
+ "rustc-hash",
+ "serde",
+ "smallvec",
+ "typst-assets",
+ "typst-layout",
+ "typst-library",
+ "typst-macros",
+ "typst-syntax",
+ "typst-timing",
+ "typst-utils",
 ]
 
 [[package]]
@@ -6793,6 +6908,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "write-fonts"
+version = "0.48.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb731d4c4d93eacc69a1ad2f270f905788a98e4a3438267bcafbe08d3431c8d8"
+dependencies = [
+ "font-types",
+ "indexmap 2.14.1",
+ "kurbo",
+ "log",
+ "read-fonts",
+]
+
+[[package]]
 name = "write16"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6874,6 +7002,12 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
+
+[[package]]
+name = "xmp-writer"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 
 [[package]]
 name = "yaml-rust"

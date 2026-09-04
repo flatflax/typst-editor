@@ -16,7 +16,7 @@ import {
   type PositionMapEntry,
 } from "./typstAst";
 import { markdownToDoc, docToMarkdown } from "./markdown";
-import { basename, defaultFileName, spokeForPath, titleFor, type Spoke } from "./fileIO";
+import { basename, defaultFileName, spokeForPath, titleFor, withPdfExtension, type Spoke } from "./fileIO";
 import { addRecentFile, getRecentFiles, removeRecentFile } from "./recentFiles";
 import type { PMDoc } from "./schema";
 import "./App.css";
@@ -315,6 +315,25 @@ function App() {
     }
   }
 
+  // Exports whatever the preview pane currently shows (derived.source, the
+  // same Typst source fed to compile_typst regardless of which view is
+  // active) to PDF — matches plan.md M8's verification goal that the
+  // exported PDF's content agrees with the live SVG preview by construction,
+  // rather than re-deriving a possibly different serialization.
+  async function handleExportPdf() {
+    try {
+      const target = await save({
+        defaultPath: withPdfExtension(filePath),
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      });
+      if (!target) return;
+      await invoke("export_pdf", { source: derivedRef.current.source, path: target });
+      setInvokeError(null);
+    } catch (err) {
+      setInvokeError(String(err));
+    }
+  }
+
   // Stable keydown listener (mounted once) dispatching through a ref so it
   // always calls the latest closures without re-subscribing every render —
   // mirrors viewModeRef/typstTextRef/derivedRef above.
@@ -414,6 +433,9 @@ function App() {
           </button>
           <button type="button" onClick={() => void handleSaveAs()}>
             Save As… (Ctrl+Shift+S)
+          </button>
+          <button type="button" onClick={() => void handleExportPdf()}>
+            Export PDF…
           </button>
           {recentFiles.length > 0 && (
             <label className="recent-files">
