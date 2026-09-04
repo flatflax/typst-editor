@@ -131,6 +131,77 @@ mod tests {
         );
     }
 
+    // Same source as ast::tests::MIXED_DOCUMENT (duplicated here rather than
+    // shared — `CompileResult`'s fields are private, so the compile-diff and
+    // perf checks for it have to live in this module, and Rust's per-file
+    // `#[cfg(test)] mod tests` visibility makes cross-file test-only sharing
+    // more trouble than a few duplicated lines are worth).
+    const MIXED_DOCUMENT: &str = "\
+#set text(size: 11pt)
+
+= Report
+
+Some *bold* and _italic_ and `code` text.
+
+- Apple
+- Banana
+  - Nested one
+  - Nested two
+
++ Step one
++ Step two
+
+#line(length: 100%)
+
+Inline call: #emph[hi] here.
+
+$ x^2 $
+";
+
+    /// Compile-diff half of the M6 gate: the mixed document (real headings,
+    /// marks, lists, a call, a `#set`, *and* an unsupported math block all
+    /// together) must actually compile through the real Typst engine, not
+    /// just parse — proving `unsupported_block`'s verbatim raw text is still
+    /// syntactically valid Typst in context, not just opaque to our parser.
+    #[test]
+    fn mixed_document_compiles_successfully() {
+        let result = compile_typst(MIXED_DOCUMENT.into());
+        assert!(
+            result.diagnostics.iter().all(|d| d.severity != "error"),
+            "unexpected error diagnostics: {:?}",
+            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(result.svg.is_some());
+    }
+
+    /// Basic perf sanity check (plan.md M6): full recompilation must stay
+    /// comfortably under the frontend's debounce window (250ms,
+    /// COMPILE_DEBOUNCE_MS in App.tsx) for an MVP-sized document, so
+    /// recompile-per-keystroke doesn't feel laggy. Warms up first: the
+    /// *very first* compile in a process pays a one-time system-font-scan
+    /// cost (see typst_world.rs's `LazyLock` note) that has nothing to do
+    /// with per-keystroke recompile speed — real usage only pays that once
+    /// per app launch, not once per edit. Generous margin on top of that
+    /// (also covers this test binary's own parallel-test CPU contention) —
+    /// a regression guard against an accidental perf cliff, not a tight
+    /// benchmark.
+    #[test]
+    fn compiling_an_mvp_sized_document_is_well_under_the_debounce_window() {
+        use std::time::Instant;
+
+        compile_typst(MIXED_DOCUMENT.into()); // warm up the font-book cache
+
+        let start = Instant::now();
+        let result = compile_typst(MIXED_DOCUMENT.into());
+        let elapsed = start.elapsed();
+
+        assert!(result.svg.is_some());
+        assert!(
+            elapsed.as_millis() < 250,
+            "compile_typst took {elapsed:?} after warmup, expected well under the 250ms debounce window"
+        );
+    }
+
     #[test]
     fn diagnostics_resolve_correctly_past_cjk_text_on_earlier_lines() {
         // A regression guard for the earlier UTF-16/UTF-8 offset bug (see

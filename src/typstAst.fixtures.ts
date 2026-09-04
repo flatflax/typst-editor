@@ -218,6 +218,122 @@ export const unsupportedBlockSandwich: TypstAstFixture = {
   expected: "Before.\n\n$ x^2 $\n\nAfter.",
 };
 
+// See ast::tests::mixed_document_combines_every_mvp_construct (plan.md M6:
+// "extend M3/M4 fixtures to cover mixed content and at least one
+// unsupported_block case") — every MVP construct in one document. Also
+// compiled successfully through the real Typst engine in
+// compile::tests::mixed_document_compiles_successfully, on the Rust side.
+export const mixed: TypstAstFixture = {
+  source: `#set text(size: 11pt)
+
+= Report
+
+Some *bold* and _italic_ and \`code\` text.
+
+- Apple
+- Banana
+  - Nested one
+  - Nested two
+
++ Step one
++ Step two
+
+#line(length: 100%)
+
+Inline call: #emph[hi] here.
+
+$ x^2 $
+`,
+  ast: {
+    settings: [{ function: "text", raw: "#set text(size: 11pt)" }],
+    content: [
+      { type: "heading", level: 1, children: [{ type: "text", text: "Report", marks: [] }] },
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", text: "Some", marks: [] },
+          { type: "text", text: " ", marks: [] },
+          { type: "text", text: "bold", marks: ["strong"] },
+          { type: "text", text: " ", marks: [] },
+          { type: "text", text: "and", marks: [] },
+          { type: "text", text: " ", marks: [] },
+          { type: "text", text: "italic", marks: ["em"] },
+          { type: "text", text: " ", marks: [] },
+          { type: "text", text: "and", marks: [] },
+          { type: "text", text: " ", marks: [] },
+          { type: "text", text: "code", marks: ["code"] },
+          { type: "text", text: " ", marks: [] },
+          { type: "text", text: "text.", marks: [] },
+        ],
+      },
+      {
+        type: "bullet_list",
+        items: [
+          [{ type: "paragraph", children: [{ type: "text", text: "Apple", marks: [] }] }],
+          [
+            {
+              type: "paragraph",
+              children: [
+                { type: "text", text: "Banana", marks: [] },
+                { type: "text", text: " ", marks: [] },
+              ],
+            },
+            {
+              type: "bullet_list",
+              items: [
+                [
+                  {
+                    type: "paragraph",
+                    children: [{ type: "text", text: "Nested one", marks: [] }],
+                  },
+                ],
+                [
+                  {
+                    type: "paragraph",
+                    children: [{ type: "text", text: "Nested two", marks: [] }],
+                  },
+                ],
+              ],
+            },
+          ],
+        ],
+      },
+      {
+        type: "ordered_list",
+        start: 1,
+        items: [
+          [{ type: "paragraph", children: [{ type: "text", text: "Step one", marks: [] }] }],
+          [{ type: "paragraph", children: [{ type: "text", text: "Step two", marks: [] }] }],
+        ],
+      },
+      { type: "typst_call", name: "line", raw: "#line(length: 100%)" },
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", text: "Inline call", marks: [] },
+          { type: "text", text: ":", marks: [] },
+          { type: "text", text: " ", marks: [] },
+          { type: "typst_call", name: "emph", raw: "#emph[hi]" },
+          { type: "text", text: " ", marks: [] },
+          { type: "text", text: "here.", marks: [] },
+        ],
+      },
+      { type: "unsupported_block", raw: "$ x^2 $\n" },
+    ],
+  },
+  // Not byte-identical to `source`: `+` markers canonicalize to explicit
+  // "1."/"2." (see pmDocToTypst's serializeList), and the trailing space
+  // after "Banana" is the mapped-back newline that separated it from the
+  // nested list in the original source (a single in-paragraph newline maps
+  // to a literal space — see ast.rs's flatten_node doc comment). Still a
+  // stable fixed point, and (per mixed_document_compiles_successfully on
+  // the Rust side) still compiles the same document either way.
+  expected:
+    "#set text(size: 11pt)\n\n= Report\n\nSome *bold* and _italic_ and `code` text." +
+    "\n\n- Apple\n- Banana \n  - Nested one\n  - Nested two\n\n1. Step one\n2. Step two" +
+    "\n\n#line(length: 100%)\n\nInline call: #emph[hi] here.\n\n$ x^2 $\n",
+};
+
 export const fixtures = {
   headings,
   headingLevel4Unsupported,
@@ -230,4 +346,5 @@ export const fixtures = {
   typstCallInline,
   typstSet,
   unsupportedBlockSandwich,
+  mixed,
 };

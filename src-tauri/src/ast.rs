@@ -563,4 +563,150 @@ mod tests {
             ]
         );
     }
+
+    /// A single document exercising every MVP-subset construct at once
+    /// (plan.md M6: "extend M3/M4 fixtures to cover mixed content and at
+    /// least one unsupported_block case") — headings, marks, nested and
+    /// ordered lists, a block and an inline `typst_call`, a top-level
+    /// `#set`, and a math equation as the `unsupported_block`. Mirrored by
+    /// the `mixed` fixture in src/typstAst.fixtures.ts (same source string)
+    /// and by src/markdown.test.ts's markdown-side equivalent.
+    const MIXED_DOCUMENT: &str = "\
+#set text(size: 11pt)
+
+= Report
+
+Some *bold* and _italic_ and `code` text.
+
+- Apple
+- Banana
+  - Nested one
+  - Nested two
+
++ Step one
++ Step two
+
+#line(length: 100%)
+
+Inline call: #emph[hi] here.
+
+$ x^2 $
+";
+
+    #[test]
+    fn mixed_document_combines_every_mvp_construct() {
+        let doc = parse(MIXED_DOCUMENT);
+        assert_eq!(
+            doc,
+            AstDocument {
+                settings: vec![TypstSet {
+                    function: "text".into(),
+                    raw: "#set text(size: 11pt)".into(),
+                }],
+                content: vec![
+                    AstBlock::Heading {
+                        level: 1,
+                        children: vec![AstInline::Text { text: "Report".into(), marks: vec![] }],
+                    },
+                    AstBlock::Paragraph {
+                        children: vec![
+                            AstInline::Text { text: "Some".into(), marks: vec![] },
+                            AstInline::Text { text: " ".into(), marks: vec![] },
+                            AstInline::Text {
+                                text: "bold".into(),
+                                marks: vec!["strong".into()],
+                            },
+                            AstInline::Text { text: " ".into(), marks: vec![] },
+                            AstInline::Text { text: "and".into(), marks: vec![] },
+                            AstInline::Text { text: " ".into(), marks: vec![] },
+                            AstInline::Text { text: "italic".into(), marks: vec!["em".into()] },
+                            AstInline::Text { text: " ".into(), marks: vec![] },
+                            AstInline::Text { text: "and".into(), marks: vec![] },
+                            AstInline::Text { text: " ".into(), marks: vec![] },
+                            AstInline::Text {
+                                text: "code".into(),
+                                marks: vec!["code".into()],
+                            },
+                            AstInline::Text { text: " ".into(), marks: vec![] },
+                            AstInline::Text { text: "text.".into(), marks: vec![] },
+                        ],
+                    },
+                    AstBlock::BulletList {
+                        items: vec![
+                            vec![AstBlock::Paragraph {
+                                children: vec![AstInline::Text {
+                                    text: "Apple".into(),
+                                    marks: vec![],
+                                }],
+                            }],
+                            vec![
+                                AstBlock::Paragraph {
+                                    children: vec![
+                                        AstInline::Text { text: "Banana".into(), marks: vec![] },
+                                        AstInline::Text { text: " ".into(), marks: vec![] },
+                                    ],
+                                },
+                                AstBlock::BulletList {
+                                    items: vec![
+                                        vec![AstBlock::Paragraph {
+                                            children: vec![AstInline::Text {
+                                                text: "Nested one".into(),
+                                                marks: vec![],
+                                            }],
+                                        }],
+                                        vec![AstBlock::Paragraph {
+                                            children: vec![AstInline::Text {
+                                                text: "Nested two".into(),
+                                                marks: vec![],
+                                            }],
+                                        }],
+                                    ],
+                                },
+                            ],
+                        ],
+                    },
+                    AstBlock::OrderedList {
+                        start: 1,
+                        items: vec![
+                            vec![AstBlock::Paragraph {
+                                children: vec![AstInline::Text {
+                                    text: "Step one".into(),
+                                    marks: vec![],
+                                }],
+                            }],
+                            vec![AstBlock::Paragraph {
+                                children: vec![AstInline::Text {
+                                    text: "Step two".into(),
+                                    marks: vec![],
+                                }],
+                            }],
+                        ],
+                    },
+                    AstBlock::TypstCall {
+                        name: "line".into(),
+                        raw: "#line(length: 100%)".into(),
+                    },
+                    AstBlock::Paragraph {
+                        children: vec![
+                            AstInline::Text { text: "Inline call".into(), marks: vec![] },
+                            AstInline::Text { text: ":".into(), marks: vec![] },
+                            AstInline::Text { text: " ".into(), marks: vec![] },
+                            AstInline::TypstCall {
+                                name: "emph".into(),
+                                raw: "#emph[hi]".into(),
+                            },
+                            AstInline::Text { text: " ".into(), marks: vec![] },
+                            AstInline::Text { text: "here.".into(), marks: vec![] },
+                        ],
+                    },
+                    AstBlock::UnsupportedBlock { raw: "$ x^2 $\n".into() },
+                ],
+            }
+        );
+    }
+
+    // See compile.rs's own copy of this same source (private CompileResult
+    // fields mean the compile-diff + perf tests for it have to live there)
+    // for mixed_document_compiles_successfully and
+    // compiling_an_mvp_sized_document_is_well_under_the_debounce_window.
 }

@@ -107,7 +107,14 @@ describe("markdown round trip", () => {
     const { doc, regenerated } = assertStableRoundTrip("Before.\n\n> quoted\n\nAfter.");
     expect(doc.child(1).type).toBe(schema.nodes.unsupported_block);
     expect(doc.child(1).attrs.raw).toBe("> quoted");
-    expect(regenerated).toBe("Before.\n\n> quoted\n\nAfter.");
+    // Re-emitted as a ```typst-raw``` fence (not the original blockquote
+    // syntax verbatim) — deliberately: see markdown.ts's header comment on
+    // why unsupported_block can't just pass its raw text through as plain
+    // text (arbitrary content can silently reparse as an ordinary supported
+    // paragraph instead of staying flagged opaque). Still recognized as the
+    // same unsupported_block on the next parse, which is what "stable"
+    // means here — assertStableRoundTrip already checked that above.
+    expect(regenerated).toBe("Before.\n\n```typst-raw\n> quoted\n```\n\nAfter.");
   });
 
   it("a fenced code block without our special lang tags is unsupported", () => {
@@ -146,5 +153,43 @@ describe("markdown round trip", () => {
     const firstItem = doc.child(0).child(0);
     expect(firstItem.childCount).toBe(1);
     expect(firstItem.child(0).type).toBe(schema.nodes.unsupported_block);
+  });
+
+  // Every MVP construct in one document (plan.md M6: "extend M3/M4 fixtures
+  // to cover mixed content and at least one unsupported_block case") — the
+  // Markdown-side counterpart to ast.rs's MIXED_DOCUMENT.
+  it("a mixed document combining every construct round-trips stably", () => {
+    const source =
+      "```typst-set\n#set text(size: 11pt)\n```\n\n" +
+      "# Report\n\n" +
+      "Some **bold** and _italic_ and `code` text.\n\n" +
+      "- Apple\n- Banana\n  - Nested one\n  - Nested two\n\n" +
+      "1. Step one\n2. Step two\n\n" +
+      "```typst-call\n#line(length: 100%)\n```\n\n" +
+      "Inline call: `#emph[hi]` here.\n\n" +
+      "> A blockquote, outside the MVP subset.";
+    const { doc } = assertStableRoundTrip(source);
+
+    expect(doc.attrs.settings).toEqual([{ function: "text", raw: "#set text(size: 11pt)" }]);
+    expect(doc.child(0).type).toBe(schema.nodes.heading);
+    expect(doc.child(1).type).toBe(schema.nodes.paragraph);
+    expect(doc.child(2).type).toBe(schema.nodes.bullet_list);
+    expect(doc.child(3).type).toBe(schema.nodes.ordered_list);
+    expect(doc.child(4).type).toBe(schema.nodes.typst_call);
+    let hasInlineCall = false;
+    doc.child(5).forEach((n) => {
+      if (n.type === schema.nodes.typst_call_inline) hasInlineCall = true;
+    });
+    expect(hasInlineCall).toBe(true);
+    expect(doc.child(6).type).toBe(schema.nodes.unsupported_block);
+
+    // Reaches the same downstream Typst source the compile-diff proof in
+    // ast::tests::mixed_document_compiles_successfully already compiles.
+    expect(pmDocToTypst(doc)).toBe(
+      "#set text(size: 11pt)\n\n= Report\n\nSome *bold* and _italic_ and `code` text." +
+        "\n\n- Apple\n- Banana\n  - Nested one\n  - Nested two\n\n1. Step one\n2. Step two" +
+        "\n\n#line(length: 100%)\n\nInline call: #emph[hi] here." +
+        "\n\n> A blockquote, outside the MVP subset.",
+    );
   });
 });

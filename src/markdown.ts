@@ -3,8 +3,9 @@
 // language boundary to cross, so `mdastToDoc`/`pmDocToMdast` map the real
 // `mdast` tree straight to/from `PMDoc`, with no separate pruned-JSON layer.
 //
-// Two encoding conventions carry the Typst-only node kinds through Markdown,
-// per plan.md's "`#` function-call support" / "`#set` rule support":
+// Three encoding conventions carry the Typst-only node kinds through
+// Markdown, per plan.md's "`#` function-call support" / "`#set` rule
+// support":
 //   - `typst_call` (block form) / a top-level `#set` rule <-> a fenced code
 //     block tagged ```typst-call``` / ```typst-set``` containing the raw
 //     Typst text verbatim.
@@ -14,10 +15,18 @@
 //     literal `#` gets reinterpreted as a call chip on the next parse. This
 //     never loses text (worst case it's mis-categorized, not dropped), and
 //     genuine inline code starting with `#` is rare enough to accept for MVP.
+//   - `unsupported_block` <-> a fenced code block tagged ```typst-raw```
+//     containing its raw text verbatim. *Not* plain passthrough text: an
+//     unsupported_block's raw content usually isn't Typst-flavored HTML or
+//     anything else Markdown itself finds unusual (e.g. "$ x^2 $" is just
+//     ordinary text to CommonMark) — emitted as bare text it would silently
+//     reparse as an ordinary *supported* paragraph next time, losing its
+//     opaque status. A fence is unambiguous regardless of what's inside it.
 //
-// Anything else outside the MVP subset (blockquote, tables, links, images,
-// raw/other-tagged code blocks, raw HTML, heading level 4+, ...) becomes an
-// opaque `unsupported_block`, sliced verbatim from the original source using
+// Anything else outside the MVP subset that Markdown's *own* grammar makes
+// distinct from plain text (blockquote, tables, links, images, raw HTML,
+// other-tagged code blocks, heading level 4+, ...) becomes an opaque
+// `unsupported_block` too, sliced verbatim from the original source using
 // the position info remark-parse attaches to every node — the Markdown-side
 // analog of Typst's `SyntaxNode::full_text()`.
 import { unified } from "unified";
@@ -38,6 +47,7 @@ import { schema, type PMDoc, type TypstSet } from "./schema";
 
 const FENCE_CALL = "typst-call";
 const FENCE_SET = "typst-set";
+const FENCE_UNSUPPORTED = "typst-raw";
 
 const parser = unified().use(remarkParse);
 const stringifier = unified().use(remarkStringify, { bullet: "-", emphasis: "_", strong: "*" });
@@ -96,9 +106,13 @@ function convertBlock(node: RootContent, source: string): PMNode {
     case "list":
       return convertList(node, source);
     case "code":
-      return node.lang === FENCE_CALL
-        ? schema.nodes.typst_call.create({ name: parseCallName(node.value), raw: node.value })
-        : unsupportedBlockFrom(node, source);
+      if (node.lang === FENCE_CALL) {
+        return schema.nodes.typst_call.create({ name: parseCallName(node.value), raw: node.value });
+      }
+      if (node.lang === FENCE_UNSUPPORTED) {
+        return schema.nodes.unsupported_block.create({ raw: node.value });
+      }
+      return unsupportedBlockFrom(node, source);
     default:
       // blockquote, table, thematicBreak, html, link/image standing alone,
       // definitions, footnotes, ... — all outside the MVP subset.
@@ -255,7 +269,7 @@ function blockToMdast(node: PMNode): BlockContent {
     case "typst_call":
       return { type: "code", lang: FENCE_CALL, meta: null, value: node.attrs.raw as string };
     case "unsupported_block":
-      return { type: "html", value: node.attrs.raw as string };
+      return { type: "code", lang: FENCE_UNSUPPORTED, meta: null, value: node.attrs.raw as string };
     default:
       throw new Error(`pmDocToMdast: unexpected block "${node.type.name}"`);
   }
