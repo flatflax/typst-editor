@@ -3,7 +3,7 @@
 // Pure `prosemirror-state`/`-commands`/`-keymap` logic — no DOM, so it's
 // unit-testable headlessly (see wysiwygCommands.test.ts) without mounting an
 // EditorView.
-import type { Command, EditorState, Transaction } from "prosemirror-state";
+import { TextSelection, type Command, type EditorState, type Transaction } from "prosemirror-state";
 import type { NodeType } from "prosemirror-model";
 import { baseKeymap, chainCommands, setBlockType, toggleMark } from "prosemirror-commands";
 import { keymap } from "prosemirror-keymap";
@@ -110,6 +110,66 @@ export const addTableRow = addRowAfter;
 export const addTableColumn = addColumnAfter;
 export const deleteTableRow = deleteRow;
 export const deleteTableColumn = deleteColumn;
+
+// Inserts an empty paragraph right after the block at `pos` (the position
+// *before* that block, e.g. from `doc.forEach`) and moves the cursor into
+// it — the per-block "+" insert affordance (plan.md M12). A block-insertion
+// primitive is a plain `(state, dispatch) => boolean` like the rest of this
+// file's commands, not something WysiwygEditor.tsx's decoration plugin needs
+// to special-case.
+export function insertParagraphAfter(pos: number, nodeSize: number): Command {
+  return (state, dispatch) => {
+    if (!dispatch) return true;
+    const after = pos + nodeSize;
+    const tr = state.tr.insert(after, schema.nodes.paragraph.create());
+    dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve(after))).scrollIntoView());
+    return true;
+  };
+}
+
+// The slash-command menu's trigger condition (plan.md M12): the cursor sits
+// right after a lone "/" that is the *entire* content of its paragraph —
+// deliberately narrow (not "anywhere after a /") so it can't misfire while
+// typing a URL, a fraction, or any other legitimate use of the character
+// mid-sentence. Pure `EditorState` inspection, no DOM, so it's headlessly
+// testable — WysiwygEditor.tsx calls this after every transaction and, only
+// when it returns non-null, computes the menu's on-screen position via
+// `view.coordsAtPos` (which does need a live view).
+export function slashMenuTriggerAt(state: EditorState): number | null {
+  const { $from, empty } = state.selection;
+  if (!empty) return null;
+  if ($from.parent.type !== schema.nodes.paragraph) return null;
+  if ($from.parent.textContent !== "/" || $from.parentOffset !== 1) return null;
+  return $from.pos;
+}
+
+// Removes the triggering "/" (`slashMenuTriggerAt`'s return value is the
+// position right after it) and then runs `command` — shared by every
+// slash-menu item so each one only has to name the command it wants, not
+// repeat the delete-then-run sequence.
+export function runSlashMenuCommand(
+  view: { state: EditorState; dispatch: (tr: Transaction) => void },
+  triggerPos: number,
+  command: Command,
+) {
+  view.dispatch(view.state.tr.delete(triggerPos - 1, triggerPos));
+  command(view.state, view.dispatch);
+}
+
+export type SlashMenuItem = { label: string; command: Command };
+
+// Deliberately excludes Image: unlike every other entry, inserting one needs
+// an open document (to resolve a relative path against, plan.md M11) and a
+// file-picker round trip, so it stays a plain toolbar button rather than a
+// slash-menu entry that could silently no-op before a file exists.
+export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
+  { label: "Heading 1", command: setHeading(1) },
+  { label: "Heading 2", command: setHeading(2) },
+  { label: "Heading 3", command: setHeading(3) },
+  { label: "Bullet list", command: toggleBulletList },
+  { label: "Numbered list", command: toggleOrderedList },
+  { label: "Table", command: insertTable2x2 },
+];
 
 export function buildKeymapPlugin() {
   return keymap({

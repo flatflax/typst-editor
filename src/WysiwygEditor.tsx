@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { EditorState, TextSelection, type Command } from "prosemirror-state";
-import { EditorView, type NodeView } from "prosemirror-view";
+import { EditorState, Plugin, TextSelection, type Command } from "prosemirror-state";
+import { Decoration, DecorationSet, EditorView, type NodeView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import { tableEditing } from "prosemirror-tables";
 import { invoke } from "@tauri-apps/api/core";
@@ -13,15 +13,19 @@ import {
   buildKeymapPlugin,
   deleteTableColumn,
   deleteTableRow,
+  insertParagraphAfter,
   insertTable2x2,
+  runSlashMenuCommand,
   setHeading,
   setParagraph,
+  slashMenuTriggerAt,
   toggleBulletList,
   toggleCode,
   toggleEm,
   toggleLink,
   toggleOrderedList,
   toggleStrong,
+  SLASH_MENU_ITEMS,
 } from "./wysiwygCommands";
 
 export type WysiwygEditorHandle = {
@@ -100,12 +104,56 @@ function imageNodeView(documentDirRef: { current: string | null }) {
   };
 }
 
+// Per-block "+" insert affordance (plan.md M12): a small always-visible
+// button after every *top-level* block (not recursed into list items/table
+// cells — kept to the simplest useful scope) that inserts an empty
+// paragraph right after it. A plain decoration widget rather than a
+// hover-revealed one: a real hover-triggered version (only appearing near
+// the pointer, positioned in the left margin the way Notion does it) needs
+// mouse-position tracking this environment has no way to visually verify —
+// simplicity was chosen deliberately here over an untestable interaction,
+// not as an oversight.
+function blockInsertButtonsPlugin() {
+  return new Plugin({
+    props: {
+      decorations(state) {
+        const decorations: Decoration[] = [];
+        state.doc.forEach((node, offset) => {
+          decorations.push(
+            Decoration.widget(
+              offset + node.nodeSize,
+              (view) => {
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "block-insert-button";
+                button.textContent = "+";
+                button.title = "Insert paragraph below";
+                button.addEventListener("click", () => {
+                  insertParagraphAfter(offset, node.nodeSize)(view.state, view.dispatch);
+                  view.focus();
+                });
+                return button;
+              },
+              { side: 1 },
+            ),
+          );
+        });
+        return DecorationSet.create(state.doc, decorations);
+      },
+    },
+  });
+}
+
 function editorStateFor(doc: PMDoc): EditorState {
   // tableEditing() (plan.md M10) handles cell selection/navigation — no
   // columnResizing(), since per-column width styling is out of the MVP
   // subset (ast.rs's as_table_call only preserves an existing width spec
   // verbatim, never lets the WYSIWYG surface set one).
-  return EditorState.create({ doc, schema, plugins: [buildKeymapPlugin(), tableEditing()] });
+  return EditorState.create({
+    doc,
+    schema,
+    plugins: [buildKeymapPlugin(), tableEditing(), blockInsertButtonsPlugin()],
+  });
 }
 
 // ProseMirror EditorView for the WYSIWYG surface (plan.md M5). Mirrors
@@ -134,6 +182,34 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
   // mount and refreshed in `setDoc` is enough, no per-transaction syncing.
   const [settings, setSettings] = useState<TypstSet[]>((doc.attrs.settings ?? []) as TypstSet[]);
 
+  // Floating bubble toolbar (shown on a non-empty text selection) and
+  // slash-command menu (plan.md M12). Both are recomputed from scratch after
+  // every transaction — cheap pure checks (see `slashMenuTriggerAt`) plus
+  // one `coordsAtPos` call each, not worth memoizing at this document scale.
+  const [bubble, setBubble] = useState<{ left: number; top: number } | null>(null);
+  const [slashMenu, setSlashMenu] = useState<{ left: number; top: number; triggerPos: number } | null>(
+    null,
+  );
+
+  function updateOverlays(view: EditorView) {
+    const { state } = view;
+    if (!state.selection.empty && state.selection instanceof TextSelection) {
+      const start = view.coordsAtPos(state.selection.from);
+      const end = view.coordsAtPos(state.selection.to);
+      setBubble({ left: (start.left + end.left) / 2, top: Math.min(start.top, end.top) });
+    } else {
+      setBubble(null);
+    }
+
+    const triggerPos = slashMenuTriggerAt(state);
+    if (triggerPos != null) {
+      const coords = view.coordsAtPos(triggerPos);
+      setSlashMenu({ left: coords.left, top: coords.bottom, triggerPos });
+    } else {
+      setSlashMenu(null);
+    }
+  }
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -145,6 +221,7 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
         view.updateState(nextState);
         if (tr.docChanged) onChangeRef.current(nextState.doc);
         if (tr.selectionSet) onSelectionChangeRef.current?.(nextState.selection.from);
+        updateOverlays(view);
       },
     });
     viewRef.current = view;
@@ -273,6 +350,43 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
         </details>
       )}
       <div ref={containerRef} className="wysiwyg-content" />
+      {bubble && (
+        // `coordsAtPos` returns viewport-relative coordinates, matching
+        // `position: fixed` directly — no extra offset math needed.
+        <div className="bubble-toolbar" style={{ left: bubble.left, top: bubble.top }}>
+          <button type="button" onClick={() => runCommand(toggleStrong)}>
+            <strong>B</strong>
+          </button>
+          <button type="button" onClick={() => runCommand(toggleEm)}>
+            <em>I</em>
+          </button>
+          <button type="button" onClick={() => runCommand(toggleCode)}>
+            {"</>"}
+          </button>
+          <button type="button" onClick={() => runCommand(toggleLink)}>
+            Link
+          </button>
+        </div>
+      )}
+      {slashMenu && (
+        <div className="slash-menu" style={{ left: slashMenu.left, top: slashMenu.top }}>
+          {SLASH_MENU_ITEMS.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              onClick={() => {
+                const view = viewRef.current;
+                if (!view) return;
+                runSlashMenuCommand(view, slashMenu.triggerPos, item.command);
+                setSlashMenu(null);
+                view.focus();
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 });

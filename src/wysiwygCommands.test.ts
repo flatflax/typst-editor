@@ -4,11 +4,14 @@ import { splitListItem } from "prosemirror-schema-list";
 import { schema } from "./schema";
 import { pmDocToTypst } from "./typstAst";
 import {
+  insertParagraphAfter,
   insertTable,
   liftList,
+  runSlashMenuCommand,
   setHeading,
   setParagraph,
   sinkList,
+  slashMenuTriggerAt,
   toggleBulletList,
   toggleCode,
   toggleEm,
@@ -122,6 +125,84 @@ describe("toggleLink (plan.md M9)", () => {
     const result = applyCommand(state, toggleLink);
     expect(result.applied).toBe(true);
     expect(result.state.doc.child(0).child(0).marks).toEqual([]);
+  });
+});
+
+describe("insertParagraphAfter (plan.md M12)", () => {
+  it("inserts an empty paragraph after the block and moves the cursor into it", () => {
+    const doc = docWithHello();
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 1) });
+    const helloBlock = doc.child(0);
+
+    const result = applyCommand(state, insertParagraphAfter(0, helloBlock.nodeSize));
+    expect(result.applied).toBe(true);
+    expect(result.state.doc.childCount).toBe(2);
+    expect(result.state.doc.child(1).type).toBe(schema.nodes.paragraph);
+    expect(result.state.doc.child(1).content.size).toBe(0);
+    // Cursor lands inside the new (empty) paragraph, not left behind in "hello".
+    expect(result.state.selection.$from.parent).toBe(result.state.doc.child(1));
+  });
+});
+
+describe("slashMenuTriggerAt (plan.md M12)", () => {
+  function docWithParagraphText(text: string): ReturnType<typeof schema.node> {
+    const content = text ? [schema.text(text)] : [];
+    return schema.node("doc", { settings: [] }, [schema.node("paragraph", null, content)]);
+  }
+
+  it("returns the position right after a lone / at the cursor", () => {
+    const doc = docWithParagraphText("/");
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 2, 2) });
+    expect(slashMenuTriggerAt(state)).toBe(2);
+  });
+
+  it("returns null when the paragraph has other text besides the /", () => {
+    const doc = docWithParagraphText("hi/");
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 4, 4) });
+    expect(slashMenuTriggerAt(state)).toBeNull();
+  });
+
+  it("returns null for a non-collapsed selection", () => {
+    const doc = docWithParagraphText("/");
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 2) });
+    expect(slashMenuTriggerAt(state)).toBeNull();
+  });
+
+  it("returns null outside a paragraph (e.g. a heading)", () => {
+    const doc = schema.node("doc", { settings: [] }, [
+      schema.node("heading", { level: 1 }, [schema.text("/")]),
+    ]);
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 2, 2) });
+    expect(slashMenuTriggerAt(state)).toBeNull();
+  });
+
+  it("returns null once the empty paragraph has no / at all", () => {
+    const doc = docWithParagraphText("");
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 1) });
+    expect(slashMenuTriggerAt(state)).toBeNull();
+  });
+});
+
+describe("runSlashMenuCommand (plan.md M12)", () => {
+  it("deletes the triggering / and runs the given command", () => {
+    const doc = schema.node("doc", { settings: [] }, [schema.node("paragraph", null, [schema.text("/")])]);
+    let state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 2, 2) });
+    const triggerPos = slashMenuTriggerAt(state);
+    expect(triggerPos).not.toBeNull();
+
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(tr: Parameters<typeof state.apply>[0]) {
+        state = state.apply(tr);
+      },
+    };
+    runSlashMenuCommand(view, triggerPos as number, setHeading(2));
+
+    expect(state.doc.child(0).type).toBe(schema.nodes.heading);
+    expect(state.doc.child(0).attrs.level).toBe(2);
+    expect(state.doc.child(0).textContent).toBe(""); // the "/" is gone, not turned into heading text
   });
 });
 
