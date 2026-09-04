@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import SourceEditor, { type SourceEditorHandle } from "./SourceEditor";
+import { byteToUtf16Offset, utf16ToByteOffset } from "./offsets";
 import "./App.css";
 
 const INITIAL_SOURCE = `= Typst Editor — M1
@@ -51,6 +52,7 @@ function clientPointFromPt(svg: SVGSVGElement, xPt: number, yPt: number) {
   };
 }
 
+
 function App() {
   const [source, setSource] = useState(INITIAL_SOURCE);
   const [result, setResult] = useState<CompileResult | null>(null);
@@ -77,16 +79,19 @@ function App() {
     if (!svg) return;
     const { xPt, yPt } = svgPointFromClient(svg, event.clientX, event.clientY);
     invoke<number | null>("jump_from_click", { source: sourceRef.current, xPt, yPt })
-      .then((offset) => {
-        if (offset != null) editorRef.current?.setCursor(offset);
+      .then((byteOffset) => {
+        if (byteOffset != null) {
+          editorRef.current?.setCursor(byteToUtf16Offset(sourceRef.current, byteOffset));
+        }
       })
       .catch((err) => setInvokeError(String(err)));
   }
 
-  function handleCursorChange(offset: number) {
+  function handleCursorChange(utf16Offset: number) {
     const svg = previewRef.current?.querySelector("svg");
     if (!svg) return;
-    invoke<CursorTarget[]>("jump_from_cursor", { source: sourceRef.current, cursor: offset })
+    const cursor = utf16ToByteOffset(sourceRef.current, utf16Offset);
+    invoke<CursorTarget[]>("jump_from_cursor", { source: sourceRef.current, cursor })
       .then((targets) => {
         const target = targets[0];
         if (!target) {
