@@ -218,6 +218,34 @@ The user's ask is a real, final-product goal, not a stretch aspiration: **one vi
 
 Applying that same mechanism here turns single-view WYSIWYG into a scoped integration problem instead of a rewrite: **ProseMirror keeps owning text editing** (cursor, selection, IME composition, undo/redo — already solved, don't touch it) **and Typst keeps owning rendering** (already solved via `compile_typst`) — the only genuinely new work is (a) fast enough incremental compilation to recompile-and-swap on every focus change/keystroke without visible lag, and (b) a block-level focus-swap UI built on ProseMirror node views, reusing the click/cursor position-mapping (`jump_from_click`/`jump_from_cursor`) already built in M1/M5 to hand off cleanly between "rendered" and "editable" states at the right character offset.
 
+**Role split.** Single-surface doesn't mean ProseMirror disappears — its role narrows.
+ProseMirror stays the editing *engine*: cursor/selection/IME/transactions/undo/paste.
+Typst stays the layout *authority*: typography/geometry/visual appearance. The bridge
+between them generalizes what M1/M5 already built: `editor position ⇄ source range ⇄
+Typst layout geometry`.
+
+**Visibility rule.** In the single-surface model, Typst's own compiled output — not an
+editor-side, per-node-type judgment call — decides what's on the document surface at all:
+**does the construct produce layout geometry** (real, positioned ink in the compiled
+`Frame`)? If yes, it's primary content — rendered on the surface and directly editable
+there. If no (`#set`, `#let`, imports, and other settings/directives with no visual
+footprint), it stays invisible by default, exposed only through a separate inspector when
+the user needs to see or change its source or semantic effect — the existing `#set`
+"Document Settings" drawer (Phase 1) already follows this by construction, ahead of the
+rule being named. Sharpened further: **don't invent permanent editor UI (a dedicated
+ProseMirror node/schema entry) for a construct that has no rendered representation** — a
+no-geometry construct can live purely as metadata addressed by a source range and edited
+through an inspector that manipulates that range directly, without needing PM-schema
+representation at all. This narrows, rather than contradicts, the "primitives over nodes"
+principle above: that principle governs constructs that *do* need on-surface PM
+representation (reuse a primitive instead of one-off logic); this rule says a whole class
+of constructs — the non-geometry ones — may not need PM representation in the first place,
+substantially reducing the pressure to force every Typst construct into the schema. One
+concrete implication to revisit when M15 (per-block render/edit swap) is actually scoped
+(not decided now): whether `typst_call`'s inert "chip" rendering should only apply to
+calls that *do* produce visible output, with no-output calls moving to the same
+invisible/inspector treatment as `#set`.
+
 ### Milestones (tentative — M14 and M14A are feasibility spikes other milestones depend on)
 
 **M13 — Node-type dispatch refactor**
