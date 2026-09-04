@@ -3,6 +3,16 @@ import { EditorState, TextSelection, type Command } from "prosemirror-state";
 import { EditorView, type NodeView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import { tableEditing } from "prosemirror-tables";
+// Required base stylesheets, not optional theming: prosemirror-view's owns
+// `white-space`/`word-wrap` handling on `.ProseMirror` and, critically,
+// `img.ProseMirror-separator { display: inline !important; ... }` — the
+// cursor-anchoring hack ProseMirror inserts for an empty or trailing-
+// whitespace text block. Without this rule the browser has nothing valid to
+// anchor a caret to there, which is exactly the "cursor disappears on a
+// blank line" bug this fixes. prosemirror-tables' stylesheet is the same
+// category of miss (cell-selection highlighting, resize-handle styling).
+import "prosemirror-view/style/prosemirror.css";
+import "prosemirror-tables/style/tables.css";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { schema, type PMDoc, type TypstSet } from "./schema";
