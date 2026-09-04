@@ -10,6 +10,7 @@ use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
+use typst_ide::IdeWorld;
 use typst_kit::datetime::Time;
 use typst_kit::fonts::FontStore;
 
@@ -68,5 +69,11 @@ impl World for TauriWorld {
 
     fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
         self.time.today(offset)
+    }
+}
+
+impl IdeWorld for TauriWorld {
+    fn upcast(&self) -> &dyn World {
+        self
     }
 }

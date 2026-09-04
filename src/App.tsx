@@ -1,22 +1,21 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import SourceEditor, { type SourceEditorHandle } from "./SourceEditor";
 import "./App.css";
 
-// Hardcoded per M0 scope (plan.md): prove Rust World + font bundling +
-// compile_typst + SVG rendering before any editor UI exists.
-const HARDCODED_TYPST_SOURCE = `
-= Typst Editor — M0 Bootstrap
+const INITIAL_SOURCE = `= Typst Editor — M1
 
-This SVG was produced by the *real* Typst compiler running inside the
-Tauri Rust backend, not a reimplementation.
+Edit this *Typst* source on the left; the preview on the right recompiles
+automatically via the real Typst compiler.
 
-- Bold and _italic_ text
-- \`inline code\`
-- A bullet list item
+- Click anywhere in the preview to jump the cursor to that spot in the source
+- Move the cursor in the source to see the matching point highlighted below
 
-+ An ordered list item
-+ Another one
++ Bullet and numbered lists
++ \`inline code\`
 `;
+
+const COMPILE_DEBOUNCE_MS = 250;
 
 type CompileDiagnostic = {
   severity: "error" | "warning";
@@ -28,37 +27,116 @@ type CompileResult = {
   diagnostics: CompileDiagnostic[];
 };
 
-function App() {
-  const [result, setResult] = useState<CompileResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+type CursorTarget = {
+  page: number;
+  x_pt: number;
+  y_pt: number;
+};
 
+function svgPointFromClient(svg: SVGSVGElement, clientX: number, clientY: number) {
+  const rect = svg.getBoundingClientRect();
+  const viewBox = svg.viewBox.baseVal;
+  return {
+    xPt: ((clientX - rect.left) / rect.width) * viewBox.width,
+    yPt: ((clientY - rect.top) / rect.height) * viewBox.height,
+  };
+}
+
+function clientPointFromPt(svg: SVGSVGElement, xPt: number, yPt: number) {
+  const rect = svg.getBoundingClientRect();
+  const viewBox = svg.viewBox.baseVal;
+  return {
+    clientX: rect.left + (xPt / viewBox.width) * rect.width,
+    clientY: rect.top + (yPt / viewBox.height) * rect.height,
+  };
+}
+
+function App() {
+  const [source, setSource] = useState(INITIAL_SOURCE);
+  const [result, setResult] = useState<CompileResult | null>(null);
+  const [invokeError, setInvokeError] = useState<string | null>(null);
+  const [highlight, setHighlight] = useState<{ clientX: number; clientY: number } | null>(null);
+
+  const editorRef = useRef<SourceEditorHandle | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
+
+  // Debounced Typst source -> compile_typst -> SVG preview loop (plan.md M1).
   useEffect(() => {
-    invoke<CompileResult>("compile_typst", { source: HARDCODED_TYPST_SOURCE })
-      .then(setResult)
-      .catch((err) => setError(String(err)));
-  }, []);
+    const timer = setTimeout(() => {
+      invoke<CompileResult>("compile_typst", { source })
+        .then(setResult)
+        .catch((err) => setInvokeError(String(err)));
+    }, COMPILE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [source]);
+
+  function handlePreviewClick(event: React.MouseEvent<HTMLDivElement>) {
+    const svg = previewRef.current?.querySelector("svg");
+    if (!svg) return;
+    const { xPt, yPt } = svgPointFromClient(svg, event.clientX, event.clientY);
+    invoke<number | null>("jump_from_click", { source: sourceRef.current, xPt, yPt })
+      .then((offset) => {
+        if (offset != null) editorRef.current?.setCursor(offset);
+      })
+      .catch((err) => setInvokeError(String(err)));
+  }
+
+  function handleCursorChange(offset: number) {
+    const svg = previewRef.current?.querySelector("svg");
+    if (!svg) return;
+    invoke<CursorTarget[]>("jump_from_cursor", { source: sourceRef.current, cursor: offset })
+      .then((targets) => {
+        const target = targets[0];
+        if (!target) {
+          setHighlight(null);
+          return;
+        }
+        setHighlight(clientPointFromPt(svg, target.x_pt, target.y_pt));
+      })
+      .catch(() => setHighlight(null));
+  }
 
   return (
-    <main className="container">
-      <h1>Typst Editor — M0</h1>
-      <p>
-        Source → <code>compile_typst</code> (Rust, real Typst engine) →
-        rendered SVG preview.
-      </p>
+    <main className="app">
+      <header className="app-header">
+        <h1>Typst Editor — M1</h1>
+        <p>Typst source → real Typst compiler → live SVG preview, with click/cursor sync.</p>
+      </header>
 
-      {error && <p className="preview-error">Invoke failed: {error}</p>}
+      {invokeError && <p className="preview-error">Invoke failed: {invokeError}</p>}
 
-      {result?.diagnostics.map((d, i) => (
-        <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
-          {d.severity}: {d.message}
-        </p>
-      ))}
+      <div className="workspace">
+        <SourceEditor
+          ref={editorRef}
+          initialValue={source}
+          onChange={setSource}
+          onCursorChange={handleCursorChange}
+        />
 
-      {result?.svg ? (
-        <div className="preview" dangerouslySetInnerHTML={{ __html: result.svg }} />
-      ) : (
-        !error && <p>Compiling…</p>
-      )}
+        <div className="preview-pane">
+          {result?.diagnostics.map((d, i) => (
+            <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
+              {d.severity}: {d.message}
+            </p>
+          ))}
+
+          <div
+            ref={previewRef}
+            className="preview"
+            onClick={handlePreviewClick}
+            dangerouslySetInnerHTML={{ __html: result?.svg ?? "" }}
+          />
+
+          {highlight && (
+            <div
+              className="cursor-marker"
+              style={{ left: highlight.clientX, top: highlight.clientY }}
+            />
+          )}
+        </div>
+      </div>
     </main>
   );
 }

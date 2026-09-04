@@ -1,13 +1,19 @@
 mod compile;
+mod jump;
 mod typst_world;
 
 use compile::compile_typst;
+use jump::{jump_from_click, jump_from_cursor};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![compile_typst])
+        .invoke_handler(tauri::generate_handler![
+            compile_typst,
+            jump_from_click,
+            jump_from_cursor
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
