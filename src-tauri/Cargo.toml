@@ -29,4 +29,7 @@ typst-kit = { version = "=0.15.1", features = ["datetime", "embedded-fonts", "sc
 typst-svg = "=0.15.1"
 typst-render = "=0.15.1"
 typst-ide = "=0.15.1"
+tauri-plugin-dialog = "2.7.3"
+tauri-plugin-fs = "2.5.2"
+tauri-plugin-store = "2.4.4"
 

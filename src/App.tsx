@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
+import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./SourceEditor";
 import WysiwygEditor, { type WysiwygEditorHandle } from "./WysiwygEditor";
 import { byteToUtf16Offset, utf16ToByteOffset } from "./offsets";
@@ -13,6 +16,8 @@ import {
   type PositionMapEntry,
 } from "./typstAst";
 import { markdownToDoc, docToMarkdown } from "./markdown";
+import { basename, defaultFileName, spokeForPath, titleFor, type Spoke } from "./fileIO";
+import { addRecentFile, getRecentFiles, removeRecentFile } from "./recentFiles";
 import type { PMDoc } from "./schema";
 import "./App.css";
 
@@ -118,6 +123,18 @@ function App() {
   const [invokeError, setInvokeError] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<{ clientX: number; clientY: number } | null>(null);
 
+  // M7: File I/O state. `filePath`/`fileSpoke` are null/"typst" until the
+  // first open or save. `lastSaved{Typst,Markdown}Text` are snapshots of
+  // both serializations as of the last load/save; `dirty` (below) is
+  // computed by comparing the live content against them, not a naive
+  // edit-count, so e.g. an edit that's undone back to the saved content
+  // correctly reports clean again (plan.md M7).
+  const [filePath, setFilePath] = useState<string | null>(null);
+  const [fileSpoke, setFileSpoke] = useState<Spoke>("typst");
+  const [lastSavedTypstText, setLastSavedTypstText] = useState(() => pmDocToTypst(INITIAL_DOC));
+  const [lastSavedMarkdownText, setLastSavedMarkdownText] = useState(() => docToMarkdown(INITIAL_DOC));
+  const [recentFiles, setRecentFiles] = useState<string[]>([]);
+
   const wysiwygRef = useRef<WysiwygEditorHandle | null>(null);
   const typstEditorRef = useRef<SourceEditorHandle | null>(null);
   const markdownEditorRef = useRef<SourceEditorHandle | null>(null);
@@ -153,6 +170,170 @@ function App() {
     }, COMPILE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [derived.source]);
+
+  // Both branches compare against the Typst serialization: `derived.source`
+  // already holds it for both the "typst" (raw typstText) and "wysiwyg"
+  // (pmDocToTypstWithPositions(doc)) view modes.
+  const dirty =
+    viewMode === "markdown" ? markdownText !== lastSavedMarkdownText : derived.source !== lastSavedTypstText;
+
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+
+  useEffect(() => {
+    getRecentFiles()
+      .then(setRecentFiles)
+      .catch(() => {});
+  }, []);
+
+  // Native "close requested" guard (window X button / OS quit), mirroring
+  // switchView's/handleOpen's in-app unsaved-changes prompt.
+  useEffect(() => {
+    const unlistenPromise = getCurrentWindow().onCloseRequested(async (event) => {
+      if (!dirtyRef.current) return;
+      const shouldClose = await ask("You have unsaved changes. Quit without saving?", {
+        title: "Unsaved changes",
+        kind: "warning",
+      });
+      if (!shouldClose) event.preventDefault();
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  async function confirmDiscardIfDirty(): Promise<boolean> {
+    if (!dirty) return true;
+    return ask("You have unsaved changes. Discard them and continue?", {
+      title: "Unsaved changes",
+      kind: "warning",
+    });
+  }
+
+  // Loads `path` into all three spokes/panes and resets file/dirty state.
+  // Used by both the Open dialog and the recent-files list.
+  async function loadFile(path: string) {
+    const spoke = spokeForPath(path);
+    const text = await readTextFile(path);
+    const nextDoc =
+      spoke === "markdown"
+        ? markdownToDoc(text)
+        : typstAstToDoc(await invoke<AstDocument>("parse_typst_ast", { source: text }));
+    const nextTypstText = spoke === "typst" ? text : pmDocToTypst(nextDoc);
+    const nextMarkdownText = spoke === "markdown" ? text : docToMarkdown(nextDoc);
+
+    setDoc(nextDoc);
+    setTypstText(nextTypstText);
+    setMarkdownText(nextMarkdownText);
+    wysiwygRef.current?.setDoc(nextDoc);
+    typstEditorRef.current?.setValue(nextTypstText);
+    markdownEditorRef.current?.setValue(nextMarkdownText);
+
+    setFilePath(path);
+    setFileSpoke(spoke);
+    setLastSavedTypstText(nextTypstText);
+    setLastSavedMarkdownText(nextMarkdownText);
+    setInvokeError(null);
+  }
+
+  async function handleOpen() {
+    if (!(await confirmDiscardIfDirty())) return;
+    const selected = await open({
+      multiple: false,
+      filters: [
+        { name: "Typst / Markdown", extensions: ["typ", "md", "markdown"] },
+        { name: "Typst", extensions: ["typ"] },
+        { name: "Markdown", extensions: ["md", "markdown"] },
+      ],
+    });
+    if (typeof selected !== "string") return;
+    try {
+      await loadFile(selected);
+      setRecentFiles(await addRecentFile(selected));
+    } catch (err) {
+      setInvokeError(String(err));
+    }
+  }
+
+  async function handleOpenRecent(path: string) {
+    if (!(await confirmDiscardIfDirty())) return;
+    try {
+      await loadFile(path);
+      setRecentFiles(await addRecentFile(path));
+    } catch (err) {
+      setInvokeError(`Couldn't open ${path}: ${String(err)}`);
+      setRecentFiles(await removeRecentFile(path));
+    }
+  }
+
+  // Commits whichever view is active into the canonical doc, serializes it
+  // to `spoke`'s source format, writes it to `path`, and snapshots both
+  // serializations as the new dirty-comparison baseline.
+  async function writeCurrentDoc(path: string, spoke: Spoke) {
+    const nextDoc = await commitCurrentView();
+    const nextTypstText = pmDocToTypst(nextDoc);
+    const nextMarkdownText = docToMarkdown(nextDoc);
+    const text = spoke === "markdown" ? nextMarkdownText : nextTypstText;
+    await writeTextFile(path, text);
+    setDoc(nextDoc);
+    setLastSavedTypstText(nextTypstText);
+    setLastSavedMarkdownText(nextMarkdownText);
+  }
+
+  async function handleSave() {
+    if (!filePath) {
+      await handleSaveAs();
+      return;
+    }
+    try {
+      await writeCurrentDoc(filePath, fileSpoke);
+      setInvokeError(null);
+      setRecentFiles(await addRecentFile(filePath));
+    } catch (err) {
+      setInvokeError(String(err));
+    }
+  }
+
+  async function handleSaveAs() {
+    try {
+      const target = await save({
+        defaultPath: filePath ?? defaultFileName(fileSpoke),
+        filters: [
+          { name: "Typst", extensions: ["typ"] },
+          { name: "Markdown", extensions: ["md"] },
+        ],
+      });
+      if (!target) return;
+      const spoke = spokeForPath(target);
+      await writeCurrentDoc(target, spoke);
+      setFilePath(target);
+      setFileSpoke(spoke);
+      setInvokeError(null);
+      setRecentFiles(await addRecentFile(target));
+    } catch (err) {
+      setInvokeError(String(err));
+    }
+  }
+
+  // Stable keydown listener (mounted once) dispatching through a ref so it
+  // always calls the latest closures without re-subscribing every render —
+  // mirrors viewModeRef/typstTextRef/derivedRef above.
+  const commandsRef = useRef({ handleOpen, handleSave, handleSaveAs });
+  commandsRef.current = { handleOpen, handleSave, handleSaveAs };
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key !== "s" && key !== "o") return;
+      event.preventDefault();
+      if (key === "o") void commandsRef.current.handleOpen();
+      else if (event.shiftKey) void commandsRef.current.handleSaveAs();
+      else void commandsRef.current.handleSave();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // Reads whichever view is currently active and returns the canonical
   // PMDoc it represents — parsing via the real Typst compiler (async, Rust)
@@ -223,6 +404,40 @@ function App() {
       <header className="app-header">
         <h1>Typst Editor — M5</h1>
         <p>WYSIWYG / Typst / Markdown, one Editor Model, one live preview.</p>
+        <div className="file-bar">
+          <span className="file-title">{titleFor(filePath, dirty)}</span>
+          <button type="button" onClick={() => void handleOpen()}>
+            Open… (Ctrl+O)
+          </button>
+          <button type="button" onClick={() => void handleSave()}>
+            Save (Ctrl+S)
+          </button>
+          <button type="button" onClick={() => void handleSaveAs()}>
+            Save As… (Ctrl+Shift+S)
+          </button>
+          {recentFiles.length > 0 && (
+            <label className="recent-files">
+              Recent:
+              <select
+                value=""
+                onChange={(event) => {
+                  const path = event.target.value;
+                  event.target.value = "";
+                  if (path) void handleOpenRecent(path);
+                }}
+              >
+                <option value="" disabled>
+                  Choose a file…
+                </option>
+                {recentFiles.map((path) => (
+                  <option key={path} value={path}>
+                    {basename(path)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
         <div className="view-switcher" role="tablist">
           {(["wysiwyg", "typst", "markdown"] as const).map((mode) => (
             <button

@@ -124,8 +124,10 @@ Two things do **not** change in Phase 2: the hub-and-spoke architecture (Editor 
 
 ### Milestones
 
-**M7 — File I/O**
+**M7 — File I/O — done**
 Open/Save/Save As via `@tauri-apps/plugin-dialog` + `@tauri-apps/plugin-fs`. Loading a file picks the Typst or Markdown spoke by extension (`.typ` vs `.md`) and parses into the Editor Model as usual; the open file's path becomes session state the app needs from here on (M10 image resolution depends on it). Track a `dirty` flag on the model (compare against last-saved serialization, not a naive edit-count) for a title-bar/tab indicator and an unsaved-changes guard on close/open-another-file. Recent-files list persisted via `@tauri-apps/plugin-store` (or a small JSON file) since there's no filesystem-agnostic browser storage answer in a Tauri shell. `Ctrl+S`/`Ctrl+O`/`Ctrl+Shift+S` keybindings. No new Editor Model or round-trip logic — purely an app-shell feature, lowest technical risk of the phase.
+- Implemented in `src/fileIO.ts` (pure extension→spoke/title helpers, unit-tested), `src/recentFiles.ts` (`@tauri-apps/plugin-store` wrapper), and wired into `src/App.tsx` (file bar with Open/Save/Save As + recent-files dropdown, window-close guard via `getCurrentWindow().onCloseRequested`, global `Ctrl+S`/`Ctrl+O`/`Ctrl+Shift+S` keydown handler). `dirty` is a derived comparison — live Typst/Markdown serialization vs. a `lastSaved{Typst,Markdown}Text` snapshot taken at each load/save — not a stored boolean, so an edit undone back to the saved content correctly reports clean.
+- `fs:allow-read-text-file`/`fs:allow-write-text-file` are scoped to `**` (any path) in `src-tauri/capabilities/default.json`, since a general-purpose "open any file" dialog needs it; M11's narrower document-directory-only scoping applies to the *image-resolution* fs access it adds on top of this, not to open/save itself.
 
 **M8 — PDF export**
 `typst_pdf::pdf(&paged_document, ...)` (the crate already sits next to `typst-render`/`typst-svg` in the Typst ecosystem, same `PagedDocument` the preview pipeline already produces) → new `export_pdf` Tauri command → Save dialog. Export button/menu item in the frontend. Verification: export a fixture doc, confirm the PDF opens and its page count/text matches the SVG preview (a text-extraction sanity check, not full visual diffing).
