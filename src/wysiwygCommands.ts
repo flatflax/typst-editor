@@ -3,8 +3,8 @@
 // Pure `prosemirror-state`/`-commands`/`-keymap` logic — no DOM, so it's
 // unit-testable headlessly (see wysiwygCommands.test.ts) without mounting an
 // EditorView.
-import { TextSelection, type Command, type EditorState, type Transaction } from "prosemirror-state";
-import type { NodeType } from "prosemirror-model";
+import { Plugin, TextSelection, type Command, type EditorState, type Transaction } from "prosemirror-state";
+import { Fragment, type Node as PMNode, type NodeType } from "prosemirror-model";
 import { baseKeymap, chainCommands, setBlockType, toggleMark } from "prosemirror-commands";
 import { keymap } from "prosemirror-keymap";
 import { liftListItem, sinkListItem, splitListItem, wrapInList } from "prosemirror-schema-list";
@@ -170,6 +170,40 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { label: "Numbered list", command: toggleOrderedList },
   { label: "Table", command: insertTable2x2 },
 ];
+
+// A table (or an image/typst_call/unsupported_block — any "closed" block
+// with no natural way to move the cursor past it) at the very end of the
+// document otherwise traps the cursor there: reported live as "if the last
+// line is a table, the user can not add a new blank line." Appending an
+// empty paragraph whenever the doc's last child isn't one already fixes
+// this generally rather than special-casing tables. Harmless when it turns
+// out not to be needed: an empty paragraph serializes to nothing
+// (typstAst.ts's pmDocToTypst skips zero-length blocks), so this can never
+// leak an unwanted blank line into the saved Typst/Markdown source.
+export function withTrailingParagraph(doc: PMNode): PMNode {
+  const last = doc.lastChild;
+  if (last && last.type !== schema.nodes.paragraph) {
+    return doc.copy(doc.content.append(Fragment.from(schema.nodes.paragraph.create())));
+  }
+  return doc;
+}
+
+// The ongoing-edit half of the same fix — `withTrailingParagraph` only
+// covers the doc as initially loaded/switched into the view; this plugin
+// re-applies the same rule after every transaction, e.g. right after the
+// user inserts a table as the new last block via the toolbar/slash menu.
+export function ensureTrailingParagraphPlugin(): Plugin {
+  return new Plugin({
+    appendTransaction(transactions, _oldState, newState) {
+      if (!transactions.some((tr) => tr.docChanged)) return null;
+      const last = newState.doc.lastChild;
+      if (last && last.type !== schema.nodes.paragraph) {
+        return newState.tr.insert(newState.doc.content.size, schema.nodes.paragraph.create());
+      }
+      return null;
+    },
+  });
+}
 
 export function buildKeymapPlugin() {
   return keymap({

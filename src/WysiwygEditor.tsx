@@ -23,6 +23,7 @@ import {
   buildKeymapPlugin,
   deleteTableColumn,
   deleteTableRow,
+  ensureTrailingParagraphPlugin,
   insertParagraphAfter,
   insertTable2x2,
   runSlashMenuCommand,
@@ -35,6 +36,7 @@ import {
   toggleLink,
   toggleOrderedList,
   toggleStrong,
+  withTrailingParagraph,
   SLASH_MENU_ITEMS,
 } from "./wysiwygCommands";
 
@@ -119,7 +121,11 @@ function editorStateFor(doc: PMDoc): EditorState {
   // columnResizing(), since per-column width styling is out of the MVP
   // subset (ast.rs's as_table_call only preserves an existing width spec
   // verbatim, never lets the WYSIWYG surface set one).
-  return EditorState.create({ doc, schema, plugins: [buildKeymapPlugin(), tableEditing()] });
+  return EditorState.create({
+    doc: withTrailingParagraph(doc),
+    schema,
+    plugins: [buildKeymapPlugin(), tableEditing(), ensureTrailingParagraphPlugin()],
+  });
 }
 
 // ProseMirror EditorView for the WYSIWYG surface (plan.md M5). Mirrors

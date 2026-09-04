@@ -4,6 +4,7 @@ import { splitListItem } from "prosemirror-schema-list";
 import { schema } from "./schema";
 import { pmDocToTypst } from "./typstAst";
 import {
+  ensureTrailingParagraphPlugin,
   insertParagraphAfter,
   insertTable,
   liftList,
@@ -18,6 +19,7 @@ import {
   toggleLink,
   toggleOrderedList,
   toggleStrong,
+  withTrailingParagraph,
 } from "./wysiwygCommands";
 
 // prosemirror-state/-commands are pure and DOM-free, so these run headlessly
@@ -440,5 +442,65 @@ describe("Enter inside a list item (regression: schema.ts's list_item content or
     // lines between items (which is what three *separate* one-item lists,
     // each defaulting to order 1, would have produced).
     expect(pmDocToTypst(doc)).toBe("1. node1\n2. node2\n3. node3");
+  });
+});
+
+function tableWith2x2(): ReturnType<typeof schema.node> {
+  const cell = () => schema.node("table_cell", null, [schema.node("paragraph")]);
+  const row = () => schema.node("table_row", null, [cell(), cell()]);
+  return schema.node("table", { columnsRaw: "2", columnCount: 2 }, [row(), row()]);
+}
+
+describe("withTrailingParagraph / ensureTrailingParagraphPlugin (fix: cursor trapped after a trailing table)", () => {
+  it("appends an empty paragraph after a document ending in a table", () => {
+    const doc = schema.node("doc", { settings: [] }, [
+      schema.node("paragraph", null, [schema.text("hello")]),
+      tableWith2x2(),
+    ]);
+    const result = withTrailingParagraph(doc);
+    expect(result.childCount).toBe(3);
+    expect(result.lastChild?.type).toBe(schema.nodes.paragraph);
+    expect(result.lastChild?.content.size).toBe(0);
+  });
+
+  it("is a no-op when the document already ends with a paragraph", () => {
+    const doc = schema.node("doc", { settings: [] }, [schema.node("paragraph", null, [schema.text("hi")])]);
+    expect(withTrailingParagraph(doc)).toBe(doc);
+  });
+
+  it("plugin appends a paragraph once a transaction makes a table the new last block", () => {
+    const doc = schema.node("doc", { settings: [] }, [schema.node("paragraph", null, [schema.text("hi")])]);
+    let state = EditorState.create({ schema, doc, plugins: [ensureTrailingParagraphPlugin()] });
+
+    // Simulate e.g. the "Table" toolbar button replacing the lone paragraph
+    // with a table, making it the new (and only) last block.
+    state = state.apply(state.tr.replaceWith(0, state.doc.content.size, tableWith2x2()));
+
+    expect(state.doc.childCount).toBe(2);
+    expect(state.doc.lastChild?.type).toBe(schema.nodes.paragraph);
+    expect(state.doc.lastChild?.content.size).toBe(0);
+  });
+
+  it("plugin does nothing once the doc already ends with a paragraph", () => {
+    const doc = schema.node("doc", { settings: [] }, [
+      tableWith2x2(),
+      schema.node("paragraph", null, [schema.text("after")]),
+    ]);
+    let state = EditorState.create({ schema, doc, plugins: [ensureTrailingParagraphPlugin()] });
+    state = state.apply(state.tr.insertText("!", state.doc.content.size - 1));
+    expect(state.doc.childCount).toBe(2); // no extra paragraph appended
+    expect(state.doc.lastChild?.textContent).toBe("after!");
+  });
+
+  // The claim the fix's doc comment relies on: an auto-appended empty
+  // trailing paragraph must never leak into the saved file as an unwanted
+  // blank line — checked concretely here, not just asserted in a comment.
+  it("the auto-appended trailing paragraph does not appear in the serialized Typst source", () => {
+    const withoutTrailing = schema.node("doc", { settings: [] }, [
+      schema.node("paragraph", null, [schema.text("hello")]),
+      tableWith2x2(),
+    ]);
+    const withTrailing = withTrailingParagraph(withoutTrailing);
+    expect(pmDocToTypst(withTrailing)).toBe(pmDocToTypst(withoutTrailing));
   });
 });
