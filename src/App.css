@@ -96,6 +96,17 @@
   min-height: 0;
 }
 
+/* `.view-panel`'s own `display: flex` above has the same specificity as the
+   browser's default `[hidden] { display: none }` rule, and an author
+   stylesheet always wins that tie — so without this, App.tsx's
+   `hidden={viewMode !== ...}` had no visible effect at all: the WYSIWYG,
+   Typst-source, and Markdown-source panels all rendered stacked
+   simultaneously instead of only the active one. Higher-specificity
+   (one class + one attribute) so it applies regardless of source order. */
+.view-panel[hidden] {
+  display: none;
+}
+
 .source-editor {
   flex: 1 1 auto;
   min-height: 0;
@@ -115,6 +126,7 @@
 
 .wysiwyg-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.25rem;
   padding: 0.5rem;
   border-bottom: 1px solid #ddd;
@@ -239,6 +251,11 @@
   overflow-x: auto;
 }
 
+.wysiwyg-content pre[data-unsupported-block].ProseMirror-selectednode {
+  outline: 2px solid #396cd8;
+  outline-offset: 2px;
+}
+
 .wysiwyg-content [data-typst-call] {
   display: inline-block;
   background: #eef2ff;
@@ -247,6 +264,11 @@
   padding: 0 0.3em;
   font-family: monospace;
   color: #3730a3;
+}
+
+.wysiwyg-content [data-typst-call].ProseMirror-selectednode {
+  outline: 2px solid #396cd8;
+  outline-offset: 2px;
 }
 
 .wysiwyg-content table {
