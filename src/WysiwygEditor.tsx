@@ -9,6 +9,7 @@ import {
   toggleBulletList,
   toggleCode,
   toggleEm,
+  toggleLink,
   toggleOrderedList,
   toggleStrong,
 } from "./wysiwygCommands";
@@ -114,6 +115,9 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
         </button>
         <button type="button" onClick={() => runCommand(toggleCode)}>
           {"</>"}
+        </button>
+        <button type="button" onClick={() => runCommand(toggleLink)} title="Link (Mod-k)">
+          Link
         </button>
         <button type="button" onClick={() => runCommand(setParagraph)}>
           P

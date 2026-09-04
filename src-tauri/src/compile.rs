@@ -150,6 +150,21 @@ mod tests {
         );
     }
 
+    /// Proves `#link("url")[body]` (plan.md M9) isn't just recognized by
+    /// `parse_typst_ast` (ast.rs's link tests) but is real, compilable Typst
+    /// — mirrors set_rule_settings_have_a_real_visual_effect_on_the_compiled_output's
+    /// "parsed doesn't mean compiles" caution for a different construct.
+    #[test]
+    fn link_call_compiles_successfully_through_the_real_typst_engine() {
+        let result = compile_typst("See #link(\"https://typst.app\")[the docs] for more.".into());
+        assert!(
+            result.diagnostics.iter().all(|d| d.severity != "error"),
+            "unexpected error diagnostics: {:?}",
+            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(result.svg.is_some());
+    }
+
     // Same source as ast::tests::MIXED_DOCUMENT (duplicated here rather than
     // shared — `CompileResult`'s fields are private, so the compile-diff and
     // perf checks for it have to live in this module, and Rust's per-file

@@ -3,7 +3,7 @@
 // Pure `prosemirror-state`/`-commands`/`-keymap` logic — no DOM, so it's
 // unit-testable headlessly (see wysiwygCommands.test.ts) without mounting an
 // EditorView.
-import type { Command } from "prosemirror-state";
+import type { Command, EditorState, Transaction } from "prosemirror-state";
 import type { NodeType } from "prosemirror-model";
 import { baseKeymap, chainCommands, setBlockType, toggleMark } from "prosemirror-commands";
 import { keymap } from "prosemirror-keymap";
@@ -13,6 +13,29 @@ import { schema } from "./schema";
 export const toggleStrong = toggleMark(schema.marks.strong);
 export const toggleEm = toggleMark(schema.marks.em);
 export const toggleCode = toggleMark(schema.marks.code);
+
+// Unlike the other toggle* commands above, a link mark carries a URL, so a
+// bare `toggleMark(schema.marks.link)` can't apply it (plan.md M9). Needs a
+// text selection: adds the mark (prompting for the URL) when the range has
+// none yet, removes it (no reprompt) when it already does — the standard
+// "toggle" meaning for a mark that needs input, matching how most rich-text
+// editors handle a link button. Returns false without dispatching for an
+// empty selection or a cancelled/blank prompt, so nothing changes.
+export function toggleLink(state: EditorState, dispatch?: (tr: Transaction) => void): boolean {
+  const { doc, selection } = state;
+  const { from, to, empty } = selection;
+  if (empty) return false;
+  const linkType = schema.marks.link;
+  if (doc.rangeHasMark(from, to, linkType)) {
+    if (dispatch) dispatch(state.tr.removeMark(from, to, linkType));
+    return true;
+  }
+  if (!dispatch) return true;
+  const href = window.prompt("Link URL");
+  if (!href) return false;
+  dispatch(state.tr.addMark(from, to, linkType.create({ href })));
+  return true;
+}
 
 export const setParagraph = setBlockType(schema.nodes.paragraph);
 
@@ -62,6 +85,7 @@ export function buildKeymapPlugin() {
     "Mod-b": toggleStrong,
     "Mod-i": toggleEm,
     "Mod-e": toggleCode,
+    "Mod-k": toggleLink,
     // List-aware Enter (splits into a new list item, or exits an empty one)
     // must run before the base Enter (plain splitBlock), which knows nothing
     // about list_item's structure.

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { splitListItem } from "prosemirror-schema-list";
 import { schema } from "./schema";
@@ -11,6 +11,7 @@ import {
   toggleBulletList,
   toggleCode,
   toggleEm,
+  toggleLink,
   toggleOrderedList,
   toggleStrong,
 } from "./wysiwygCommands";
@@ -65,6 +66,63 @@ describe("mark toggles", () => {
       "code",
       "em",
     ]);
+  });
+});
+
+describe("toggleLink (plan.md M9)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function docWithHello(): ReturnType<typeof schema.node> {
+    return schema.node("doc", { settings: [] }, [
+      schema.node("paragraph", null, [schema.text("hello")]),
+    ]);
+  }
+
+  it("is a no-op on an empty (collapsed) selection", () => {
+    const doc = docWithHello();
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 1) });
+    const result = applyCommand(state, toggleLink);
+    expect(result.applied).toBe(false);
+    expect(result.state.doc.eq(doc)).toBe(true);
+  });
+
+  it("prompts for a URL and applies the link mark to the selection", () => {
+    vi.stubGlobal("window", { prompt: vi.fn(() => "https://example.com") });
+    const doc = docWithHello();
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 6) });
+
+    const result = applyCommand(state, toggleLink);
+    expect(result.applied).toBe(true);
+    const link = result.state.doc.child(0).child(0).marks.find((m) => m.type.name === "link");
+    expect(link?.attrs.href).toBe("https://example.com");
+    expect(pmDocToTypst(result.state.doc)).toBe('#link("https://example.com")[hello]');
+  });
+
+  it("does nothing if the URL prompt is cancelled (returns null)", () => {
+    vi.stubGlobal("window", { prompt: vi.fn(() => null) });
+    const doc = docWithHello();
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 6) });
+
+    const result = applyCommand(state, toggleLink);
+    expect(result.applied).toBe(false);
+    expect(result.state.doc.eq(doc)).toBe(true);
+  });
+
+  it("removes the link mark (no reprompt) when the selection is already linked", () => {
+    const linked = schema.node("doc", { settings: [] }, [
+      schema.node("paragraph", null, [
+        schema.text("hello", [schema.marks.link.create({ href: "https://example.com" })]),
+      ]),
+    ]);
+    const state = EditorState.create({
+      schema,
+      doc: linked,
+      selection: TextSelection.create(linked, 1, 6),
+    });
+
+    const result = applyCommand(state, toggleLink);
+    expect(result.applied).toBe(true);
+    expect(result.state.doc.child(0).child(0).marks).toEqual([]);
   });
 });
 

@@ -52,6 +52,15 @@ pub enum AstInline {
     Text { text: String, marks: Vec<String> },
     Linebreak,
     TypstCall { name: String, raw: String },
+    /// `#link("href")[body]` (plan.md M9). Unlike `strong`/`em`/`code` this
+    /// isn't flattened into `Text.marks` — a mark is a bare name, but a link
+    /// carries a URL, and its body can itself contain arbitrary marked-up
+    /// inline content — so it's a recursive container instead, mirroring
+    /// how `AstBlock::BulletList` nests rather than flattens. The frontend
+    /// (src/typstAst.ts) maps this onto a ProseMirror `link` *mark* applied
+    /// to every leaf produced by `children`, since ProseMirror has no
+    /// separate "link node" concept for inline content.
+    Link { href: String, children: Vec<AstInline> },
 }
 
 #[tauri::command]
@@ -224,15 +233,43 @@ enum FlattenResult {
     Inline(Vec<AstInline>),
 }
 
+/// Recognizes `#link("url")[body]` (and its non-bracket-sugar equivalent
+/// `link("url", [body])` — both parse to the same two positional args) as a
+/// first-class construct rather than falling through to the opaque
+/// `typst_call` treatment `flatten_node`'s generic `FuncCall` arm gives
+/// every other call: it's the only inline construct in the MVP subset
+/// besides marks that isn't opaque, since it becomes a real `link` mark on
+/// the ProseMirror side instead of an inert chip. Returns the URL and body
+/// markup on a match; `None` for anything else (a bare `#link("url")`, a
+/// non-string destination like a label, extra/named arguments, ...), which
+/// then degrades to the normal opaque path.
+fn as_link_call(node: &SyntaxNode) -> Option<(String, ast::Markup<'_>)> {
+    let call = node.cast::<ast::FuncCall>()?;
+    if callee_name(call.callee()) != "link" {
+        return None;
+    }
+    let mut items = call.args().items();
+    let first = items.next()?;
+    let second = items.next()?;
+    if items.next().is_some() {
+        return None; // extra args (e.g. a `body:`/other named arg) - opaque
+    }
+    let ast::Arg::Pos(ast::Expr::Str(url)) = first else { return None };
+    let ast::Arg::Pos(ast::Expr::ContentBlock(body)) = second else { return None };
+    Some((url.get().to_string(), body.body()))
+}
+
 fn try_flatten_pending(pending: &[&SyntaxNode]) -> Option<FlattenResult> {
     let significant: Vec<&SyntaxNode> =
         pending.iter().copied().filter(|n| n.kind() != SyntaxKind::Hash).collect();
     if let [only] = significant.as_slice() {
-        if let Some(call) = only.cast::<ast::FuncCall>() {
-            return Some(FlattenResult::SingleCall(
-                callee_name(call.callee()),
-                format!("#{}", only.full_text()),
-            ));
+        if as_link_call(only).is_none() {
+            if let Some(call) = only.cast::<ast::FuncCall>() {
+                return Some(FlattenResult::SingleCall(
+                    callee_name(call.callee()),
+                    format!("#{}", only.full_text()),
+                ));
+            }
         }
     }
 
@@ -345,6 +382,14 @@ fn flatten_node(node: &SyntaxNode, marks: &[&'static str], out: &mut Vec<AstInli
             true
         }
         SyntaxKind::FuncCall => {
+            if let Some((href, body)) = as_link_call(node) {
+                let mut children = Vec::new();
+                if !flatten_markup_children(body, marks, &mut children) {
+                    return false;
+                }
+                out.push(AstInline::Link { href, children });
+                return true;
+            }
             let call: ast::FuncCall = node.cast().expect("kind checked above");
             out.push(AstInline::TypstCall {
                 name: callee_name(call.callee()),
@@ -550,6 +595,128 @@ mod tests {
             }),
             "{children:?}"
         );
+    }
+
+    #[test]
+    fn link_inside_running_text_becomes_an_inline_link() {
+        let doc = parse("See #link(\"https://typst.app\")[the docs] for more.");
+        let AstBlock::Paragraph { children } = &doc.content[0] else {
+            panic!("expected a paragraph, got {:?}", doc.content[0]);
+        };
+        assert!(
+            children.contains(&AstInline::Link {
+                href: "https://typst.app".into(),
+                children: vec![AstInline::Text { text: "the docs".into(), marks: vec![] }],
+            }),
+            "{children:?}"
+        );
+    }
+
+    #[test]
+    fn standalone_link_paragraph_is_not_treated_as_an_opaque_block_call() {
+        // A lone FuncCall filling a whole paragraph is normally the
+        // "SingleCall" opaque-block special case (see
+        // standalone_call_becomes_a_block_typst_call) - link must be
+        // excluded from that so it stays a real (non-opaque) inline link.
+        let doc = parse("#link(\"https://typst.app\")[Typst]");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::Paragraph {
+                children: vec![AstInline::Link {
+                    href: "https://typst.app".into(),
+                    children: vec![AstInline::Text { text: "Typst".into(), marks: vec![] }],
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn bold_text_inside_a_link_keeps_the_strong_mark() {
+        let doc = parse("#link(\"https://typst.app\")[*Typst*]");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::Paragraph {
+                children: vec![AstInline::Link {
+                    href: "https://typst.app".into(),
+                    children: vec![AstInline::Text {
+                        text: "Typst".into(),
+                        marks: vec!["strong".into()],
+                    }],
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_link_nested_inside_bold_carries_the_strong_mark_on_its_text() {
+        let doc = parse("*#link(\"https://typst.app\")[Typst]*");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::Paragraph {
+                children: vec![AstInline::Link {
+                    href: "https://typst.app".into(),
+                    children: vec![AstInline::Text {
+                        text: "Typst".into(),
+                        marks: vec!["strong".into()],
+                    }],
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn link_with_unsupported_body_content_degrades_the_whole_paragraph() {
+        // A link's body is recursively parsed through the same subset
+        // parser as any other markup (see bold_text_inside_a_link_...) - so
+        // content outside the subset inside it (math, here) must propagate
+        // failure up and degrade the whole containing paragraph verbatim,
+        // same as any other unrecognized construct.
+        let doc = parse("#link(\"https://typst.app\")[$x^2$]");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::UnsupportedBlock { raw: "#link(\"https://typst.app\")[$x^2$]".into() }]
+        );
+    }
+
+    #[test]
+    fn link_call_without_a_content_body_falls_back_to_an_opaque_call() {
+        // `#link("url")` alone (no `[body]`) doesn't match the recognized
+        // two-positional-arg shape, so it stays an opaque typst_call, same
+        // as any other call outside the MVP subset.
+        let doc = parse("#link(\"https://typst.app\")");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::TypstCall {
+                name: "link".into(),
+                raw: "#link(\"https://typst.app\")".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn escaped_brackets_round_trip_as_literal_bracket_characters() {
+        // Confirms `\[`/`\]` are ordinary Escape nodes like `\*`/`\_` (not a
+        // parse error) — each produces its own AstInline::Text leaf here
+        // (Escape and Text are distinct CST node kinds, only coalesced into
+        // one PM text node later by typstAst.ts's run-merging), but the
+        // premise this test exists to check is that they parse to *literal*
+        // "["/"]" characters at all — the basis for escaping `[`/`]` in a
+        // link's body text on the way out (src/typstAst.ts's
+        // escapeTypstText), since that's the first place this codebase
+        // embeds arbitrary text inside a Typst content-block `[...]`
+        // delimiter pair (plan.md M9).
+        let doc = parse("a \\[b\\] c");
+        let AstBlock::Paragraph { children } = &doc.content[0] else {
+            panic!("expected a paragraph, got {:?}", doc.content[0]);
+        };
+        let text: String = children
+            .iter()
+            .map(|c| match c {
+                AstInline::Text { text, .. } => text.as_str(),
+                _ => panic!("expected only Text children, got {c:?}"),
+            })
+            .collect();
+        assert_eq!(text, "a [b] c");
     }
 
     #[test]

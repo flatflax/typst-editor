@@ -3,7 +3,7 @@
 // JSON shape produced by `src-tauri/src/ast.rs::parse_typst_ast` — Rust owns
 // recognizing Typst's real syntax tree, this module only owns mapping that
 // pruned AST into/out of the ProseMirror schema (src/schema.ts).
-import { Node as PMNode } from "prosemirror-model";
+import { Node as PMNode, type Mark } from "prosemirror-model";
 import { schema, type PMDoc, type TypstSet } from "./schema";
 
 export type { TypstSet };
@@ -11,7 +11,12 @@ export type { TypstSet };
 export type AstInline =
   | { type: "text"; text: string; marks: string[] }
   | { type: "linebreak" }
-  | { type: "typst_call"; name: string; raw: string };
+  | { type: "typst_call"; name: string; raw: string }
+  // `#link("href")[...]` (plan.md M9): a recursive container, not a mark
+  // name in `Text.marks` — see ast.rs's `AstInline::Link` doc comment for
+  // why. `children` can itself contain marked-up text, linebreaks, or an
+  // inline typst_call, same as any other markup body.
+  | { type: "link"; href: string; children: AstInline[] };
 
 export type AstBlock =
   | { type: "heading"; level: number; children: AstInline[] }
@@ -87,8 +92,19 @@ function inlineToNodes(children: AstInline[]): PMNode[] {
     flush();
     if (child.type === "linebreak") {
       nodes.push(schema.nodes.hard_break.create());
-    } else {
+    } else if (child.type === "typst_call") {
       nodes.push(schema.nodes.typst_call_inline.create({ name: child.name, raw: child.raw }));
+    } else {
+      // "link": recurse into its body, then stack a `link` mark (with href)
+      // on top of every node that recursion produced — text, hard_break, or
+      // a nested typst_call_inline all carry marks in this schema, so this
+      // handles "bold link" and "link wrapping a call" uniformly.
+      // `addToSet` (not `[linkMark, ...node.marks]`) matters: ProseMirror
+      // requires a node's marks to be sorted by the schema's mark rank, and
+      // link is declared after strong/em/code, so prepending it produces an
+      // invalid [link, strong] order that fails `doc.check()`.
+      const linkMark = schema.marks.link.create({ href: child.href });
+      nodes.push(...inlineToNodes(child.children).map((node) => node.mark(linkMark.addToSet(node.marks))));
     }
   }
   flush();
@@ -331,17 +347,11 @@ function serializeInline(node: PMNode, contentStart: number): Serialized {
   node.forEach((child, offset) => {
     const pos = contentStart + offset;
     if (child.isText) {
-      parts.push(
-        leaf(
-          pos,
-          pos + child.nodeSize,
-          serializeTextRun(child.text ?? "", child.marks.map((mark) => mark.type.name)),
-        ),
-      );
+      parts.push(leaf(pos, pos + child.nodeSize, serializeTextRun(child.text ?? "", child.marks)));
     } else if (child.type.name === "hard_break") {
-      parts.push(leaf(pos, pos + child.nodeSize, "\\\n"));
+      parts.push(leaf(pos, pos + child.nodeSize, withLinkMark("\\\n", child.marks)));
     } else if (child.type.name === "typst_call_inline") {
-      parts.push(leaf(pos, pos + child.nodeSize, child.attrs.raw as string));
+      parts.push(leaf(pos, pos + child.nodeSize, withLinkMark(child.attrs.raw as string, child.marks)));
     }
   });
   return concat(...parts);
@@ -349,18 +359,40 @@ function serializeInline(node: PMNode, contentStart: number): Serialized {
 
 // Typst markup characters that would otherwise be reinterpreted as syntax if
 // they appeared literally in plain text (not already inside a `code` run).
-const TYPST_TEXT_ESCAPE = /[\\*_`#<@]/g;
+// `[`/`]` are included because a link's body text (plan.md M9) is embedded
+// inside a `#link(...)[...]` content-block delimiter pair — an unescaped `]`
+// there would prematurely close the block; escaping them everywhere (not
+// just inside links) is harmless since `\[`/`\]` are ordinary Typst escapes
+// anywhere in markup (confirmed by ast.rs's
+// escaped_brackets_round_trip_as_literal_bracket_characters test).
+const TYPST_TEXT_ESCAPE = /[\\*_`#<@[\]]/g;
 
 function escapeTypstText(text: string): string {
   return text.replace(TYPST_TEXT_ESCAPE, (ch) => `\\${ch}`);
 }
 
-// Marks nest innermost-out as code, then em, then strong — e.g.
-// `*_\`code\`_*` for text carrying all three — matching how Typst itself
-// would parse nested `*_..._*` markup back into the same mark set.
-function serializeTextRun(text: string, marks: string[]): string {
-  let out = marks.includes("code") ? `\`${text}\`` : escapeTypstText(text);
-  if (marks.includes("em")) out = `_${out}_`;
-  if (marks.includes("strong")) out = `*${out}*`;
-  return out;
+function typstStringLiteral(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+// Wraps `text` in `#link("href")[...]` if `marks` carries a `link` mark —
+// shared by serializeTextRun and the hard_break/typst_call_inline cases in
+// serializeInline, since a link can wrap any of those (plan.md M9). Always
+// applied outermost, regardless of the source's original nesting order
+// (`*#link(..)[x]*` and `#link(..)[*x*]` both parse to the same PMDoc — see
+// ast.rs's link tests — so there's only one canonical serialization).
+function withLinkMark(text: string, marks: readonly Mark[]): string {
+  const link = marks.find((mark) => mark.type.name === "link");
+  return link ? `#link(${typstStringLiteral(link.attrs.href as string)})[${text}]` : text;
+}
+
+// Marks nest innermost-out as code, then em, then strong, then link — e.g.
+// `*_\`code\`_*` for text carrying strong/em/code — matching how Typst
+// itself would parse nested `*_..._*` markup back into the same mark set.
+function serializeTextRun(text: string, marks: readonly Mark[]): string {
+  const names = marks.map((mark) => mark.type.name);
+  let out = names.includes("code") ? `\`${text}\`` : escapeTypstText(text);
+  if (names.includes("em")) out = `_${out}_`;
+  if (names.includes("strong")) out = `*${out}*`;
+  return withLinkMark(out, marks);
 }

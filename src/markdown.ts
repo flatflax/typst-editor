@@ -42,7 +42,7 @@ import type {
   Root,
   RootContent,
 } from "mdast";
-import { Node as PMNode } from "prosemirror-model";
+import { Node as PMNode, type Mark } from "prosemirror-model";
 import { schema, type PMDoc, type TypstSet } from "./schema";
 
 const FENCE_CALL = "typst-call";
@@ -196,6 +196,19 @@ function flattenInlineNode(node: PhrasingContent, marks: string[], out: PMNode[]
         out.push(schema.text(node.value, marksFor(addMark(marks, "code"))));
       }
       return true;
+    case "link": {
+      // A `link` mark, not a node (plan.md M9) — mirrors typstAst.ts's
+      // AstInline::Link handling: recurse into the body with the *inherited*
+      // marks (so e.g. a link nested in `**bold**` still gets both), then
+      // stack the link mark on top of every node that produced. `addToSet`
+      // (not prepending) keeps the mark array in the schema's required rank
+      // order — see typstAst.ts's inlineToNodes for the same requirement.
+      const linkChildren: PMNode[] = [];
+      if (!flattenChildren(node.children, marks, linkChildren)) return false;
+      const linkMark = schema.marks.link.create({ href: node.url });
+      for (const child of linkChildren) out.push(child.mark(linkMark.addToSet(child.marks)));
+      return true;
+    }
     default:
       return false;
   }
@@ -289,14 +302,25 @@ function inlineToMdast(node: PMNode): PhrasingContent[] {
   const out: PhrasingContent[] = [];
   node.forEach((child) => {
     if (child.isText) {
-      out.push(wrapMarks(child.text ?? "", child.marks.map((mark) => mark.type.name)));
+      out.push(withLinkMark(wrapMarks(child.text ?? "", child.marks.map((mark) => mark.type.name)), child.marks));
     } else if (child.type.name === "hard_break") {
-      out.push({ type: "break" });
+      out.push(withLinkMark({ type: "break" }, child.marks));
     } else if (child.type.name === "typst_call_inline") {
-      out.push({ type: "inlineCode", value: child.attrs.raw as string });
+      out.push(withLinkMark({ type: "inlineCode", value: child.attrs.raw as string }, child.marks));
     }
   });
   return out;
+}
+
+// Wraps `node` in a mdast `link` if `marks` carries a `link` mark — shared by
+// all three inlineToMdast cases, mirrors typstAst.ts's withLinkMark. Always
+// applied outermost (same rationale as there: the source's original nesting
+// order isn't preserved, only the resulting mark set — a stable fixed point,
+// not byte-identical, matching this project's established round-trip
+// definition).
+function withLinkMark(node: PhrasingContent, marks: readonly Mark[]): PhrasingContent {
+  const link = marks.find((mark) => mark.type.name === "link");
+  return link ? { type: "link", url: link.attrs.href as string, title: null, children: [node] } : node;
 }
 
 // Nests innermost-out as code, then em, then strong — mirrors the ordering

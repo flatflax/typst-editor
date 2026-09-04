@@ -192,6 +192,78 @@ export const typstCallInline: TypstAstFixture = {
   expected: "Inline #emph[call] here.",
 };
 
+// See ast::tests::link_inside_running_text_becomes_an_inline_link
+export const linkInline: TypstAstFixture = {
+  source: 'See #link("https://typst.app")[the docs] for more.',
+  ast: {
+    settings: [],
+    content: [
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", text: "See", marks: [] },
+          { type: "text", text: " ", marks: [] },
+          {
+            type: "link",
+            href: "https://typst.app",
+            children: [{ type: "text", text: "the docs", marks: [] }],
+          },
+          { type: "text", text: " ", marks: [] },
+          { type: "text", text: "for more.", marks: [] },
+        ],
+      },
+    ],
+  },
+  expected: 'See #link("https://typst.app")[the docs] for more.',
+};
+
+// See ast::tests::standalone_link_paragraph_is_not_treated_as_an_opaque_block_call
+export const linkStandalone: TypstAstFixture = {
+  source: '#link("https://typst.app")[Typst]',
+  ast: {
+    settings: [],
+    content: [
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "link",
+            href: "https://typst.app",
+            children: [{ type: "text", text: "Typst", marks: [] }],
+          },
+        ],
+      },
+    ],
+  },
+  expected: '#link("https://typst.app")[Typst]',
+};
+
+// See ast::tests::bold_text_inside_a_link_keeps_the_strong_mark AND
+// ast::tests::a_link_nested_inside_bold_carries_the_strong_mark_on_its_text —
+// both `#link("...")[*Typst*]` and `*#link("...")[Typst]*` parse to this
+// exact AST (marks always nest inside the link in the mapped model — see
+// typstAst.ts's withLinkMark), so both are pinned by the same fixture here;
+// the second is only exercised on the Rust-parse side, not re-declared here.
+export const linkWithBoldText: TypstAstFixture = {
+  source: '#link("https://typst.app")[*Typst*]',
+  ast: {
+    settings: [],
+    content: [
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "link",
+            href: "https://typst.app",
+            children: [{ type: "text", text: "Typst", marks: ["strong"] }],
+          },
+        ],
+      },
+    ],
+  },
+  expected: '#link("https://typst.app")[*Typst*]',
+};
+
 // See ast::tests::top_level_set_rule_is_lifted_into_settings_and_excluded_from_content
 export const typstSet: TypstAstFixture = {
   source: "#set text(size: 11pt)\n\n= Heading",
@@ -344,6 +416,9 @@ export const fixtures = {
   orderedListWithStart,
   typstCallBlock,
   typstCallInline,
+  linkInline,
+  linkStandalone,
+  linkWithBoldText,
   typstSet,
   unsupportedBlockSandwich,
   mixed,

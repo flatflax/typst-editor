@@ -1,8 +1,16 @@
-# Typst WYSIWYG Editor — MVP Plan
+# Typst WYSIWYG Editor — Plan
 
 ## Context
 
-Goal: prove that `源码 ⇄ 编辑模型 ⇄ Typst 排版结果` can form a **stable closed loop**, on top of Tauri. This is not "build a Typst IDE" — it's a narrow proof that:
+**The product goal**: a desktop Typst editor that edits like Typora or Notion — a
+single WYSIWYG view, no separate preview pane — while every character on the page is
+still backed by the real Typst compiler, not an approximation of one. See **Phase 3 —
+Single-View WYSIWYG** below for that target and the architecture that makes it
+tractable.
+
+**The MVP's goal (complete, M0–M6)** was narrower and came first by design: prove that
+`Source code ⇄ Edit model ⇄ Typst typesetting result` can form a **stable closed loop** on top of Tauri,
+before attempting single-view editing at all. Not "build a Typst IDE" — a proof that:
 
 - a shared **Editor Model** (rich-text document, not raw text) can be losslessly parsed from *and* serialized back to **Typst source**, and separately to/from **Markdown source**, for a small syntax subset;
 - that same Editor Model can always be serialized to Typst source and handed to the **real Typst compiler** (not a reimplementation) to produce an accurate rendered preview;
@@ -12,9 +20,15 @@ Two scope decisions already made with the user (do not revisit without asking):
 1. **WYSIWYG = rich-text editing surface + a separate accurate preview pane** (a split-pane approximation of Typora/Notion), *not* single-view editing on top of Typst's real paginated layout, for the MVP specifically — that remains architecturally harder and was correctly out of scope while the loop itself was unproven. The user has since confirmed single-view WYSIWYG (no separate pane) as the long-term target once the loop is stable; see **Phase 3 — Single-View WYSIWYG** below for the architecture that makes it tractable rather than an open-ended rewrite.
 2. **Markdown is a first-class second source format**, requiring real Markdown ⇄ Editor Model conversion (not just a UX inspiration) — Typst source and Markdown source are two independent "spokes" around the same Editor Model "hub."
 
-**Status: MVP (M0–M6) is complete** — the closed loop is proven, including the M6 cross-spoke stability suite and mixed-content compile-diff fixture. See **Phase 2 — Post-MVP Roadmap** (content coverage + file I/O) and **Phase 3 — Single-View WYSIWYG** (the long-term target: no separate preview pane) below.
+**Status:** MVP (M0–M6) complete — the closed loop is proven, including the M6
+cross-spoke stability suite and mixed-content compile-diff fixture. **Phase 2** (content
+coverage + file I/O) is in progress: M7 File I/O, M8 PDF export, and M9 Links are done;
+M10 Tables and M11 Images/figures are next. **Phase 3** (the single-view product goal
+above) hasn't started — see both phases' sections below.
 
-## Architecture
+## Phase 1 — MVP (M0–M6, complete)
+
+### Architecture
 
 **Hub-and-spoke**, Editor Model (a ProseMirror document) is the hub:
 
@@ -44,7 +58,7 @@ Typst source  <---parse/serialize--->  Editor Model (ProseMirror doc)  <---parse
   - **No simulated semantics in the editor**: the WYSIWYG surface does not attempt to visually apply `#set` rules (e.g. a changed font/size) — per the existing WYSIWYG-scope decision, only the preview pane (which always compiles real serialized Typst source through the real compiler) reflects their actual effect. This is not a gap, just a restatement of the existing "rich text + accurate preview pane" split.
   - Only a single `#set` statement per fence/position (no nested blocks like `#set text(..); content` scoping) — scoped `#set` (Typst's block-scoped form) still falls through to `unsupported_block`.
 
-### Process split (Rust backend vs. TypeScript frontend)
+#### Process split (Rust backend vs. TypeScript frontend)
 
 Rust backend (Tauri commands) owns everything that must use the **real Typst engine**, so fidelity is never in question:
 - `parse_typst_ast(source: String) -> AstJson` — via `typst_syntax::parse` (pure, infallible, no World needed), pruned/simplified to a JSON shape covering only the MVP node kinds (everything else becomes an opaque span).
@@ -55,7 +69,7 @@ TypeScript frontend owns the Editor Model and both source-format conversions, si
 - `mdastToDoc(ast) -> PMDoc` / `pmDocToMdast(doc) -> mdast` using `remark-parse`/`remark-stringify` (well-maintained CommonMark libs) — reuses the *same* PMDoc schema/subset as the Typst path.
 - ProseMirror schema, keymaps, and the WYSIWYG `EditorView`.
 
-### Key technical decisions (from research, see below)
+#### Key technical decisions (from research, see below)
 
 - **Typst crates** (all pinned `= "0.15"`, current stable `0.15.1`): `typst`, `typst-syntax`, `typst-layout` (needed directly — `PagedDocument`/`Page` are not re-exported through the `typst` facade), `typst-kit` (font/file/date helpers, feature-gated), `typst-render` and/or `typst-svg`, `typst-ide` (click/cursor position mapping, see below).
 - **Bidirectional position mapping via `typst-ide`**: `typst-ide::jump_from_click_in_frame(world, doc, frame, click_point) -> Option<Jump>` (click on a rendered page → `Jump::File(id, byte_offset)`) and `typst-ide::jump_from_cursor(doc, source, cursor_byte_offset) -> Vec<PagedPosition>` (source cursor → page + point to scroll/highlight) give us a *direct*, library-backed link between Typst source and the rendered preview, on top of the debounced full-recompile loop. Requires implementing the small `IdeWorld` trait (extends `World` with `upcast()`) on top of `TauriWorld`. This is a concrete, testable manifestation of "source ↔ 排版结果" and is cheap to add once `compile_typst`'s `World`/`PagedDocument` exist (M1) — do it there rather than deferring it.
@@ -69,7 +83,7 @@ TypeScript frontend owns the Editor Model and both source-format conversions, si
   - **Fixed post-M6**: `codemirror`'s `basicSetup` bundles `closeBrackets()` (bracket/quote auto-closing), a programming-editor convenience that actively corrupts typed or pasted Typst/Markdown source — both freely use `(`/`[`/`{` as plain syntax (e.g. `#table(columns: (1fr, 2fr), [a], [b])`), and typing or pasting a *complete* snippet containing them leaves extra auto-inserted closing brackets alongside the user's own, unbalancing delimiter counts. Directly reproduced (simulated real keystrokes turning a `#table(...)` call into mismatched-parenthesis source that then parsed as something unrecognizable) and confirmed as the cause of a user-reported bug where content appeared corrupted after switching views. Fixed in `SourceEditor.tsx` by replacing `basicSetup` with its own extension list minus `closeBrackets()`/`closeBracketsKeymap` — `basicSetup`'s own doc comment invites exactly this ("copy it into your own code, and adjust it as desired").
 - **React + TypeScript + Vite** frontend, **Tauri v2** shell.
 
-## Milestones
+### Milestones
 
 **M0 — Bootstrap & prove the hardest integration first**
 Scaffold Tauri v2 + Vite/React app. Implement `TauriWorld` + font bundling + `compile_typst` command with a *hardcoded* Typst string. Render the returned SVG in the webview. This is the highest-risk integration (World trait boilerplate, font loading) — de-risk it before building anything else.
@@ -99,13 +113,13 @@ Mount the ProseMirror `EditorView` with keymaps/toolbar for the subset (bold/ita
 
 Explicitly out of scope for this MVP (call out to the user as future work, not silently dropped): math mode, tables, images/figures, links/footnotes/citations, `#let`/`#show`/control-flow/scoped `#set` (only opaque top-level `#name(...)`/`#name[...]` calls and top-level `#set func(...)` rules are supported, see above), multi-file projects/imports, PDF export button, true inline-layout WYSIWYG, CodeMirror syntax highlighting theming, collaborative editing, incremental compilation, range/selection-level click-and-cursor highlighting (point/caret-level sync only, see the precision note above), byte-exact WYSIWYG click/cursor sync inside bold/italic/code-marked-up text (proportional interpolation only, see the M5 addition to the precision note above).
 
-## Verification
+### Verification
 
 - `cargo test` for `TauriWorld`/font-loading sanity (M0) and any Rust-side unit tests on `parse_typst_ast` shape.
 - `vitest` round-trip + compile-diff suite (M3/M4/M6) as the primary evidence the loop is stable — this is the actual deliverable proof, not just "it runs."
 - Manual run via `tauri dev`: load each MVP-subset fixture, exercise the M6 smoke checklist by hand in the running app, confirm preview pane matches expected rendering for each of the three entry views.
 
-## Key risks (flagged, not hidden)
+### Key risks (flagged, not hidden)
 
 - Typst crate boilerplate (`World` trait, font setup) is the most likely source of early slowdown — front-loaded into M0 deliberately.
 - Two independent parsers (Typst, Markdown) feeding one schema constrains both to their common subset; anything either grammar expresses that the other can't becomes an `unsupported_block`, by design — this keeps the loop honest rather than silently lossy.
@@ -135,12 +149,13 @@ Open/Save/Save As via `@tauri-apps/plugin-dialog` + `@tauri-apps/plugin-fs`. Loa
 - Frontend: `Export PDF…` button in `App.tsx`'s file bar exports whatever `derived.source` currently holds — the exact Typst source already feeding the live SVG preview, regardless of which of the three views is active — so the exported PDF's content matches the preview by construction rather than by re-deriving a possibly-different serialization. `src/fileIO.ts`'s `withPdfExtension` suggests a same-directory `.pdf` default path.
 - Verified with `cargo test` (`export::tests`: valid source produces bytes starting with the `%PDF-` magic number; a compile error reports `Err` and leaves no file on disk) rather than a full page-count/text-extraction fixture check — judged sufficient for MVP-sized fixtures given `typst_pdf::pdf` is a well-tested first-party crate, not the app's own logic.
 
-**M9 — Links**
+**M9 — Links — done**
 Cheapest content addition — a mark, not a new node type, so it reuses the existing mark infrastructure (`strong`/`em`/`code`) rather than needing new schema plumbing:
 - Typst: `#link("url")[text]` — a self-contained call-like node, parsed/serialized directly (not opaque — unlike `typst_call`, we *do* understand this one's shape) into a `link` mark with a `href` attribute.
 - Markdown: native `[text](url)` — mdast `link` node maps directly.
 - ProseMirror: standard `link` mark (attrs: `href`), toolbar button + keymap, no new leaf/block node.
 - Round-trip fixtures mirroring the M3/M4 pattern, including a link inside other marks (bold link) to confirm mark-stacking survives both spokes.
+- Implemented in `ast.rs` (`AstInline::Link` — a recursive container, not a flattened mark name, since a link's body can itself contain marked-up content, unlike `strong`/`em`/`code`; `as_link_call` recognizes `#link("url")[body]` specifically and excludes it from the generic opaque-`FuncCall`/`SingleCall` paths), `schema.ts` (`link` mark, `inclusive: false`), `typstAst.ts`/`markdown.ts` (both directions: recurse into the link body then stack the `link` mark via `addToSet` — not prepend — onto every produced node, since ProseMirror requires marks sorted by schema rank; serialization always emits the link outermost regardless of the source's original nesting order, e.g. `*#link(..)[x]*` and `#link(..)[*x*]` both round-trip to the same canonical form), and `wysiwygCommands.ts` (`toggleLink`: prompts for a URL on an empty-selection-aware add, strips the mark on toggle-off; `Mod-k` keymap + toolbar button in `WysiwygEditor.tsx`). `[`/`]` were added to the Typst text-escape set since link body text is now the first place arbitrary text gets embedded inside a Typst content-block delimiter pair. 135/135 frontend tests, 36/36 Rust tests pass.
 
 **M10 — Tables**
 The highest-effort content addition this phase, because Typst has no lightweight table *markup* (unlike Markdown's GFM pipe tables) — a table is a `#table(columns: .., [cell], [cell], ...)` function call, so representing an editable table in the Editor Model means parsing/generating a *structured* subset of call-argument syntax, not treating it as opaque like `typst_call`:
@@ -205,4 +220,4 @@ Reuse and generalize the `jump_from_click`/`jump_from_cursor` infrastructure so 
 
 - **Cross-block layout dependencies**: a block's compiled size/appearance isn't always purely a function of its own content — earlier `#set` rules, automatic numbering, or widow/orphan control can mean an edit to one block should, in principle, affect neighboring blocks' rendering too. Full accuracy may require re-rendering a window of neighboring blocks rather than just the one edited; scope the first version to accept some inaccuracy here rather than solving it upfront.
 - **Page-boundary UX is genuinely undefined** — decide (with the user) what single-view mode does with a block that spans a page break before building M14, not during.
-- **This phase is large enough to warrant treating M12 as a hard gate**: if the feasibility spike shows incremental recompilation can't hit an acceptable latency budget even for whole-doc recompilation, the milestone plan for M13+ needs to be revisited (block-scoped partial compilation is a much bigger lift than the sketch above assumes) before committing further design or implementation time.
+- **This phase is large enough to warrant treating M13 as a hard gate**: if the feasibility spike shows incremental recompilation can't hit an acceptable latency budget even for whole-doc recompilation, the milestone plan for M14+ needs to be revisited (block-scoped partial compilation is a much bigger lift than the sketch above assumes) before committing further design or implementation time.

@@ -123,10 +123,32 @@ describe("markdown round trip", () => {
     expect(doc.child(0).attrs.raw).toBe("```rust\nfn main() {}\n```");
   });
 
-  it("a link embedded in a paragraph demotes the whole paragraph to unsupported_block", () => {
-    const { doc } = assertStableRoundTrip("See [here](https://example.com) now.");
-    expect(doc.child(0).type).toBe(schema.nodes.unsupported_block);
-    expect(doc.child(0).attrs.raw).toBe("See [here](https://example.com) now.");
+  // plan.md M9: a link is a mark (reusing the strong/em/code mark
+  // infrastructure), not a node — so unlike the pre-M9 behavior (a link used
+  // to demote its whole containing paragraph to unsupported_block), it now
+  // round-trips as real, editable content.
+  it("a link round-trips into a link mark, not unsupported_block", () => {
+    const { doc, regenerated } = assertStableRoundTrip("See [here](https://example.com) now.");
+    expect(regenerated).toBe("See [here](https://example.com) now.");
+    const paragraph = doc.child(0);
+    let found: { href: string; text: string } | undefined;
+    paragraph.forEach((n) => {
+      const link = n.marks.find((m) => m.type.name === "link");
+      if (link) found = { href: link.attrs.href as string, text: n.text ?? "" };
+    });
+    expect(found).toEqual({ href: "https://example.com", text: "here" });
+  });
+
+  // Confirms mark-stacking survives the Markdown spoke too (plan.md M9:
+  // "including a link inside other marks (bold link)") — mirrors
+  // typstAst.fixtures.ts's linkWithBoldText on the Typst side.
+  it("a bold link keeps both the strong and link marks", () => {
+    const { doc, regenerated } = assertStableRoundTrip("[**Typst**](https://typst.app)");
+    expect(regenerated).toBe("[**Typst**](https://typst.app)");
+    const run = doc.child(0).child(0);
+    const markNames = run.marks.map((m) => m.type.name).sort();
+    expect(markNames).toEqual(["link", "strong"]);
+    expect(run.marks.find((m) => m.type.name === "link")?.attrs.href).toBe("https://typst.app");
   });
 
   // plan.md M4 asks for a compile-diff proof that content authored via
@@ -144,6 +166,12 @@ describe("markdown round trip", () => {
     expect(pmDocToTypst(doc)).toBe(
       "#set text(size: 30pt)\n\n= Heading\n\n#line(length: 100%)",
     );
+  });
+
+  // Same cross-spoke proof as the #set/typst_call test above, for a link.
+  it("a markdown-authored link reaches pmDocToTypst as a real #link(...) call", () => {
+    const doc = markdownToDoc("See [the docs](https://typst.app) for more.");
+    expect(pmDocToTypst(doc)).toBe('See #link("https://typst.app")[the docs] for more.');
   });
 
   it("a multi-paragraph list item collapses to a single unsupported_block for that item", () => {

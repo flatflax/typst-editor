@@ -182,5 +182,23 @@ export const schema = new Schema({
       parseDOM: [{ tag: "code" }],
       toDOM: () => ["code", 0],
     },
+    // Typst `#link("href")[...]` / Markdown `[...](href)` (plan.md M9) — a
+    // mark, not a node: both source grammars let a link wrap arbitrary
+    // marked-up inline content (e.g. a bold link), which a ProseMirror mark
+    // (stackable with strong/em/code on the same text) represents directly,
+    // unlike `typst_call`'s opaque leaf-node treatment.
+    link: {
+      attrs: { href: { default: "" } },
+      // Typing immediately after a link shouldn't continue it (standard
+      // ProseMirror convention for link-like marks).
+      inclusive: false,
+      parseDOM: [
+        {
+          tag: "a[href]",
+          getAttrs: (dom) => ({ href: (dom as HTMLElement).getAttribute("href") ?? "" }),
+        },
+      ],
+      toDOM: (mark) => ["a", { href: mark.attrs.href as string }, 0],
+    },
   },
 });
