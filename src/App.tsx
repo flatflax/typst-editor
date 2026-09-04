@@ -1,49 +1,64 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+// Hardcoded per M0 scope (plan.md): prove Rust World + font bundling +
+// compile_typst + SVG rendering before any editor UI exists.
+const HARDCODED_TYPST_SOURCE = `
+= Typst Editor — M0 Bootstrap
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+This SVG was produced by the *real* Typst compiler running inside the
+Tauri Rust backend, not a reimplementation.
+
+- Bold and _italic_ text
+- \`inline code\`
+- A bullet list item
+
++ An ordered list item
++ Another one
+`;
+
+type CompileDiagnostic = {
+  severity: "error" | "warning";
+  message: string;
+};
+
+type CompileResult = {
+  svg: string | null;
+  diagnostics: CompileDiagnostic[];
+};
+
+function App() {
+  const [result, setResult] = useState<CompileResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<CompileResult>("compile_typst", { source: HARDCODED_TYPST_SOURCE })
+      .then(setResult)
+      .catch((err) => setError(String(err)));
+  }, []);
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+      <h1>Typst Editor — M0</h1>
+      <p>
+        Source → <code>compile_typst</code> (Rust, real Typst engine) →
+        rendered SVG preview.
+      </p>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+      {error && <p className="preview-error">Invoke failed: {error}</p>}
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+      {result?.diagnostics.map((d, i) => (
+        <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
+          {d.severity}: {d.message}
+        </p>
+      ))}
+
+      {result?.svg ? (
+        <div className="preview" dangerouslySetInnerHTML={{ __html: result.svg }} />
+      ) : (
+        !error && <p>Compiling…</p>
+      )}
     </main>
   );
 }
