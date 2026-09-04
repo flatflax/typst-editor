@@ -7,6 +7,7 @@ import { toCMDiagnostics } from "./diagnosticPosition";
 
 export type SourceEditorHandle = {
   setCursor: (offset: number) => void;
+  setValue: (value: string) => void;
 };
 
 export type EditorDiagnostic = {
@@ -91,6 +92,16 @@ const SourceEditor = forwardRef<SourceEditorHandle, Props>(function SourceEditor
       const pos = Math.max(0, Math.min(offset, view.state.doc.length));
       view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
       view.focus();
+    },
+    // Pushes new content in from outside (plan.md M5's view switcher, which
+    // reuses this component for both the Typst and Markdown source panes).
+    // Dispatched as a normal document-replacing transaction, so it flows
+    // through the same updateListener as a user edit and keeps onChange in
+    // sync — no separate "controlled value" plumbing needed.
+    setValue(value: string) {
+      const view = viewRef.current;
+      if (!view) return;
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
     },
   }));
 

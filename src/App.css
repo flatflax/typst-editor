@@ -31,8 +31,28 @@
 }
 
 .app-header p {
-  margin: 0 0 1rem;
+  margin: 0 0 0.75rem;
   opacity: 0.75;
+}
+
+.view-switcher {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.view-switcher button {
+  padding: 0.4em 0.9em;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.view-switcher button.active {
+  background: #396cd8;
+  border-color: #396cd8;
+  color: #fff;
 }
 
 .workspace {
@@ -43,7 +63,7 @@
   min-height: 0;
 }
 
-.source-editor,
+.editor-pane,
 .preview-pane {
   min-height: 0;
   overflow: auto;
@@ -52,8 +72,89 @@
   background: #fff;
 }
 
+.editor-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.view-panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.source-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
 .source-editor .cm-editor {
   height: 100%;
+}
+
+.wysiwyg-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.wysiwyg-toolbar {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.5rem;
+  border-bottom: 1px solid #ddd;
+}
+
+.wysiwyg-toolbar button {
+  min-width: 2em;
+  padding: 0.3em 0.5em;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.wysiwyg-settings {
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid #ddd;
+  background: #fafafa;
+  font-size: 0.9em;
+}
+
+.wysiwyg-settings pre {
+  margin: 0.25em 0;
+  white-space: pre-wrap;
+}
+
+.wysiwyg-content {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 1rem;
+}
+
+.wysiwyg-content .ProseMirror {
+  outline: none;
+  min-height: 100%;
+}
+
+.wysiwyg-content pre[data-unsupported-block] {
+  background: #f4f4f4;
+  border-left: 3px solid #999;
+  padding: 0.5em 0.75em;
+  overflow-x: auto;
+}
+
+.wysiwyg-content [data-typst-call] {
+  display: inline-block;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 4px;
+  padding: 0 0.3em;
+  font-family: monospace;
+  color: #3730a3;
 }
 
 .preview-pane {
@@ -106,9 +207,36 @@
     background-color: #2f2f2f;
   }
 
-  .source-editor,
+  .editor-pane,
   .preview-pane {
     background: #1e1e1e;
     border-color: #444;
+  }
+
+  .view-switcher button,
+  .wysiwyg-toolbar button {
+    background: #2f2f2f;
+    border-color: #555;
+    color: #f6f6f6;
+  }
+
+  .wysiwyg-toolbar,
+  .wysiwyg-settings {
+    border-color: #444;
+  }
+
+  .wysiwyg-settings {
+    background: #262626;
+  }
+
+  .wysiwyg-content pre[data-unsupported-block] {
+    background: #262626;
+    border-left-color: #777;
+  }
+
+  .wysiwyg-content [data-typst-call] {
+    background: #1e2350;
+    border-color: #3730a3;
+    color: #c7d2fe;
   }
 }

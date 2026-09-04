@@ -1,0 +1,62 @@
+// ProseMirror commands + keymap for the WYSIWYG toolbar (plan.md M5:
+// "keymaps/toolbar for the subset (bold/italic/heading level/lists)").
+// Pure `prosemirror-state`/`-commands`/`-keymap` logic — no DOM, so it's
+// unit-testable headlessly (see wysiwygCommands.test.ts) without mounting an
+// EditorView.
+import type { Command } from "prosemirror-state";
+import type { NodeType } from "prosemirror-model";
+import { baseKeymap, chainCommands, setBlockType, toggleMark } from "prosemirror-commands";
+import { keymap } from "prosemirror-keymap";
+import { liftListItem, sinkListItem, splitListItem, wrapInList } from "prosemirror-schema-list";
+import { schema } from "./schema";
+
+export const toggleStrong = toggleMark(schema.marks.strong);
+export const toggleEm = toggleMark(schema.marks.em);
+export const toggleCode = toggleMark(schema.marks.code);
+
+export const setParagraph = setBlockType(schema.nodes.paragraph);
+
+export function setHeading(level: 1 | 2 | 3): Command {
+  return setBlockType(schema.nodes.heading, { level });
+}
+
+function isInsideList(state: Parameters<Command>[0], listType: NodeType): boolean {
+  const { $from } = state.selection;
+  for (let depth = $from.depth; depth > 0; depth--) {
+    if ($from.node(depth).type === listType) return true;
+  }
+  return false;
+}
+
+// Toggling a list isn't a single prosemirror-schema-list primitive: wrap the
+// selection in a fresh list when it isn't in one of this kind already,
+// otherwise lift back out to plain paragraphs.
+function toggleList(listType: NodeType, itemType: NodeType): Command {
+  return (state, dispatch, view) => {
+    if (isInsideList(state, listType)) {
+      return liftListItem(itemType)(state, dispatch, view);
+    }
+    return wrapInList(listType)(state, dispatch, view);
+  };
+}
+
+export const toggleBulletList = toggleList(schema.nodes.bullet_list, schema.nodes.list_item);
+export const toggleOrderedList = toggleList(schema.nodes.ordered_list, schema.nodes.list_item);
+
+export const sinkList = sinkListItem(schema.nodes.list_item);
+export const liftList = liftListItem(schema.nodes.list_item);
+
+export function buildKeymapPlugin() {
+  return keymap({
+    ...baseKeymap,
+    "Mod-b": toggleStrong,
+    "Mod-i": toggleEm,
+    "Mod-e": toggleCode,
+    // List-aware Enter (splits into a new list item, or exits an empty one)
+    // must run before the base Enter (plain splitBlock), which knows nothing
+    // about list_item's structure.
+    Enter: chainCommands(splitListItem(schema.nodes.list_item), baseKeymap.Enter),
+    Tab: sinkList,
+    "Shift-Tab": liftList,
+  });
+}

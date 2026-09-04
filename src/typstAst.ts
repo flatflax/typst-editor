@@ -107,85 +107,196 @@ function marksFor(markNames: string[]) {
 // PMDoc -> Typst source
 // ---------------------------------------------------------------------------
 
-export function pmDocToTypst(doc: PMDoc): string {
-  const settings = (doc.attrs.settings ?? []) as TypstSet[];
-  const settingsText = settings.map((s) => s.raw).join("\n");
+// One breakpoint tying a PM document position to the byte offset in the
+// generated Typst source it produced (plan.md M5: "extend pmDocToTypst to
+// also emit a position map ... so the M1 click/cursor-sync feature also
+// works while editing in WYSIWYG mode"). Recorded once per inline leaf
+// (text run / hard_break / typst_call_inline) and once per block's own
+// syntax prefix (heading marker, list marker, a call/unsupported block's
+// raw text) — not per character, matching the "point/caret-level sync only"
+// precision already established for the Typst-source-only case in M1
+// (plan.md's precision note): close enough to jump to, not byte-exact.
+export type PositionMapEntry = { pm: number; typst: number };
 
-  const blocks: string[] = [];
-  doc.forEach((node) => {
-    const text = serializeBlock(node);
-    if (text.length > 0) blocks.push(text);
-  });
-  const contentText = blocks.join("\n\n");
+// Every recursive serialize* helper below returns one of these instead of a
+// plain string, carrying position breakpoints local to `text` (offset 0 =
+// start of this fragment) — `join`/`concat` shift them into the parent's
+// coordinate space as fragments are combined, so the full tree assembles
+// into one globally-consistent position map alongside the source string.
+type Serialized = { text: string; positions: PositionMapEntry[] };
 
-  if (settingsText && contentText) return `${settingsText}\n\n${contentText}`;
-  return settingsText || contentText;
+function leaf(pmPos: number, text: string): Serialized {
+  return text.length > 0 ? { text, positions: [{ pm: pmPos, typst: 0 }] } : { text: "", positions: [] };
 }
 
-function serializeBlock(node: PMNode): string {
+// Text with no associated PM position — used for content (the settings
+// block) that doesn't correspond to a position in the doc's flow content.
+function unpositioned(text: string): Serialized {
+  return { text, positions: [] };
+}
+
+function join(parts: Serialized[], separator: string): Serialized {
+  let text = "";
+  const positions: PositionMapEntry[] = [];
+  parts.forEach((part, i) => {
+    if (i > 0) text += separator;
+    const base = text.length;
+    text += part.text;
+    for (const p of part.positions) positions.push({ pm: p.pm, typst: base + p.typst });
+  });
+  return { text, positions };
+}
+
+function concat(...parts: Serialized[]): Serialized {
+  return join(parts, "");
+}
+
+export function pmDocToTypst(doc: PMDoc): string {
+  return pmDocToTypstWithPositions(doc).source;
+}
+
+export function pmDocToTypstWithPositions(doc: PMDoc): {
+  source: string;
+  positions: PositionMapEntry[];
+} {
+  const settings = (doc.attrs.settings ?? []) as TypstSet[];
+  const settingsPart =
+    settings.length > 0 ? unpositioned(settings.map((s) => s.raw).join("\n")) : unpositioned("");
+
+  const blockParts: Serialized[] = [];
+  doc.forEach((node, offset) => {
+    const part = serializeBlock(node, offset);
+    if (part.text.length > 0) blockParts.push(part);
+  });
+  const contentPart = join(blockParts, "\n\n");
+
+  const result =
+    settingsPart.text && contentPart.text
+      ? join([settingsPart, contentPart], "\n\n")
+      : settingsPart.text
+        ? settingsPart
+        : contentPart;
+
+  return { source: result.text, positions: result.positions };
+}
+
+// Finds the Typst byte offset a PM document position maps to — the
+// breakpoint at or immediately before `pmPos` (clamped to the first/last
+// entry when out of range). `positions` must come from
+// `pmDocToTypstWithPositions` for the *same* doc — it relies on that array
+// being sorted ascending by both `pm` and `typst` simultaneously, which
+// holds because the tree is walked in document order and text is only ever
+// appended.
+export function pmPosToTypstOffset(positions: PositionMapEntry[], pmPos: number): number | null {
+  return nearestBefore(positions, pmPos, (entry) => entry.pm, (entry) => entry.typst);
+}
+
+// The inverse of `pmPosToTypstOffset`: given a Typst byte offset (e.g. from
+// `jump_from_click`), finds the PM position it corresponds to.
+export function typstOffsetToPmPos(positions: PositionMapEntry[], typstOffset: number): number | null {
+  return nearestBefore(positions, typstOffset, (entry) => entry.typst, (entry) => entry.pm);
+}
+
+function nearestBefore(
+  positions: PositionMapEntry[],
+  target: number,
+  key: (entry: PositionMapEntry) => number,
+  value: (entry: PositionMapEntry) => number,
+): number | null {
+  if (positions.length === 0) return null;
+  let lo = 0;
+  let hi = positions.length - 1;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (key(positions[mid]) <= target) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return value(positions[best]);
+}
+
+function serializeBlock(node: PMNode, pos: number): Serialized {
   switch (node.type.name) {
     case "heading":
-      return `${"=".repeat(node.attrs.level as number)} ${serializeInline(node)}`;
+      return concat(
+        leaf(pos, `${"=".repeat(node.attrs.level as number)} `),
+        serializeInline(node, pos + 1),
+      );
     case "paragraph":
-      return serializeInline(node);
+      return serializeInline(node, pos + 1);
     case "bullet_list":
     case "ordered_list":
-      return serializeList(node, 0);
+      return serializeList(node, pos, 0);
     case "typst_call":
     case "unsupported_block":
-      return node.attrs.raw as string;
+      return leaf(pos, node.attrs.raw as string);
     default:
       throw new Error(`pmDocToTypst: unexpected top-level block "${node.type.name}"`);
   }
 }
 
-function serializeList(node: PMNode, depth: number): string {
+function serializeList(node: PMNode, pos: number, depth: number): Serialized {
   const isOrdered = node.type.name === "ordered_list";
   let counter = isOrdered ? (node.attrs.order as number) : 0;
-  const lines: string[] = [];
-  node.forEach((item) => {
+  const items: Serialized[] = [];
+  node.forEach((item, offset) => {
     const marker = isOrdered ? `${counter}.` : "-";
-    lines.push(serializeListItem(item, marker, depth));
+    items.push(serializeListItem(item, pos + 1 + offset, marker, depth));
     counter += 1;
   });
-  return lines.join("\n");
+  return join(items, "\n");
 }
 
-function serializeListItem(item: PMNode, marker: string, depth: number): string {
+function serializeListItem(item: PMNode, pos: number, marker: string, depth: number): Serialized {
   const indent = "  ".repeat(depth);
-  const lines = [`${indent}${marker} ${serializePrimary(item.child(0))}`];
+  const contentStart = pos + 1;
+  const primary = item.child(0);
+  const parts: Serialized[] = [
+    concat(leaf(pos, `${indent}${marker} `), serializePrimary(primary, contentStart)),
+  ];
+  let childPos = contentStart + primary.nodeSize;
   for (let i = 1; i < item.childCount; i++) {
-    lines.push(serializeList(item.child(i), depth + 1));
+    const child = item.child(i);
+    parts.push(serializeList(child, childPos, depth + 1));
+    childPos += child.nodeSize;
   }
-  return lines.join("\n");
+  return join(parts, "\n");
 }
 
-function serializePrimary(node: PMNode): string {
+function serializePrimary(node: PMNode, pos: number): Serialized {
   switch (node.type.name) {
     case "heading":
-      return `${"=".repeat(node.attrs.level as number)} ${serializeInline(node)}`;
+      return concat(
+        leaf(pos, `${"=".repeat(node.attrs.level as number)} `),
+        serializeInline(node, pos + 1),
+      );
     case "paragraph":
-      return serializeInline(node);
+      return serializeInline(node, pos + 1);
     case "typst_call":
     case "unsupported_block":
-      return node.attrs.raw as string;
+      return leaf(pos, node.attrs.raw as string);
     default:
       throw new Error(`pmDocToTypst: unexpected list item content "${node.type.name}"`);
   }
 }
 
-function serializeInline(node: PMNode): string {
-  let out = "";
-  node.forEach((child) => {
+function serializeInline(node: PMNode, contentStart: number): Serialized {
+  const parts: Serialized[] = [];
+  node.forEach((child, offset) => {
+    const pos = contentStart + offset;
     if (child.isText) {
-      out += serializeTextRun(child.text ?? "", child.marks.map((mark) => mark.type.name));
+      parts.push(leaf(pos, serializeTextRun(child.text ?? "", child.marks.map((mark) => mark.type.name))));
     } else if (child.type.name === "hard_break") {
-      out += "\\\n";
+      parts.push(leaf(pos, "\\\n"));
     } else if (child.type.name === "typst_call_inline") {
-      out += child.attrs.raw as string;
+      parts.push(leaf(pos, child.attrs.raw as string));
     }
   });
-  return out;
+  return concat(...parts);
 }
 
 // Typst markup characters that would otherwise be reinterpreted as syntax if
