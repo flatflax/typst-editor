@@ -480,6 +480,42 @@ mod tests {
         );
     }
 
+    /// Regression guard for a user-reported bug ("all three items showed
+    /// the same '1.'"): a heading directly followed by a `+`-marked list,
+    /// with *no* blank line between them. Passes today — parse_typst_ast
+    /// correctly produces one `OrderedList` with 3 sequential items — so
+    /// this pins the parse half as correct and narrows the search for
+    /// wherever the actual reported bug lives (not reproduced elsewhere
+    /// either: typstAstToDoc/pmDocToTypst and a live-app Playwright pass
+    /// both showed correct 1/2/3 for this exact input).
+    #[test]
+    fn ordered_list_immediately_after_a_heading_with_no_blank_line() {
+        let doc = parse("== 有序列表\n+ 第一步\n+ 第二步\n+ 第三步\n");
+        assert_eq!(
+            doc.content,
+            vec![
+                AstBlock::Heading {
+                    level: 2,
+                    children: vec![AstInline::Text { text: "有序列表".into(), marks: vec![] }],
+                },
+                AstBlock::OrderedList {
+                    start: 1,
+                    items: vec![
+                        vec![AstBlock::Paragraph {
+                            children: vec![AstInline::Text { text: "第一步".into(), marks: vec![] }]
+                        }],
+                        vec![AstBlock::Paragraph {
+                            children: vec![AstInline::Text { text: "第二步".into(), marks: vec![] }]
+                        }],
+                        vec![AstBlock::Paragraph {
+                            children: vec![AstInline::Text { text: "第三步".into(), marks: vec![] }]
+                        }],
+                    ],
+                },
+            ]
+        );
+    }
+
     #[test]
     fn ordered_list_with_explicit_start_number() {
         let doc = parse("5. Fifth\n6. Sixth\n");
