@@ -107,26 +107,42 @@ function marksFor(markNames: string[]) {
 // PMDoc -> Typst source
 // ---------------------------------------------------------------------------
 
-// One breakpoint tying a PM document position to the byte offset in the
+// One interval tying a PM document position range to the byte range in the
 // generated Typst source it produced (plan.md M5: "extend pmDocToTypst to
 // also emit a position map ... so the M1 click/cursor-sync feature also
 // works while editing in WYSIWYG mode"). Recorded once per inline leaf
 // (text run / hard_break / typst_call_inline) and once per block's own
 // syntax prefix (heading marker, list marker, a call/unsupported block's
-// raw text) — not per character, matching the "point/caret-level sync only"
-// precision already established for the Typst-source-only case in M1
-// (plan.md's precision note): close enough to jump to, not byte-exact.
-export type PositionMapEntry = { pm: number; typst: number };
+// raw text). Both lookup directions below interpolate *within* an entry's
+// range rather than snapping to its start — e.g. clicking mid-paragraph in
+// the preview lands the WYSIWYG cursor near that point in the text, not at
+// the paragraph's first character. This is still an approximation inside a
+// marked-up run (escaping/`*`/`_`/`` ` `` wrappers shift Typst length away
+// from PM length), matching the "point/caret-level sync only" precision
+// already established for the Typst-source-only case in M1 (plan.md's
+// precision note) — close enough to click near, not byte-exact.
+export type PositionMapEntry = {
+  pmFrom: number;
+  pmTo: number;
+  typstFrom: number;
+  typstTo: number;
+};
 
 // Every recursive serialize* helper below returns one of these instead of a
-// plain string, carrying position breakpoints local to `text` (offset 0 =
-// start of this fragment) — `join`/`concat` shift them into the parent's
+// plain string, carrying position entries local to `text` (typstFrom/typstTo
+// 0 = start of this fragment) — `join`/`concat` shift them into the parent's
 // coordinate space as fragments are combined, so the full tree assembles
 // into one globally-consistent position map alongside the source string.
 type Serialized = { text: string; positions: PositionMapEntry[] };
 
-function leaf(pmPos: number, text: string): Serialized {
-  return text.length > 0 ? { text, positions: [{ pm: pmPos, typst: 0 }] } : { text: "", positions: [] };
+// `pmTo` is deliberately the PM position *right after* this node (`pos +
+// child.nodeSize` for inline leaves, `pos + 1` for a block/list-item's own
+// marker — which is exactly where that block's content begins, so a prefix
+// like "= " and the heading text right after it meet at a shared boundary).
+function leaf(pmFrom: number, pmTo: number, text: string): Serialized {
+  return text.length > 0
+    ? { text, positions: [{ pmFrom, pmTo, typstFrom: 0, typstTo: text.length }] }
+    : { text: "", positions: [] };
 }
 
 // Text with no associated PM position — used for content (the settings
@@ -142,7 +158,14 @@ function join(parts: Serialized[], separator: string): Serialized {
     if (i > 0) text += separator;
     const base = text.length;
     text += part.text;
-    for (const p of part.positions) positions.push({ pm: p.pm, typst: base + p.typst });
+    for (const p of part.positions) {
+      positions.push({
+        pmFrom: p.pmFrom,
+        pmTo: p.pmTo,
+        typstFrom: base + p.typstFrom,
+        typstTo: base + p.typstTo,
+      });
+    }
   });
   return { text, positions };
 }
@@ -180,29 +203,48 @@ export function pmDocToTypstWithPositions(doc: PMDoc): {
   return { source: result.text, positions: result.positions };
 }
 
-// Finds the Typst byte offset a PM document position maps to — the
-// breakpoint at or immediately before `pmPos` (clamped to the first/last
-// entry when out of range). `positions` must come from
-// `pmDocToTypstWithPositions` for the *same* doc — it relies on that array
-// being sorted ascending by both `pm` and `typst` simultaneously, which
-// holds because the tree is walked in document order and text is only ever
-// appended.
+// Finds the Typst byte offset a PM document position maps to, interpolating
+// within the containing entry's range (see PositionMapEntry's doc comment).
+// `positions` must come from `pmDocToTypstWithPositions` for the *same*
+// doc — it relies on that array being sorted ascending by both `pmFrom` and
+// `typstFrom` simultaneously, which holds because the tree is walked in
+// document order and text is only ever appended.
 export function pmPosToTypstOffset(positions: PositionMapEntry[], pmPos: number): number | null {
-  return nearestBefore(positions, pmPos, (entry) => entry.pm, (entry) => entry.typst);
+  const entry = findEntry(positions, pmPos, (e) => e.pmFrom);
+  if (!entry) return null;
+  const ratio = interpolationRatio(pmPos, entry.pmFrom, entry.pmTo);
+  return Math.round(entry.typstFrom + ratio * (entry.typstTo - entry.typstFrom));
 }
 
 // The inverse of `pmPosToTypstOffset`: given a Typst byte offset (e.g. from
 // `jump_from_click`), finds the PM position it corresponds to.
 export function typstOffsetToPmPos(positions: PositionMapEntry[], typstOffset: number): number | null {
-  return nearestBefore(positions, typstOffset, (entry) => entry.typst, (entry) => entry.pm);
+  const entry = findEntry(positions, typstOffset, (e) => e.typstFrom);
+  if (!entry) return null;
+  const ratio = interpolationRatio(typstOffset, entry.typstFrom, entry.typstTo);
+  return Math.round(entry.pmFrom + ratio * (entry.pmTo - entry.pmFrom));
 }
 
-function nearestBefore(
+// How far `target` sits into [from, to) as a 0-1 fraction — clamped, so a
+// target past the entry's end (e.g. landing in the "\n\n" gap between two
+// blocks, which isn't covered by any entry) still resolves to that entry's
+// nearest boundary rather than overshooting past it.
+function interpolationRatio(target: number, from: number, to: number): number {
+  const span = to - from;
+  if (span <= 0) return 0;
+  return Math.min(1, Math.max(0, (target - from) / span));
+}
+
+// The entry whose range contains `target`, keyed by its start — the last
+// entry with `key(entry) <= target`, found by binary search (falls back to
+// the first entry when `target` precedes everything, clamping instead of
+// returning nothing — click/cursor sync should degrade to "nearest known
+// thing", never silently do nothing).
+function findEntry(
   positions: PositionMapEntry[],
   target: number,
   key: (entry: PositionMapEntry) => number,
-  value: (entry: PositionMapEntry) => number,
-): number | null {
+): PositionMapEntry | null {
   if (positions.length === 0) return null;
   let lo = 0;
   let hi = positions.length - 1;
@@ -216,14 +258,14 @@ function nearestBefore(
       hi = mid - 1;
     }
   }
-  return value(positions[best]);
+  return positions[best];
 }
 
 function serializeBlock(node: PMNode, pos: number): Serialized {
   switch (node.type.name) {
     case "heading":
       return concat(
-        leaf(pos, `${"=".repeat(node.attrs.level as number)} `),
+        leaf(pos, pos + 1, `${"=".repeat(node.attrs.level as number)} `),
         serializeInline(node, pos + 1),
       );
     case "paragraph":
@@ -233,7 +275,7 @@ function serializeBlock(node: PMNode, pos: number): Serialized {
       return serializeList(node, pos, 0);
     case "typst_call":
     case "unsupported_block":
-      return leaf(pos, node.attrs.raw as string);
+      return leaf(pos, pos + node.nodeSize, node.attrs.raw as string);
     default:
       throw new Error(`pmDocToTypst: unexpected top-level block "${node.type.name}"`);
   }
@@ -256,7 +298,7 @@ function serializeListItem(item: PMNode, pos: number, marker: string, depth: num
   const contentStart = pos + 1;
   const primary = item.child(0);
   const parts: Serialized[] = [
-    concat(leaf(pos, `${indent}${marker} `), serializePrimary(primary, contentStart)),
+    concat(leaf(pos, pos + 1, `${indent}${marker} `), serializePrimary(primary, contentStart)),
   ];
   let childPos = contentStart + primary.nodeSize;
   for (let i = 1; i < item.childCount; i++) {
@@ -271,14 +313,14 @@ function serializePrimary(node: PMNode, pos: number): Serialized {
   switch (node.type.name) {
     case "heading":
       return concat(
-        leaf(pos, `${"=".repeat(node.attrs.level as number)} `),
+        leaf(pos, pos + 1, `${"=".repeat(node.attrs.level as number)} `),
         serializeInline(node, pos + 1),
       );
     case "paragraph":
       return serializeInline(node, pos + 1);
     case "typst_call":
     case "unsupported_block":
-      return leaf(pos, node.attrs.raw as string);
+      return leaf(pos, pos + node.nodeSize, node.attrs.raw as string);
     default:
       throw new Error(`pmDocToTypst: unexpected list item content "${node.type.name}"`);
   }
@@ -289,11 +331,17 @@ function serializeInline(node: PMNode, contentStart: number): Serialized {
   node.forEach((child, offset) => {
     const pos = contentStart + offset;
     if (child.isText) {
-      parts.push(leaf(pos, serializeTextRun(child.text ?? "", child.marks.map((mark) => mark.type.name))));
+      parts.push(
+        leaf(
+          pos,
+          pos + child.nodeSize,
+          serializeTextRun(child.text ?? "", child.marks.map((mark) => mark.type.name)),
+        ),
+      );
     } else if (child.type.name === "hard_break") {
-      parts.push(leaf(pos, "\\\n"));
+      parts.push(leaf(pos, pos + child.nodeSize, "\\\n"));
     } else if (child.type.name === "typst_call_inline") {
-      parts.push(leaf(pos, child.attrs.raw as string));
+      parts.push(leaf(pos, pos + child.nodeSize, child.attrs.raw as string));
     }
   });
   return concat(...parts);

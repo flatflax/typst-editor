@@ -89,37 +89,50 @@ describe("pmDocToTypstWithPositions (plan.md M5)", () => {
       expect(source).toBe(pmDocToTypst(doc));
 
       // Sorted ascending in both keys simultaneously (see the doc comment on
-      // pmPosToTypstOffset) — every breakpoint is a lookup fixed point in
-      // both directions.
+      // pmPosToTypstOffset), each entry a valid non-negative, in-bounds
+      // range. Looking a position up at an entry's *start* always recovers
+      // that entry exactly — that's the tie-break `findEntry` guarantees.
+      // The *end* boundary isn't guaranteed to round-trip the same way: a
+      // PM position can be purely structural (e.g. "just entered this
+      // paragraph, before any text") with no Typst character of its own,
+      // so it can share a Typst offset with the *next* entry's start and
+      // the reverse lookup will resolve to that next entry instead — not a
+      // bug, just two PM positions mapping to one Typst offset.
       for (let i = 1; i < positions.length; i++) {
-        expect(positions[i].pm).toBeGreaterThanOrEqual(positions[i - 1].pm);
-        expect(positions[i].typst).toBeGreaterThanOrEqual(positions[i - 1].typst);
+        expect(positions[i].pmFrom).toBeGreaterThanOrEqual(positions[i - 1].pmFrom);
+        expect(positions[i].typstFrom).toBeGreaterThanOrEqual(positions[i - 1].typstFrom);
       }
       for (const entry of positions) {
-        expect(pmPosToTypstOffset(positions, entry.pm)).toBe(entry.typst);
-        expect(typstOffsetToPmPos(positions, entry.typst)).toBe(entry.pm);
-        expect(entry.typst).toBeGreaterThanOrEqual(0);
-        expect(entry.typst).toBeLessThanOrEqual(source.length);
+        expect(entry.pmTo).toBeGreaterThanOrEqual(entry.pmFrom);
+        expect(entry.typstTo).toBeGreaterThanOrEqual(entry.typstFrom);
+        expect(entry.typstFrom).toBeGreaterThanOrEqual(0);
+        expect(entry.typstTo).toBeLessThanOrEqual(source.length);
+        expect(pmPosToTypstOffset(positions, entry.pmFrom)).toBe(entry.typstFrom);
+        expect(typstOffsetToPmPos(positions, entry.typstFrom)).toBe(entry.pmFrom);
       }
     },
   );
 
-  // Hand-verified against "= One\n\n== Two\n\n=== Three" (see typstAst.test.ts
-  // git history / PR description for the by-hand index walk): each heading's
-  // own PM position maps to where its "=" marker starts, and its text
-  // child's PM position maps to where the heading text itself starts.
+  // Hand-verified against "= One\n\n== Two\n\n=== Three": each heading's own
+  // PM position range [pos, pos+1) maps to its "= " marker, and its text
+  // child's PM range maps to the heading text itself.
   it("maps PM positions to the exact byte offsets for a hand-verified fixture", () => {
     const doc = typstAstToDoc(fixtures.headings.ast);
     const { source, positions } = pmDocToTypstWithPositions(doc);
     expect(source).toBe("= One\n\n== Two\n\n=== Three");
     expect(positions).toEqual([
-      { pm: 0, typst: 0 }, // heading 1 -> "="
-      { pm: 1, typst: 2 }, // "One" -> "O"
-      { pm: 5, typst: 7 }, // heading 2 -> "="
-      { pm: 6, typst: 10 }, // "Two" -> "T"
-      { pm: 10, typst: 15 }, // heading 3 -> "="
-      { pm: 11, typst: 19 }, // "Three" -> "T"
+      { pmFrom: 0, pmTo: 1, typstFrom: 0, typstTo: 2 }, // heading 1 -> "= "
+      { pmFrom: 1, pmTo: 4, typstFrom: 2, typstTo: 5 }, // "One" -> "One"
+      { pmFrom: 5, pmTo: 6, typstFrom: 7, typstTo: 10 }, // heading 2 -> "== "
+      { pmFrom: 6, pmTo: 9, typstFrom: 10, typstTo: 13 }, // "Two" -> "Two"
+      { pmFrom: 10, pmTo: 11, typstFrom: 15, typstTo: 19 }, // heading 3 -> "=== "
+      { pmFrom: 11, pmTo: 16, typstFrom: 19, typstTo: 24 }, // "Three" -> "Three"
     ]);
+
+    // Interpolation within a range: the middle of "Three" (pm 13, 2 of 5
+    // characters in) lands 2/5 of the way through its typst range too.
+    expect(pmPosToTypstOffset(positions, 13)).toBe(19 + Math.round((2 / 5) * 5));
+    expect(typstOffsetToPmPos(positions, 21)).toBe(11 + Math.round((2 / 5) * 5));
   });
 
   it("returns null for an empty position map and clamps out-of-range lookups", () => {
@@ -131,10 +144,28 @@ describe("pmDocToTypstWithPositions (plan.md M5)", () => {
 
     const doc = typstAstToDoc(fixtures.headings.ast);
     const { positions: nonEmpty } = pmDocToTypstWithPositions(doc);
-    // Before the first / after the last breakpoint clamps rather than
-    // returning null — click/cursor sync should degrade gracefully to
-    // "nearest known thing", never silently do nothing.
-    expect(pmPosToTypstOffset(nonEmpty, -5)).toBe(nonEmpty[0].typst);
-    expect(typstOffsetToPmPos(nonEmpty, 10_000)).toBe(nonEmpty[nonEmpty.length - 1].pm);
+    // Before the first / after the last entry clamps rather than returning
+    // null — click/cursor sync should degrade gracefully to "nearest known
+    // thing", never silently do nothing.
+    expect(pmPosToTypstOffset(nonEmpty, -5)).toBe(nonEmpty[0].typstFrom);
+    expect(typstOffsetToPmPos(nonEmpty, 10_000)).toBe(nonEmpty[nonEmpty.length - 1].pmTo);
+  });
+
+  it("interpolates a click landing mid-run to a nearby WYSIWYG position, not the run's start", () => {
+    // Regression guard for the imprecision a user reported after trying M5:
+    // clicking mid-paragraph in the preview was landing the WYSIWYG cursor
+    // at the *start* of the whole paragraph, because the original position
+    // map recorded one point per run instead of a range to interpolate in.
+    const doc = typstAstToDoc(fixtures.marks.ast);
+    const { source, positions } = pmDocToTypstWithPositions(doc);
+    // "plain *bold* _italic_ `code` *_bold italic_*" — click in the middle
+    // of "plain" (a 5-character run starting at typst offset 0).
+    const middleOfPlain = 2;
+    const pmPos = typstOffsetToPmPos(positions, middleOfPlain);
+    expect(pmPos).not.toBeNull();
+    // The run's PM range is [1, 6) (paragraph content starts at pos 1); a
+    // click 2/5 into "plain" should land near pos 3, not snap to pos 1.
+    expect(pmPos).toBe(3);
+    expect(source.slice(0, 5)).toBe("plain");
   });
 });
