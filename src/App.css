@@ -157,6 +157,13 @@
   white-space: pre-wrap;
 }
 
+.wysiwyg-content-wrapper {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .wysiwyg-content {
   flex: 1 1 auto;
   overflow: auto;
@@ -169,17 +176,18 @@
 }
 
 .block-insert-button {
-  display: inline-block;
+  position: absolute;
+  left: 0.35rem;
+  z-index: 5;
   width: 1.4em;
   height: 1.4em;
-  line-height: 1.2em;
-  margin: 0.15rem 0;
   padding: 0;
   border: 1px solid #ccc;
   border-radius: 50%;
   background: #fff;
   color: #666;
   font-size: 0.85em;
+  line-height: 1;
   text-align: center;
   cursor: pointer;
 }

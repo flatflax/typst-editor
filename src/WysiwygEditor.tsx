@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { EditorState, Plugin, TextSelection, type Command } from "prosemirror-state";
-import { Decoration, DecorationSet, EditorView, type NodeView } from "prosemirror-view";
+import { EditorState, TextSelection, type Command } from "prosemirror-state";
+import { EditorView, type NodeView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import { tableEditing } from "prosemirror-tables";
 import { invoke } from "@tauri-apps/api/core";
@@ -104,56 +104,12 @@ function imageNodeView(documentDirRef: { current: string | null }) {
   };
 }
 
-// Per-block "+" insert affordance (plan.md M12): a small always-visible
-// button after every *top-level* block (not recursed into list items/table
-// cells — kept to the simplest useful scope) that inserts an empty
-// paragraph right after it. A plain decoration widget rather than a
-// hover-revealed one: a real hover-triggered version (only appearing near
-// the pointer, positioned in the left margin the way Notion does it) needs
-// mouse-position tracking this environment has no way to visually verify —
-// simplicity was chosen deliberately here over an untestable interaction,
-// not as an oversight.
-function blockInsertButtonsPlugin() {
-  return new Plugin({
-    props: {
-      decorations(state) {
-        const decorations: Decoration[] = [];
-        state.doc.forEach((node, offset) => {
-          decorations.push(
-            Decoration.widget(
-              offset + node.nodeSize,
-              (view) => {
-                const button = document.createElement("button");
-                button.type = "button";
-                button.className = "block-insert-button";
-                button.textContent = "+";
-                button.title = "Insert paragraph below";
-                button.addEventListener("click", () => {
-                  insertParagraphAfter(offset, node.nodeSize)(view.state, view.dispatch);
-                  view.focus();
-                });
-                return button;
-              },
-              { side: 1 },
-            ),
-          );
-        });
-        return DecorationSet.create(state.doc, decorations);
-      },
-    },
-  });
-}
-
 function editorStateFor(doc: PMDoc): EditorState {
   // tableEditing() (plan.md M10) handles cell selection/navigation — no
   // columnResizing(), since per-column width styling is out of the MVP
   // subset (ast.rs's as_table_call only preserves an existing width spec
   // verbatim, never lets the WYSIWYG surface set one).
-  return EditorState.create({
-    doc,
-    schema,
-    plugins: [buildKeymapPlugin(), tableEditing(), blockInsertButtonsPlugin()],
-  });
+  return EditorState.create({ doc, schema, plugins: [buildKeymapPlugin(), tableEditing()] });
 }
 
 // ProseMirror EditorView for the WYSIWYG surface (plan.md M5). Mirrors
@@ -167,6 +123,7 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const contentWrapperRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
 
   const onChangeRef = useRef(onChange);
@@ -190,6 +147,43 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
   const [slashMenu, setSlashMenu] = useState<{ left: number; top: number; triggerPos: number } | null>(
     null,
   );
+
+  // Per-block "+" insert affordance (plan.md M12): a single button that
+  // follows the mouse, shown only while hovering the *content area* of the
+  // top-level block it targets — not a decoration attached to every block
+  // (which would need CSS hover-tracking harder to get right around widget
+  // decorations sitting between blocks in the flow). `top` is stored
+  // relative to `contentWrapperRef` (a plain, non-scrolling wrapper around
+  // the ProseMirror-owned `.wysiwyg-content`, added so this button can live
+  // as a *sibling* of the scrollable content rather than a child of it —
+  // ProseMirror owns `.wysiwyg-content`'s children entirely). The button
+  // sits in that wrapper too (not `.wysiwyg-content`), so moving the mouse
+  // onto it doesn't itself count as "leaving" the hover target and hide it.
+  const [hoverInsert, setHoverInsert] = useState<{
+    top: number;
+    blockPos: number;
+    blockSize: number;
+  } | null>(null);
+
+  function handleContentMouseMove(event: React.MouseEvent) {
+    const view = viewRef.current;
+    const wrapper = contentWrapperRef.current;
+    if (!view || !wrapper) return;
+    const result = view.posAtCoords({ left: event.clientX, top: event.clientY });
+    if (!result) return;
+    const $pos = view.state.doc.resolve(result.pos);
+    if ($pos.depth < 1) return; // between/outside top-level blocks
+    const blockPos = $pos.before(1);
+    const blockSize = $pos.node(1).nodeSize;
+    const top = view.coordsAtPos(blockPos + 1).top - wrapper.getBoundingClientRect().top;
+    setHoverInsert((current) =>
+      current?.blockPos === blockPos && current.top === top ? current : { top, blockPos, blockSize },
+    );
+  }
+
+  function handleContentMouseLeave() {
+    setHoverInsert(null);
+  }
 
   function updateOverlays(view: EditorView) {
     const { state } = view;
@@ -349,7 +343,30 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
           ))}
         </details>
       )}
-      <div ref={containerRef} className="wysiwyg-content" />
+      <div
+        ref={contentWrapperRef}
+        className="wysiwyg-content-wrapper"
+        onMouseMove={handleContentMouseMove}
+        onMouseLeave={handleContentMouseLeave}
+      >
+        <div ref={containerRef} className="wysiwyg-content" />
+        {hoverInsert && (
+          <button
+            type="button"
+            className="block-insert-button"
+            style={{ top: hoverInsert.top }}
+            title="Insert paragraph below"
+            onClick={() => {
+              const view = viewRef.current;
+              if (!view) return;
+              insertParagraphAfter(hoverInsert.blockPos, hoverInsert.blockSize)(view.state, view.dispatch);
+              view.focus();
+            }}
+          >
+            +
+          </button>
+        )}
+      </div>
       {bubble && (
         // `coordsAtPos` returns viewport-relative coordinates, matching
         // `position: fixed` directly — no extra offset math needed.
