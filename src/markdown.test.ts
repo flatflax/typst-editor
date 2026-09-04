@@ -174,6 +174,59 @@ describe("markdown round trip", () => {
     expect(pmDocToTypst(doc)).toBe('See #link("https://typst.app")[the docs] for more.');
   });
 
+  describe("tables (plan.md M10)", () => {
+    it("a table round-trips through GFM markdown", () => {
+      const { doc, regenerated } = assertStableRoundTrip("| A | B |\n| --- | --- |\n| 1 | 2 |");
+      const table = doc.child(0);
+      expect(table.type).toBe(schema.nodes.table);
+      expect(table.childCount).toBe(2); // 2 rows
+      expect(table.child(0).childCount).toBe(2); // 2 cells per row
+      expect(regenerated).toContain("| A | B |");
+    });
+
+    it("mixed inline marks in a cell survive the round trip", () => {
+      const { doc } = assertStableRoundTrip("| **Bold** | *Italic* |\n| --- | --- |\n| x | y |");
+      const firstCell = doc.child(0).child(0).child(0); // table > row 0 > cell 0
+      const paragraph = firstCell.child(0);
+      expect(paragraph.child(0).marks.map((m) => m.type.name)).toEqual(["strong"]);
+    });
+
+    it("a markdown-authored table reaches pmDocToTypst as a real #table(...) call", () => {
+      const doc = markdownToDoc("| A | B |\n| --- | --- |\n| 1 | 2 |");
+      expect(pmDocToTypst(doc)).toBe("#table(columns: 2, [A], [B], [1], [2])");
+    });
+
+    // plan.md M10: "one that exercises the Markdown-side block-content
+    // fallback" — a table cell containing block content (a heading, here)
+    // isn't something GFM pipe tables can express at all (there's no
+    // markdown syntax that could even parse into this shape), so this is
+    // authored directly as a PMDoc (as WYSIWYG editing would produce), not
+    // parsed from markdown text.
+    it("a table cell with block content falls back to an opaque fence, not corruption", () => {
+      const cellWithHeading = schema.nodes.table_cell.create(null, [
+        schema.nodes.heading.create({ level: 2 }, [schema.text("Section")]),
+      ]);
+      const plainCell = schema.nodes.table_cell.create(null, [
+        schema.nodes.paragraph.create(null, [schema.text("plain")]),
+      ]);
+      const table = schema.nodes.table.create({ columnsRaw: "2", columnCount: 2 }, [
+        schema.nodes.table_row.create(null, [cellWithHeading, plainCell]),
+      ]);
+      const doc = schema.nodes.doc.create({ settings: [] }, [table]);
+
+      const markdown = docToMarkdown(doc);
+      expect(markdown).toContain("```typst-raw");
+      expect(markdown).toContain("#table(");
+      expect(markdown).toContain("Section");
+
+      const roundTripped = markdownToDoc(markdown);
+      expect(roundTripped.child(0).type).toBe(schema.nodes.unsupported_block);
+      // Still the same compiled Typst source either way — the whole point
+      // of the opaque-fence policy (see this file's header comment).
+      expect(pmDocToTypst(roundTripped)).toBe(pmDocToTypst(doc));
+    });
+  });
+
   it("a multi-paragraph list item collapses to a single unsupported_block for that item", () => {
     const source = "- First paragraph.\n\n  Second paragraph.\n- Second item.";
     const doc = markdownToDoc(source);

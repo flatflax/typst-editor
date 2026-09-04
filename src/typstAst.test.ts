@@ -7,7 +7,7 @@ import {
   typstOffsetToPmPos,
 } from "./typstAst";
 import { fixtures } from "./typstAst.fixtures";
-import { schema } from "./schema";
+import { schema, type PMDoc } from "./schema";
 
 describe("typstAstToDoc / pmDocToTypst round trip", () => {
   it.each(Object.entries(fixtures))(
@@ -64,6 +64,46 @@ describe("typstAstToDoc / pmDocToTypst round trip", () => {
       ],
     });
     expect(pmDocToTypst(doc)).toBe("2 \\* 3 = 6, not \\#4");
+  });
+
+  describe("table columnsRaw staleness (plan.md M10)", () => {
+    function tableWithCells(columnsRaw: string, columnCount: number, texts: string[]): PMDoc {
+      const cells = texts.map((text) =>
+        schema.nodes.table_cell.create(null, [schema.nodes.paragraph.create(null, [schema.text(text)])]),
+      );
+      const table = schema.nodes.table.create({ columnsRaw, columnCount }, [
+        schema.nodes.table_row.create(null, cells),
+      ]);
+      return schema.nodes.doc.create({ settings: [] }, [table]);
+    }
+
+    it("preserves columnsRaw verbatim when it still matches the actual column count", () => {
+      const doc = tableWithCells("(1fr, 2fr)", 2, ["A", "B"]);
+      expect(pmDocToTypst(doc)).toBe("#table(columns: (1fr, 2fr), [A], [B])");
+    });
+
+    it("falls back to a plain integer once the row's actual cell count no longer matches (e.g. after addColumnAfter)", () => {
+      // `columnCount: 2` is stale — the row now has 3 cells.
+      const doc = tableWithCells("(1fr, 2fr)", 2, ["A", "B", "C"]);
+      expect(pmDocToTypst(doc)).toBe("#table(columns: 3, [A], [B], [C])");
+    });
+
+    // Mirrors ast.rs's a_table_can_be_a_list_items_primary_content — exercises
+    // serializePrimary's "table" case (schema.ts's list_item content spec was
+    // extended to allow a table as a list item's primary content).
+    it("serializes a table nested as a list item's primary content", () => {
+      const cellA = schema.nodes.table_cell.create(null, [
+        schema.nodes.paragraph.create(null, [schema.text("A")]),
+      ]);
+      const table = schema.nodes.table.create({ columnsRaw: "1", columnCount: 1 }, [
+        schema.nodes.table_row.create(null, [cellA]),
+      ]);
+      const item = schema.nodes.list_item.create(null, [table]);
+      const doc = schema.nodes.doc.create({ settings: [] }, [
+        schema.nodes.bullet_list.create(null, [item]),
+      ]);
+      expect(pmDocToTypst(doc)).toBe("- #table(columns: 1, [A])");
+    });
   });
 
   it("does not escape inside a code mark run", () => {

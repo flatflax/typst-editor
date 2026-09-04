@@ -1,9 +1,15 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { EditorState, TextSelection, type Command } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
+import { tableEditing } from "prosemirror-tables";
 import { schema, type PMDoc, type TypstSet } from "./schema";
 import {
+  addTableColumn,
+  addTableRow,
   buildKeymapPlugin,
+  deleteTableColumn,
+  deleteTableRow,
+  insertTable2x2,
   setHeading,
   setParagraph,
   toggleBulletList,
@@ -28,7 +34,11 @@ type Props = {
 };
 
 function editorStateFor(doc: PMDoc): EditorState {
-  return EditorState.create({ doc, schema, plugins: [buildKeymapPlugin()] });
+  // tableEditing() (plan.md M10) handles cell selection/navigation — no
+  // columnResizing(), since per-column width styling is out of the MVP
+  // subset (ast.rs's as_table_call only preserves an existing width spec
+  // verbatim, never lets the WYSIWYG surface set one).
+  return EditorState.create({ doc, schema, plugins: [buildKeymapPlugin(), tableEditing()] });
 }
 
 // ProseMirror EditorView for the WYSIWYG surface (plan.md M5). Mirrors
@@ -136,6 +146,21 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
         </button>
         <button type="button" onClick={() => runCommand(toggleOrderedList)}>
           1. List
+        </button>
+        <button type="button" onClick={() => runCommand(insertTable2x2)} title="Insert table">
+          Table
+        </button>
+        <button type="button" onClick={() => runCommand(addTableRow)} title="Add row below">
+          +Row
+        </button>
+        <button type="button" onClick={() => runCommand(addTableColumn)} title="Add column after">
+          +Col
+        </button>
+        <button type="button" onClick={() => runCommand(deleteTableRow)} title="Delete row">
+          -Row
+        </button>
+        <button type="button" onClick={() => runCommand(deleteTableColumn)} title="Delete column">
+          -Col
         </button>
       </div>
       {settings.length > 0 && (

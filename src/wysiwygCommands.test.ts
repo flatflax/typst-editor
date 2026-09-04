@@ -4,6 +4,7 @@ import { splitListItem } from "prosemirror-schema-list";
 import { schema } from "./schema";
 import { pmDocToTypst } from "./typstAst";
 import {
+  insertTable,
   liftList,
   setHeading,
   setParagraph,
@@ -38,6 +39,10 @@ function textPosition(doc: ReturnType<typeof schema.node>, text: string): number
 
 const splitListItemCommand = splitListItem(schema.nodes.list_item);
 
+function docWithHello(): ReturnType<typeof schema.node> {
+  return schema.node("doc", { settings: [] }, [schema.node("paragraph", null, [schema.text("hello")])]);
+}
+
 describe("mark toggles", () => {
   it("toggleStrong applies then removes the mark on the selected range", () => {
     const doc = schema.node("doc", { settings: [] }, [
@@ -71,12 +76,6 @@ describe("mark toggles", () => {
 
 describe("toggleLink (plan.md M9)", () => {
   afterEach(() => vi.unstubAllGlobals());
-
-  function docWithHello(): ReturnType<typeof schema.node> {
-    return schema.node("doc", { settings: [] }, [
-      schema.node("paragraph", null, [schema.text("hello")]),
-    ]);
-  }
 
   it("is a no-op on an empty (collapsed) selection", () => {
     const doc = docWithHello();
@@ -123,6 +122,28 @@ describe("toggleLink (plan.md M9)", () => {
     const result = applyCommand(state, toggleLink);
     expect(result.applied).toBe(true);
     expect(result.state.doc.child(0).child(0).marks).toEqual([]);
+  });
+});
+
+describe("insertTable (plan.md M10)", () => {
+  it("inserts a well-formed rows x cols table at the cursor", () => {
+    const doc = docWithHello();
+    // Cursor at the *end* of "hello" — the table lands after it, matching
+    // the intuitive "type text, then insert a table" usage.
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 6, 6) });
+
+    const result = applyCommand(state, insertTable(2, 3));
+    expect(result.applied).toBe(true);
+    expect(() => result.state.doc.check()).not.toThrow();
+
+    const table = result.state.doc.child(1);
+    expect(table.type).toBe(schema.nodes.table);
+    expect(table.attrs).toEqual({ columnsRaw: "3", columnCount: 3 });
+    expect(table.childCount).toBe(2); // rows
+    table.forEach((row) => expect(row.childCount).toBe(3)); // cells per row
+    expect(pmDocToTypst(result.state.doc)).toBe(
+      "hello\n\n#table(columns: 3, [], [], [], [], [], [])",
+    );
   });
 });
 

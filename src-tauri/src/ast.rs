@@ -44,6 +44,17 @@ pub enum AstBlock {
     OrderedList { start: u64, items: Vec<Vec<AstBlock>> },
     TypstCall { name: String, raw: String },
     UnsupportedBlock { raw: String },
+    /// `#table(columns: .., [cell], [cell], ...)` (plan.md M10). `cells` is
+    /// the flat row-major sequence exactly as Typst's call arguments give
+    /// it — `cells.len()` is always an exact multiple of `column_count`
+    /// (enforced by `as_table_call`); the frontend (src/typstAst.ts) chunks
+    /// it into rows for the ProseMirror `table`/`table_row`/`table_cell`
+    /// nodes. `columns_raw` is the verbatim source text of the `columns:`
+    /// argument (an int or an array literal, e.g. `"3"` or `"(1fr, 2fr)"`)
+    /// — carried through unparsed/unevaluated like `typst_call`'s `raw`, so
+    /// per-column width styling round-trips byte-exact even though this
+    /// module only derives a plain `column_count` from it for structure.
+    Table { columns_raw: String, column_count: usize, cells: Vec<Vec<AstBlock>> },
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -116,17 +127,17 @@ fn convert_markup<'a>(
         let child = children[i];
         match child.kind() {
             SyntaxKind::Parbreak => {
-                finalize_pending(&mut pending, &mut content);
+                finalize_pending(&mut pending, &mut content, settings);
                 i += 1;
             }
             SyntaxKind::Heading => {
-                finalize_pending(&mut pending, &mut content);
+                finalize_pending(&mut pending, &mut content, settings);
                 let heading: ast::Heading = child.cast().expect("kind checked above");
                 content.push(convert_heading(heading));
                 i += 1;
             }
             SyntaxKind::SetRule if is_root => {
-                finalize_pending(&mut pending, &mut content);
+                finalize_pending(&mut pending, &mut content, settings);
                 let set_rule: ast::SetRule = child.cast().expect("kind checked above");
                 settings.push(TypstSet {
                     function: callee_name(set_rule.target()),
@@ -135,13 +146,13 @@ fn convert_markup<'a>(
                 i += 1;
             }
             SyntaxKind::ListItem => {
-                finalize_pending(&mut pending, &mut content);
+                finalize_pending(&mut pending, &mut content, settings);
                 let (items, end) = gather_same_kind(&children, i, SyntaxKind::ListItem);
                 content.push(convert_bullet_list(items, settings));
                 i = end;
             }
             SyntaxKind::EnumItem => {
-                finalize_pending(&mut pending, &mut content);
+                finalize_pending(&mut pending, &mut content, settings);
                 let (items, end) = gather_same_kind(&children, i, SyntaxKind::EnumItem);
                 content.push(convert_ordered_list(items, settings));
                 i = end;
@@ -152,7 +163,7 @@ fn convert_markup<'a>(
             }
         }
     }
-    finalize_pending(&mut pending, &mut content);
+    finalize_pending(&mut pending, &mut content, settings);
     content
 }
 
@@ -230,6 +241,10 @@ enum FlattenResult {
     /// with nothing else alongside it — i.e. it occupies its own paragraph,
     /// so it becomes a block-level `typst_call` rather than an inline one.
     SingleCall(String, String),
+    /// Same "occupies its own paragraph, alone" shape as `SingleCall`, but
+    /// recognized as a structured table (plan.md M10) — always an
+    /// `AstBlock::Table`.
+    SingleTable(AstBlock),
     Inline(Vec<AstInline>),
 }
 
@@ -259,10 +274,86 @@ fn as_link_call(node: &SyntaxNode) -> Option<(String, ast::Markup<'_>)> {
     Some((url.get().to_string(), body.body()))
 }
 
-fn try_flatten_pending(pending: &[&SyntaxNode]) -> Option<FlattenResult> {
+/// Recognizes `#table(columns: <int|array>, [cell], [cell], ...)` as a
+/// structured table (plan.md M10), not opaque: every argument must be
+/// either the (exactly one) `columns:` named argument or a positional
+/// content-block cell — no `#table.cell`, rowspan/colspan, or any other
+/// named/styling argument (`stroke:`, `fill:`, `align:`, `gutter:`, ...)
+/// falls through to the opaque `typst_call` path, same spirit as
+/// `as_link_call`. The cell count must be a positive exact multiple of the
+/// column count (a ragged/ambiguous grid also falls back). Returns the
+/// verbatim `columns:` source text, the derived column count, and each
+/// cell's body markup (still unparsed — the caller recurses through the
+/// normal subset parser to get each cell's `Vec<AstBlock>`, same as a list
+/// item's body).
+fn as_table_call<'a>(node: &'a SyntaxNode) -> Option<(String, usize, Vec<ast::Markup<'a>>)> {
+    let call = node.cast::<ast::FuncCall>()?;
+    if callee_name(call.callee()) != "table" {
+        return None;
+    }
+    let mut columns: Option<(String, usize)> = None;
+    let mut cells = Vec::new();
+    for arg in call.args().items() {
+        match arg {
+            ast::Arg::Named(named) if named.name().as_str() == "columns" => {
+                if columns.is_some() {
+                    return None; // duplicate `columns:` - malformed
+                }
+                columns = Some(column_count_from(named.expr())?);
+            }
+            ast::Arg::Pos(ast::Expr::ContentBlock(cb)) => cells.push(cb.body()),
+            _ => return None, // any other named arg, or a non-content-block positional
+        }
+    }
+    let (columns_raw, column_count) = columns?;
+    if cells.is_empty() || cells.len() % column_count != 0 {
+        return None;
+    }
+    Some((columns_raw, column_count, cells))
+}
+
+/// Derives a column count from the `columns:` argument's value: a bare
+/// positive integer (`columns: 3`) is that many equal-width columns; an
+/// array literal (`columns: (1fr, 2fr, auto)`) has one column per item (a
+/// spread item makes the count statically unknowable, so that's excluded).
+/// Anything else (a bare length like `columns: 1fr`, a function call, ...)
+/// isn't a shape this module evaluates. Returns the argument's exact source
+/// text alongside the count — see `AstBlock::Table`'s doc comment for why.
+fn column_count_from(expr: ast::Expr) -> Option<(String, usize)> {
+    match expr {
+        ast::Expr::Int(int) => {
+            let n = int.get();
+            (n > 0).then(|| (int.to_untyped().full_text().to_string(), n as usize))
+        }
+        ast::Expr::Array(array) => {
+            let mut count = 0usize;
+            for item in array.items() {
+                match item {
+                    ast::ArrayItem::Pos(_) => count += 1,
+                    ast::ArrayItem::Spread(_) => return None,
+                }
+            }
+            (count > 0).then(|| (array.to_untyped().full_text().to_string(), count))
+        }
+        _ => None,
+    }
+}
+
+fn try_flatten_pending(pending: &[&SyntaxNode], settings: &mut Vec<TypstSet>) -> Option<FlattenResult> {
     let significant: Vec<&SyntaxNode> =
         pending.iter().copied().filter(|n| n.kind() != SyntaxKind::Hash).collect();
     if let [only] = significant.as_slice() {
+        if let Some((columns_raw, column_count, cell_bodies)) = as_table_call(only) {
+            let cells = cell_bodies
+                .into_iter()
+                .map(|body| convert_markup(body, settings, false))
+                .collect();
+            return Some(FlattenResult::SingleTable(AstBlock::Table {
+                columns_raw,
+                column_count,
+                cells,
+            }));
+        }
         if as_link_call(only).is_none() {
             if let Some(call) = only.cast::<ast::FuncCall>() {
                 return Some(FlattenResult::SingleCall(
@@ -286,13 +377,16 @@ fn is_blank_inline(children: &[AstInline]) -> bool {
     children.iter().all(|c| matches!(c, AstInline::Text { text, .. } if text.trim().is_empty()))
 }
 
-fn finalize_pending(pending: &mut Vec<&SyntaxNode>, content: &mut Vec<AstBlock>) {
+fn finalize_pending(pending: &mut Vec<&SyntaxNode>, content: &mut Vec<AstBlock>, settings: &mut Vec<TypstSet>) {
     if pending.is_empty() {
         return;
     }
-    match try_flatten_pending(pending) {
+    match try_flatten_pending(pending, settings) {
         Some(FlattenResult::SingleCall(name, raw)) => {
             content.push(AstBlock::TypstCall { name, raw });
+        }
+        Some(FlattenResult::SingleTable(table)) => {
+            content.push(table);
         }
         Some(FlattenResult::Inline(children)) => {
             // A run of pure whitespace (e.g. a lone connecting Space at the
@@ -717,6 +811,132 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "a [b] c");
+    }
+
+    #[test]
+    fn table_with_integer_columns_becomes_a_structured_table() {
+        let doc = parse("#table(columns: 2, [A], [B], [C], [D])");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::Table {
+                columns_raw: "2".into(),
+                column_count: 2,
+                cells: vec![
+                    vec![AstBlock::Paragraph {
+                        children: vec![AstInline::Text { text: "A".into(), marks: vec![] }]
+                    }],
+                    vec![AstBlock::Paragraph {
+                        children: vec![AstInline::Text { text: "B".into(), marks: vec![] }]
+                    }],
+                    vec![AstBlock::Paragraph {
+                        children: vec![AstInline::Text { text: "C".into(), marks: vec![] }]
+                    }],
+                    vec![AstBlock::Paragraph {
+                        children: vec![AstInline::Text { text: "D".into(), marks: vec![] }]
+                    }],
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn table_with_array_columns_preserves_the_raw_width_spec() {
+        let doc = parse("#table(columns: (1fr, 2fr), [A], [B])");
+        let AstBlock::Table { columns_raw, column_count, .. } = &doc.content[0] else {
+            panic!("expected a table, got {:?}", doc.content[0]);
+        };
+        assert_eq!(columns_raw, "(1fr, 2fr)");
+        assert_eq!(*column_count, 2);
+    }
+
+    #[test]
+    fn a_table_cell_can_contain_marked_up_text() {
+        let doc = parse("#table(columns: 1, [*bold* and _italic_])");
+        let AstBlock::Table { cells, .. } = &doc.content[0] else {
+            panic!("expected a table, got {:?}", doc.content[0]);
+        };
+        assert_eq!(
+            cells[0],
+            vec![AstBlock::Paragraph {
+                children: vec![
+                    AstInline::Text { text: "bold".into(), marks: vec!["strong".into()] },
+                    AstInline::Text { text: " ".into(), marks: vec![] },
+                    AstInline::Text { text: "and".into(), marks: vec![] },
+                    AstInline::Text { text: " ".into(), marks: vec![] },
+                    AstInline::Text { text: "italic".into(), marks: vec!["em".into()] },
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_ragged_cell_count_falls_back_to_an_opaque_call() {
+        // 3 cells isn't a multiple of 2 columns - not a well-formed grid.
+        let doc = parse("#table(columns: 2, [A], [B], [C])");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::TypstCall {
+                name: "table".into(),
+                raw: "#table(columns: 2, [A], [B], [C])".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_table_with_styling_arguments_falls_back_to_an_opaque_call() {
+        // `stroke:`/`fill:`/etc. are explicitly out of the MVP subset
+        // (plan.md M10: "no ... styling args in MVP").
+        let doc = parse("#table(columns: 2, stroke: red, [A], [B])");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::TypstCall {
+                name: "table".into(),
+                raw: "#table(columns: 2, stroke: red, [A], [B])".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_table_with_a_non_content_block_cell_falls_back_to_an_opaque_call() {
+        // `#table.cell(...)` (rowspan/colspan) isn't a bare content block.
+        let doc = parse("#table(columns: 2, [A], table.cell(colspan: 2)[B])");
+        assert!(matches!(doc.content[0], AstBlock::TypstCall { .. }));
+    }
+
+    #[test]
+    fn table_compiles_successfully_and_the_call_shape_matches_a_realistic_table() {
+        // Confirms the recognized shape isn't a narrower toy grammar than
+        // what a real Typst document actually contains - multiple rows, a
+        // header-looking first row (bold text, no distinct node type - see
+        // AstBlock::Table's doc comment), mixed inline marks in a cell.
+        let doc = parse(
+            "#table(columns: 3, [*Name*], [*Age*], [*City*], [Alice], [30], [NYC], [Bob], [25], [LA])",
+        );
+        let AstBlock::Table { column_count, cells, .. } = &doc.content[0] else {
+            panic!("expected a table, got {:?}", doc.content[0]);
+        };
+        assert_eq!(*column_count, 3);
+        assert_eq!(cells.len(), 9);
+    }
+
+    #[test]
+    fn a_table_can_be_a_list_items_primary_content() {
+        // Exercises convert_markup's table recognition being reachable
+        // through the *same* recursive path list item bodies already use
+        // (is_root=false), not just the document root — mirrors why
+        // schema.ts's list_item content spec was extended to include table.
+        let doc = parse("- #table(columns: 2, [A], [B])\n- Plain item\n");
+        let AstBlock::BulletList { items } = &doc.content[0] else {
+            panic!("expected a bullet list, got {:?}", doc.content[0]);
+        };
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[0][0], AstBlock::Table { column_count: 2, .. }));
+        assert_eq!(
+            items[1],
+            vec![AstBlock::Paragraph {
+                children: vec![AstInline::Text { text: "Plain item".into(), marks: vec![] }]
+            }]
+        );
     }
 
     #[test]

@@ -24,7 +24,12 @@ export type AstBlock =
   | { type: "bullet_list"; items: AstBlock[][] }
   | { type: "ordered_list"; start: number; items: AstBlock[][] }
   | { type: "typst_call"; name: string; raw: string }
-  | { type: "unsupported_block"; raw: string };
+  | { type: "unsupported_block"; raw: string }
+  // `#table(columns: .., [cell], ...)` (plan.md M10). `cells` is the flat
+  // row-major sequence — see ast.rs's `AstBlock::Table` doc comment for why
+  // `column_count` chunks it into rows here rather than the Rust side
+  // pre-nesting it (Typst's own call arguments are flat too).
+  | { type: "table"; columnsRaw: string; columnCount: number; cells: AstBlock[][] };
 
 export type AstDocument = { settings: TypstSet[]; content: AstBlock[] };
 
@@ -53,7 +58,27 @@ function blockToNode(block: AstBlock): PMNode {
       return schema.nodes.typst_call.create({ name: block.name, raw: block.raw });
     case "unsupported_block":
       return schema.nodes.unsupported_block.create({ raw: block.raw });
+    case "table": {
+      const rows: PMNode[] = [];
+      for (let i = 0; i < block.cells.length; i += block.columnCount) {
+        const rowCells = block.cells.slice(i, i + block.columnCount).map(tableCellToNode);
+        rows.push(schema.nodes.table_row.create(null, rowCells));
+      }
+      return schema.nodes.table.create(
+        { columnsRaw: block.columnsRaw, columnCount: block.columnCount },
+        rows,
+      );
+    }
   }
+}
+
+// A table cell's blocks, same "fall back to an empty paragraph" shape as
+// listItemToNode below — schema.ts's `cellContent: "block+"` requires at
+// least one block, but an empty Typst content-block cell (`[]`) produces no
+// content from the parser.
+function tableCellToNode(items: AstBlock[]): PMNode {
+  const children = items.length > 0 ? items.map(blockToNode) : [schema.nodes.paragraph.create()];
+  return schema.nodes.table_cell.create(null, children);
 }
 
 // A list item's blocks are [primary content, ...nested sublists] (matching
@@ -289,12 +314,64 @@ function serializeBlock(node: PMNode, pos: number): Serialized {
     case "bullet_list":
     case "ordered_list":
       return serializeList(node, pos, 0);
+    case "table":
+      return serializeTable(node, pos);
     case "typst_call":
     case "unsupported_block":
       return leaf(pos, pos + node.nodeSize, node.attrs.raw as string);
     default:
       throw new Error(`pmDocToTypst: unexpected top-level block "${node.type.name}"`);
   }
+}
+
+// `#table(columns: .., [cell], [cell], ...)` (plan.md M10). `columnsRaw` is
+// re-emitted verbatim only if `columnCount` still matches the table's
+// *actual* current column count (the first row's cell count) — a WYSIWYG
+// add/remove-column edit changes the row structure without touching these
+// stored attrs, so a stale `columnsRaw` (still describing the old column
+// count/widths) would otherwise silently mismatch the real grid. Falls back
+// to a plain integer count in that case, discarding any custom per-column
+// widths — an accepted MVP limitation (schema.ts's table attrs doc comment),
+// not a bug: the table stays structurally valid either way.
+function serializeTable(node: PMNode, pos: number): Serialized {
+  const actualColumnCount = node.firstChild?.childCount ?? 0;
+  const storedColumnCount = node.attrs.columnCount as number;
+  const columnsRaw: string =
+    storedColumnCount === actualColumnCount && node.attrs.columnsRaw
+      ? (node.attrs.columnsRaw as string)
+      : String(actualColumnCount);
+
+  const cellParts: Serialized[] = [];
+  let rowPos = pos + 1;
+  node.forEach((row) => {
+    let cellPos = rowPos + 1;
+    row.forEach((cell) => {
+      cellParts.push(serializeTableCell(cell, cellPos));
+      cellPos += cell.nodeSize;
+    });
+    rowPos += row.nodeSize;
+  });
+
+  return concat(
+    leaf(pos, pos + 1, `#table(columns: ${columnsRaw}, `),
+    join(cellParts, ", "),
+    unpositioned(")"),
+  );
+}
+
+// A cell's Typst representation is a content block (`[...]`) wrapping its
+// blocks' own markup — reuses serializeBlock (not a narrower cell-only
+// serializer), so a cell's paragraphs/lists/marks — and even a nested table,
+// since Typst genuinely allows `#table(..)[#table(..)[..]]` — all serialize
+// through the exact same logic as top-level content.
+function serializeTableCell(cell: PMNode, pos: number): Serialized {
+  const contentStart = pos + 1;
+  const blockParts: Serialized[] = [];
+  cell.forEach((block, offset) => {
+    const part = serializeBlock(block, contentStart + offset);
+    if (part.text.length > 0) blockParts.push(part);
+  });
+  return concat(unpositioned("["), join(blockParts, "\n\n"), unpositioned("]"));
 }
 
 function serializeList(node: PMNode, pos: number, depth: number): Serialized {
@@ -334,6 +411,8 @@ function serializePrimary(node: PMNode, pos: number): Serialized {
       );
     case "paragraph":
       return serializeInline(node, pos + 1);
+    case "table":
+      return serializeTable(node, pos);
     case "typst_call":
     case "unsupported_block":
       return leaf(pos, pos + node.nodeSize, node.attrs.raw as string);

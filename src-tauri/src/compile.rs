@@ -165,6 +165,21 @@ mod tests {
         assert!(result.svg.is_some());
     }
 
+    /// Proves `#table(columns: .., [cell], ...)` (plan.md M10) isn't just
+    /// recognized by `parse_typst_ast` (ast.rs's table tests) but is real,
+    /// compilable Typst — same "parsed doesn't mean compiles" caution as
+    /// link_call_compiles_successfully_through_the_real_typst_engine.
+    #[test]
+    fn table_call_compiles_successfully_through_the_real_typst_engine() {
+        let result = compile_typst("#table(columns: 2, [A], [B], [C], [D])".into());
+        assert!(
+            result.diagnostics.iter().all(|d| d.severity != "error"),
+            "unexpected error diagnostics: {:?}",
+            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(result.svg.is_some());
+    }
+
     // Same source as ast::tests::MIXED_DOCUMENT (duplicated here rather than
     // shared — `CompileResult`'s fields are private, so the compile-diff and
     // perf checks for it have to live in this module, and Rust's per-file

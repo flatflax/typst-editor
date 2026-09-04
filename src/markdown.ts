@@ -32,6 +32,7 @@
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
+import remarkGfm from "remark-gfm";
 import type {
   BlockContent,
   Code,
@@ -41,16 +42,24 @@ import type {
   PhrasingContent,
   Root,
   RootContent,
+  Table as MdTable,
+  TableCell as MdTableCell,
+  TableRow as MdTableRow,
 } from "mdast";
 import { Node as PMNode, type Mark } from "prosemirror-model";
 import { schema, type PMDoc, type TypstSet } from "./schema";
+import { pmDocToTypst } from "./typstAst";
 
 const FENCE_CALL = "typst-call";
 const FENCE_SET = "typst-set";
 const FENCE_UNSUPPORTED = "typst-raw";
 
-const parser = unified().use(remarkParse);
-const stringifier = unified().use(remarkStringify, { bullet: "-", emphasis: "_", strong: "*" });
+// remark-gfm adds table (plus autolink/strikethrough/task-list, unused here)
+// parsing/stringifying on top of core CommonMark (plan.md M10).
+const parser = unified().use(remarkParse).use(remarkGfm);
+const stringifier = unified()
+  .use(remarkStringify, { bullet: "-", emphasis: "_", strong: "*" })
+  .use(remarkGfm);
 
 export function markdownToDoc(source: string): PMDoc {
   const root = parser.parse(source) as unknown as Root;
@@ -105,6 +114,8 @@ function convertBlock(node: RootContent, source: string): PMNode {
     }
     case "list":
       return convertList(node, source);
+    case "table":
+      return convertTable(node) ?? unsupportedBlockFrom(node, source);
     case "code":
       if (node.lang === FENCE_CALL) {
         return schema.nodes.typst_call.create({ name: parseCallName(node.value), raw: node.value });
@@ -114,13 +125,44 @@ function convertBlock(node: RootContent, source: string): PMNode {
       }
       return unsupportedBlockFrom(node, source);
     default:
-      // blockquote, table, thematicBreak, html, link/image standing alone,
+      // blockquote, thematicBreak, html, link/image standing alone,
       // definitions, footnotes, ... — all outside the MVP subset.
       return unsupportedBlockFrom(node, source);
   }
 }
 
-const LIST_ITEM_PRIMARY_KINDS = new Set(["heading", "paragraph", "typst_call", "unsupported_block"]);
+// A GFM table is always a rectangular grid of inline-only cells by
+// construction (its own pipe-table syntax can't express anything else), so
+// unlike the Typst spoke's `as_table_call` this never needs to reject a
+// ragged/malformed shape — only an individual cell's *inline* content
+// falling outside the MVP subset (an image, a footnote reference, ...)
+// can fail, in which case `null` signals the caller to fall back to
+// `unsupported_block` for the whole table, same policy as elsewhere. No
+// `columns:` source to preserve (Markdown has no such concept) — always a
+// plain integer matching the actual column count (plan.md M10).
+function convertTable(node: MdTable): PMNode | null {
+  const rows: PMNode[] = [];
+  let columnCount = 0;
+  for (const row of node.children) {
+    const cells: PMNode[] = [];
+    for (const cell of row.children) {
+      const children = flattenInline(cell.children, []);
+      if (!children) return null;
+      cells.push(schema.nodes.table_cell.create(null, [schema.nodes.paragraph.create(null, children)]));
+    }
+    columnCount = Math.max(columnCount, cells.length);
+    rows.push(schema.nodes.table_row.create(null, cells));
+  }
+  return schema.nodes.table.create({ columnsRaw: String(columnCount), columnCount }, rows);
+}
+
+const LIST_ITEM_PRIMARY_KINDS = new Set([
+  "heading",
+  "paragraph",
+  "typst_call",
+  "table",
+  "unsupported_block",
+]);
 const LIST_KINDS = new Set(["bullet_list", "ordered_list"]);
 
 function convertList(node: MdList, source: string): PMNode {
@@ -281,11 +323,52 @@ function blockToMdast(node: PMNode): BlockContent {
       };
     case "typst_call":
       return { type: "code", lang: FENCE_CALL, meta: null, value: node.attrs.raw as string };
+    case "table": {
+      const asGfm = tableToMdastIfPossible(node);
+      if (asGfm) return asGfm;
+      // A cell with block content (a heading/list/nested table/...) isn't
+      // something GFM pipe tables can express (plan.md M10) — falls back
+      // to the same opaque fenced-passthrough convention typst_call/
+      // unsupported_block already use on this leg. Reuses pmDocToTypst
+      // (wrapping just this node in a throwaway one-block doc) rather than
+      // duplicating serializeTable's logic here; the mdast -> PM direction
+      // (convertBlock's FENCE_UNSUPPORTED case) reconstructs this as a
+      // plain, non-editable unsupported_block, not a structured table —
+      // there's no synchronous way to re-derive table structure from raw
+      // Typst text without the Rust parser (see this file's header comment).
+      return {
+        type: "code",
+        lang: FENCE_UNSUPPORTED,
+        meta: null,
+        value: pmDocToTypst(schema.nodes.doc.create({ settings: [] }, [node])),
+      };
+    }
     case "unsupported_block":
       return { type: "code", lang: FENCE_UNSUPPORTED, meta: null, value: node.attrs.raw as string };
     default:
       throw new Error(`pmDocToMdast: unexpected block "${node.type.name}"`);
   }
+}
+
+// The inverse of convertTable: a GFM table cell can only hold a single
+// paragraph's worth of inline content, so a table only converts cleanly
+// when every cell fits that shape — returns null otherwise, signaling the
+// caller to fall back to the opaque convention above.
+function tableToMdastIfPossible(node: PMNode): MdTable | null {
+  const rows: MdTableRow[] = [];
+  let ok = true;
+  node.forEach((row) => {
+    const cells: MdTableCell[] = [];
+    row.forEach((cell) => {
+      if (ok && cell.childCount === 1 && cell.child(0).type.name === "paragraph") {
+        cells.push({ type: "tableCell", children: inlineToMdast(cell.child(0)) });
+      } else {
+        ok = false;
+      }
+    });
+    rows.push({ type: "tableRow", children: cells });
+  });
+  return ok ? { type: "table", children: rows } : null;
 }
 
 function listItemsToMdast(list: PMNode): MdListItem[] {

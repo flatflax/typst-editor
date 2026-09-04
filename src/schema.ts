@@ -7,6 +7,7 @@
 // policy" and the `typst_call`/`#set` architecture sections). No UI wiring
 // here yet (M5); this is schema + node/mark specs only.
 import { Schema, type Node as PMNode } from "prosemirror-model";
+import { tableNodes } from "prosemirror-tables";
 
 // Alias for the in-memory Editor Model value passed between the Typst/
 // Markdown <-> model converters (M3/M4) — a plain `prosemirror-model` Node
@@ -16,6 +17,13 @@ export type PMDoc = PMNode;
 // One `#set func(...)` rule, carried verbatim (plan.md "`#set` rule
 // support"). Lives on `doc.attrs.settings`, not interleaved in flow content.
 export type TypstSet = { function: string; raw: string };
+
+// prosemirror-tables' `table`/`table_row`/`table_cell`/`table_header` node
+// specs (plan.md M10). `cellContent: "block+"` matches Typst's own table
+// cells, which can hold full markup (headings, lists, marks — not just
+// plain text). No custom `cellAttributes` (colspan/rowspan/per-cell styling
+// are out of the MVP subset — see ast.rs's `as_table_call`).
+const tableNodeSpecs = tableNodes({ tableGroup: "block", cellContent: "block+", cellAttributes: {} });
 
 export const schema = new Schema({
   nodes: {
@@ -96,7 +104,7 @@ export const schema = new Schema({
     // in its own new list — hence blank lines between items and each
     // showing "1." independently, its own list's own default order).
     list_item: {
-      content: "(paragraph | heading | typst_call | unsupported_block) (bullet_list | ordered_list)*",
+      content: "(paragraph | heading | typst_call | table | unsupported_block) (bullet_list | ordered_list)*",
       parseDOM: [{ tag: "li" }],
       toDOM: () => ["li", 0],
     },
@@ -168,6 +176,22 @@ export const schema = new Schema({
     text: {
       group: "inline",
     },
+
+    // `#table(columns: .., [cell], ...)` (plan.md M10). `columnsRaw` is the
+    // verbatim source text of the `columns:` argument and `columnCount` the
+    // column count it was derived for (see ast.rs's `AstBlock::Table`) — the
+    // serializer (src/typstAst.ts) re-emits `columnsRaw` verbatim only when
+    // `columnCount` still matches the table's *actual* current column count
+    // (the first row's cell count), falling back to a plain integer when a
+    // WYSIWYG add/remove-column edit has made it stale, rather than silently
+    // re-emitting a mismatched columns spec.
+    table: {
+      ...tableNodeSpecs.table,
+      attrs: { columnsRaw: { default: "" }, columnCount: { default: 0 } },
+    },
+    table_row: tableNodeSpecs.table_row,
+    table_cell: tableNodeSpecs.table_cell,
+    table_header: tableNodeSpecs.table_header,
   },
   marks: {
     strong: {

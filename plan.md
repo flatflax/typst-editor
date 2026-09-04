@@ -9,7 +9,7 @@ Single-View WYSIWYG** below for that target and the architecture that makes it
 tractable.
 
 **The MVP's goal (complete, M0–M6)** was narrower and came first by design: prove that
-`Source code ⇄ Edit model ⇄ Typst typesetting result` can form a **stable closed loop** on top of Tauri,
+`Source code ⇄ Edit modelor ⇄ Typst typesetting result` can form a **stable closed loop** on top of Tauri,
 before attempting single-view editing at all. Not "build a Typst IDE" — a proof that:
 
 - a shared **Editor Model** (rich-text document, not raw text) can be losslessly parsed from *and* serialized back to **Typst source**, and separately to/from **Markdown source**, for a small syntax subset;
@@ -22,9 +22,9 @@ Two scope decisions already made with the user (do not revisit without asking):
 
 **Status:** MVP (M0–M6) complete — the closed loop is proven, including the M6
 cross-spoke stability suite and mixed-content compile-diff fixture. **Phase 2** (content
-coverage + file I/O) is in progress: M7 File I/O, M8 PDF export, and M9 Links are done;
-M10 Tables and M11 Images/figures are next. **Phase 3** (the single-view product goal
-above) hasn't started — see both phases' sections below.
+coverage + file I/O) is in progress: M7 File I/O, M8 PDF export, M9 Links, and M10 Tables
+are done; M11 Images/figures is next. **Phase 3** (the single-view product goal above)
+hasn't started — see both phases' sections below.
 
 ## Phase 1 — MVP (M0–M6, complete)
 
@@ -157,12 +157,13 @@ Cheapest content addition — a mark, not a new node type, so it reuses the exis
 - Round-trip fixtures mirroring the M3/M4 pattern, including a link inside other marks (bold link) to confirm mark-stacking survives both spokes.
 - Implemented in `ast.rs` (`AstInline::Link` — a recursive container, not a flattened mark name, since a link's body can itself contain marked-up content, unlike `strong`/`em`/`code`; `as_link_call` recognizes `#link("url")[body]` specifically and excludes it from the generic opaque-`FuncCall`/`SingleCall` paths), `schema.ts` (`link` mark, `inclusive: false`), `typstAst.ts`/`markdown.ts` (both directions: recurse into the link body then stack the `link` mark via `addToSet` — not prepend — onto every produced node, since ProseMirror requires marks sorted by schema rank; serialization always emits the link outermost regardless of the source's original nesting order, e.g. `*#link(..)[x]*` and `#link(..)[*x*]` both round-trip to the same canonical form), and `wysiwygCommands.ts` (`toggleLink`: prompts for a URL on an empty-selection-aware add, strips the mark on toggle-off; `Mod-k` keymap + toolbar button in `WysiwygEditor.tsx`). `[`/`]` were added to the Typst text-escape set since link body text is now the first place arbitrary text gets embedded inside a Typst content-block delimiter pair. 135/135 frontend tests, 36/36 Rust tests pass.
 
-**M10 — Tables**
+**M10 — Tables — done**
 The highest-effort content addition this phase, because Typst has no lightweight table *markup* (unlike Markdown's GFM pipe tables) — a table is a `#table(columns: .., [cell], [cell], ...)` function call, so representing an editable table in the Editor Model means parsing/generating a *structured* subset of call-argument syntax, not treating it as opaque like `typst_call`:
 - Typst ⇄ model: recognize `#table(...)` calls whose arguments match a supported shape (a `columns:` argument plus a flat sequence of content-block cell arguments — no `#table.cell`/rowspan/colspan/styling args in MVP, those fall through to `unsupported_block` as a whole call), and parse each cell's content recursively through the existing subset parser (a cell can contain paragraphs/marks, not just plain text). Serializer re-emits the same call shape deterministically.
 - Markdown ⇄ model: `remark-gfm` table/tableRow/tableCell mdast nodes — GFM tables are cell-flat (no block content per cell), so constrain the Editor Model's table cells to inline content only when round-tripping through Markdown, and treat a table containing block-level cell content (a list or heading inside a cell) as something Markdown can't carry — falls back to the same fenced-passthrough convention used for `typst_call`/`unsupported_block` on that leg.
 - ProseMirror: `prosemirror-tables` (table/table_row/table_cell/table_header nodes, selection/resize commands) rather than hand-rolling table editing.
 - Round-trip + compile-diff fixtures per the M3/M4/M6 pattern, including one table with mixed inline marks in a cell and one that exercises the Markdown-side block-content fallback above.
+- Implemented in `ast.rs` (`AstBlock::Table` — `columns_raw` carries the `columns:` argument's exact source text verbatim, same "opaque where it doesn't matter, structured where it does" split as `typst_call`'s `raw`; `as_table_call`/`column_count_from` accept a bare integer or an array-literal `columns:` value and reject any other named/styling argument or non-content-block positional cell, falling back to the existing opaque `typst_call` path — `finalize_pending`/`try_flatten_pending` now thread `settings` through so a cell's content can recurse via the same `convert_markup` list items already use), `schema.ts` (`prosemirror-tables`' generated node specs, plus custom `columnsRaw`/`columnCount` attrs on `table` merged in on top since the library doesn't expose an attrs option for the table node itself; `table` added to `list_item`'s content alternation), `typstAst.ts` (`serializeTable`/`serializeTableCell` reuse `serializeBlock` recursively — a cell's paragraphs/lists/marks, even a nested table, serialize through the exact same logic as top-level content; `columnsRaw` is only re-emitted verbatim when the stored `columnCount` attr still matches the table's *actual* current column count, falling back to a plain integer otherwise so a WYSIWYG add/remove-column edit can't silently re-emit a stale/mismatched columns spec), `markdown.ts` (`remark-gfm`; the PM→mdast leg's block-content fallback reuses `pmDocToTypst` — wrapping just the table node in a throwaway one-block doc — rather than duplicating `serializeTable`'s logic), and `wysiwygCommands.ts`/`WysiwygEditor.tsx` (`insertTable`, `addRowAfter`/`addColumnAfter`/`deleteRow`/`deleteColumn` toolbar buttons, `tableEditing()` plugin, `Tab`/`Shift-Tab` chained through `goToNextCell` before falling back to the existing list sink/lift keymap). `[`/`]` escaping (added in M9) already covers a cell's plain text, since a cell's `[...]` wrapper is just another content-block delimiter pair. 153/153 frontend tests, 46/46 Rust tests pass.
 
 **M11 — Images & figures**
 Depends on M7 (needs a real on-disk file path to resolve relative image paths against — the MVP `TauriWorld` is in-memory with no filesystem access per the README, so this is the first milestone that gives it one, scoped to the open document's directory only, not arbitrary filesystem access):

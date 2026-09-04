@@ -185,6 +185,26 @@
   color: #3730a3;
 }
 
+.wysiwyg-content table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+}
+
+.wysiwyg-content table td {
+  border: 1px solid #ccc;
+  padding: 0.4em 0.6em;
+  min-width: 3em;
+  vertical-align: top;
+}
+
+.wysiwyg-content table td > :first-child {
+  margin-top: 0;
+}
+
+.wysiwyg-content table td > :last-child {
+  margin-bottom: 0;
+}
+
 .preview-pane {
   padding: 1rem;
   position: relative;
@@ -268,5 +288,9 @@
     background: #1e2350;
     border-color: #3730a3;
     color: #c7d2fe;
+  }
+
+  .wysiwyg-content table td {
+    border-color: #555;
   }
 }

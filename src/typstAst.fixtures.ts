@@ -264,6 +264,80 @@ export const linkWithBoldText: TypstAstFixture = {
   expected: '#link("https://typst.app")[*Typst*]',
 };
 
+// See ast::tests::table_with_integer_columns_becomes_a_structured_table
+export const table: TypstAstFixture = {
+  source: "#table(columns: 2, [A], [B], [C], [D])",
+  ast: {
+    settings: [],
+    content: [
+      {
+        type: "table",
+        columnsRaw: "2",
+        columnCount: 2,
+        cells: [
+          [{ type: "paragraph", children: [{ type: "text", text: "A", marks: [] }] }],
+          [{ type: "paragraph", children: [{ type: "text", text: "B", marks: [] }] }],
+          [{ type: "paragraph", children: [{ type: "text", text: "C", marks: [] }] }],
+          [{ type: "paragraph", children: [{ type: "text", text: "D", marks: [] }] }],
+        ],
+      },
+    ],
+  },
+  expected: "#table(columns: 2, [A], [B], [C], [D])",
+};
+
+// See ast::tests::table_with_array_columns_preserves_the_raw_width_spec —
+// the array form's exact source text round-trips verbatim.
+export const tableWithArrayColumns: TypstAstFixture = {
+  source: "#table(columns: (1fr, 2fr), [A], [B])",
+  ast: {
+    settings: [],
+    content: [
+      {
+        type: "table",
+        columnsRaw: "(1fr, 2fr)",
+        columnCount: 2,
+        cells: [
+          [{ type: "paragraph", children: [{ type: "text", text: "A", marks: [] }] }],
+          [{ type: "paragraph", children: [{ type: "text", text: "B", marks: [] }] }],
+        ],
+      },
+    ],
+  },
+  expected: "#table(columns: (1fr, 2fr), [A], [B])",
+};
+
+// See ast::tests::a_table_cell_can_contain_marked_up_text (plan.md M10:
+// "including one table with mixed inline marks in a cell").
+export const tableWithMarkedUpCell: TypstAstFixture = {
+  source: "#table(columns: 1, [*bold* and _italic_])",
+  ast: {
+    settings: [],
+    content: [
+      {
+        type: "table",
+        columnsRaw: "1",
+        columnCount: 1,
+        cells: [
+          [
+            {
+              type: "paragraph",
+              children: [
+                { type: "text", text: "bold", marks: ["strong"] },
+                { type: "text", text: " ", marks: [] },
+                { type: "text", text: "and", marks: [] },
+                { type: "text", text: " ", marks: [] },
+                { type: "text", text: "italic", marks: ["em"] },
+              ],
+            },
+          ],
+        ],
+      },
+    ],
+  },
+  expected: "#table(columns: 1, [*bold* and _italic_])",
+};
+
 // See ast::tests::top_level_set_rule_is_lifted_into_settings_and_excluded_from_content
 export const typstSet: TypstAstFixture = {
   source: "#set text(size: 11pt)\n\n= Heading",
@@ -419,6 +493,9 @@ export const fixtures = {
   linkInline,
   linkStandalone,
   linkWithBoldText,
+  table,
+  tableWithArrayColumns,
+  tableWithMarkedUpCell,
   typstSet,
   unsupportedBlockSandwich,
   mixed,

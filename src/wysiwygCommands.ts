@@ -8,6 +8,13 @@ import type { NodeType } from "prosemirror-model";
 import { baseKeymap, chainCommands, setBlockType, toggleMark } from "prosemirror-commands";
 import { keymap } from "prosemirror-keymap";
 import { liftListItem, sinkListItem, splitListItem, wrapInList } from "prosemirror-schema-list";
+import {
+  addColumnAfter,
+  addRowAfter,
+  deleteColumn,
+  deleteRow,
+  goToNextCell,
+} from "prosemirror-tables";
 import { schema } from "./schema";
 
 export const toggleStrong = toggleMark(schema.marks.strong);
@@ -79,6 +86,31 @@ export const toggleOrderedList = toggleList(schema.nodes.ordered_list);
 export const sinkList = sinkListItem(schema.nodes.list_item);
 export const liftList = liftListItem(schema.nodes.list_item);
 
+// Inserts an empty `rows` x `cols` table at the cursor (plan.md M10). No
+// custom per-column widths to offer here, so `columnsRaw` starts as a plain
+// integer matching `cols` — same shape a WYSIWYG-authored table always ends
+// up serializing as anyway once it no longer matches a stale stored value
+// (see typstAst.ts's serializeTable).
+export function insertTable(rows: number, cols: number): Command {
+  return (state, dispatch) => {
+    if (!dispatch) return true;
+    const makeCell = () => schema.nodes.table_cell.create(null, [schema.nodes.paragraph.create()]);
+    const makeRow = () => schema.nodes.table_row.create(null, Array.from({ length: cols }, makeCell));
+    const table = schema.nodes.table.create(
+      { columnsRaw: String(cols), columnCount: cols },
+      Array.from({ length: rows }, makeRow),
+    );
+    dispatch(state.tr.replaceSelectionWith(table).scrollIntoView());
+    return true;
+  };
+}
+
+export const insertTable2x2 = insertTable(2, 2);
+export const addTableRow = addRowAfter;
+export const addTableColumn = addColumnAfter;
+export const deleteTableRow = deleteRow;
+export const deleteTableColumn = deleteColumn;
+
 export function buildKeymapPlugin() {
   return keymap({
     ...baseKeymap,
@@ -90,7 +122,11 @@ export function buildKeymapPlugin() {
     // must run before the base Enter (plain splitBlock), which knows nothing
     // about list_item's structure.
     Enter: chainCommands(splitListItem(schema.nodes.list_item), baseKeymap.Enter),
-    Tab: sinkList,
-    "Shift-Tab": liftList,
+    // goToNextCell returns false outside a table, falling through to the
+    // list-sink/lift behavior below — inside one, Tab/Shift-Tab move
+    // between cells instead (the conventional table-editing meaning), which
+    // takes priority since it's the more specific context.
+    Tab: chainCommands(goToNextCell(1), sinkList),
+    "Shift-Tab": chainCommands(goToNextCell(-1), liftList),
   });
 }

@@ -21,17 +21,25 @@ import { docToMarkdown, markdownToDoc } from "./markdown";
 import { fixtures } from "./typstAst.fixtures";
 import type { PMDoc } from "./schema";
 
-describe("Editor Model survives a round trip through Markdown", () => {
-  it.each(Object.entries(fixtures))(
-    "%s: doc -> Markdown -> doc is structurally unchanged",
-    (_name, fixture) => {
-      const doc = typstAstToDoc(fixture.ast);
-      const roundTripped = markdownToDoc(docToMarkdown(doc));
-      expect(roundTripped.eq(doc)).toBe(true);
-    },
-  );
+// Excluded from this suite specifically: content that's a stable fixed
+// point through Typst<->model on its own (typstAst.test.ts) but *known* to
+// be lossy specifically through the Markdown spoke — not a bug, a
+// deliberate, documented gap (plan.md M10's "Markdown fidelity gap widens"
+// risk): GFM tables have no concept of per-column width, so `columns: (1fr,
+// 2fr)` can't survive a Markdown round trip — it degrades to a plain
+// equal-width `columns: 2` (still a valid, compilable table, just visually
+// different, same spirit as M11's documented image-caption-as-alt-text gap).
+const MARKDOWN_LOSSY = new Set(["tableWithArrayColumns"]);
+const crossSpokeFixtures = Object.entries(fixtures).filter(([name]) => !MARKDOWN_LOSSY.has(name));
 
-  it.each(Object.entries(fixtures))(
+describe("Editor Model survives a round trip through Markdown", () => {
+  it.each(crossSpokeFixtures)("%s: doc -> Markdown -> doc is structurally unchanged", (_name, fixture) => {
+    const doc = typstAstToDoc(fixture.ast);
+    const roundTripped = markdownToDoc(docToMarkdown(doc));
+    expect(roundTripped.eq(doc)).toBe(true);
+  });
+
+  it.each(crossSpokeFixtures)(
     "%s: the Typst source compiled from the doc is unchanged after that round trip",
     (_name, fixture) => {
       const doc = typstAstToDoc(fixture.ast);
