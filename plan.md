@@ -12,7 +12,7 @@ Two scope decisions already made with the user (do not revisit without asking):
 1. **WYSIWYG = rich-text editing surface + a separate accurate preview pane** (Typora/Notion-style), *not* true inline editing on top of Typst's real paginated layout. The latter is architecturally an order of magnitude harder and out of scope for an MVP.
 2. **Markdown is a first-class second source format**, requiring real Markdown ⇄ Editor Model conversion (not just a UX inspiration) — Typst source and Markdown source are two independent "spokes" around the same Editor Model "hub."
 
-**Status: M0 and M1 (Rust side) are already implemented** in `src-tauri/src/` — `typst_world.rs` (`TauriWorld`), `compile.rs` (`compile_typst` command), `jump.rs` (`jump_from_click`/`jump_from_cursor` commands), wired in `lib.rs`. The rest of this plan (Editor Model, Markdown support, WYSIWYG UI, and the `typst_call`/`typst_set` extensions below) is not yet built.
+**Status: MVP (M0–M6) is complete** — the closed loop is proven: 99/99 frontend tests (vitest) and 26/26 Rust tests (cargo test) pass, including the M6 cross-spoke stability suite and mixed-content compile-diff fixture. See the "Explicitly out of scope" list below for what's next; nothing yet organized into a dedicated post-MVP roadmap section.
 
 ## Architecture
 
@@ -66,6 +66,7 @@ TypeScript frontend owns the Editor Model and both source-format conversions, si
 - **World implementation**: hand-write a small `struct TauriWorld` implementing `typst::World`'s 7 methods (`library`, `book`, `main`, `source`, `file`, `font`, `today`), copying the shape of `typst-cli`'s `SystemWorld` (fields: `library`, `fonts`, `files`, cached `now`). Use `typst-kit`'s `fonts::embedded()` for Typst's default (Latin/math) faces. **Revised during M1** (superseding the original "disable system scanning, bundle 1-2 fonts" plan): embedded fonts alone have no CJK coverage, so Chinese/Japanese/Korean text rendered blank. Fixed by also merging in `typst_kit::fonts::system()` — Typst's automatic glyph-fallback then finds whatever CJK-capable fonts are already installed, matching `typst-cli`'s own default behavior. This trades portability (CJK rendering now depends on the host machine's installed fonts, not just the app bundle) for correctness without the size/licensing cost of bundling a CJK font; the system font *metadata* scan is cached once per process (`LazyLock`) since it's too slow to redo per keystroke, while actual font bytes still load lazily per compile (relies on OS page cache). Pinned by a `cargo test` asserting the font book has fallback coverage for a CJK string.
 - **Diagnostics carry a source line, not just a message**: `SourceDiagnostic` (from `typst::compile`) carries a `Span`, which the current `compile.rs`/`CompileDiagnostic` discards — `to_diagnostic` only extracts `severity`/`message`. Resolve the span back to a 1-indexed `(line, column)` via the compiling `Source` (`source.range(span)` for the byte offset, then `Source::byte_to_line`/`byte_to_column` — confirm exact `typst-syntax` method names at implementation time) and add `line`/`column` fields to `CompileDiagnostic`. Frontend shows this as a CodeMirror gutter/inline marker at that line (M1) and, once WYSIWYG exists, resolves it through the M5 position map to highlight the originating block instead of a raw generated-source line number.
 - **Editor**: raw ProseMirror (`prosemirror-model`/`-view`/`-state`/`-commands`/`-keymap`), custom schema — *not* Milkdown, because Milkdown's parser/serializer architecture is markdown-first and would fight us when adding a second (Typst) source format onto the same schema. Source-mode views (Typst/Markdown raw text) use CodeMirror 6 in plain-text mode; syntax highlighting is a stretch goal, not required to prove the loop.
+  - **Fixed post-M6**: `codemirror`'s `basicSetup` bundles `closeBrackets()` (bracket/quote auto-closing), a programming-editor convenience that actively corrupts typed or pasted Typst/Markdown source — both freely use `(`/`[`/`{` as plain syntax (e.g. `#table(columns: (1fr, 2fr), [a], [b])`), and typing or pasting a *complete* snippet containing them leaves extra auto-inserted closing brackets alongside the user's own, unbalancing delimiter counts. Directly reproduced (simulated real keystrokes turning a `#table(...)` call into mismatched-parenthesis source that then parsed as something unrecognizable) and confirmed as the cause of a user-reported bug where content appeared corrupted after switching views. Fixed in `SourceEditor.tsx` by replacing `basicSetup` with its own extension list minus `closeBrackets()`/`closeBracketsKeymap` — `basicSetup`'s own doc comment invites exactly this ("copy it into your own code, and adjust it as desired").
 - **React + TypeScript + Vite** frontend, **Tauri v2** shell.
 
 ## Milestones
@@ -110,3 +111,56 @@ Explicitly out of scope for this MVP (call out to the user as future work, not s
 - Two independent parsers (Typst, Markdown) feeding one schema constrains both to their common subset; anything either grammar expresses that the other can't becomes an `unsupported_block`, by design — this keeps the loop honest rather than silently lossy.
 - Full recompile on every debounce is fine at MVP doc sizes; flagged as a known scaling limit, not solved here.
 - `typst-ide`'s jump API (click/cursor sync) is not battle-tested by prior art (tinymist reimplements it independently) — pin the exact version and budget time to adapt if signatures shift; treat it as a valuable but non-blocking enhancement to M1, not something the rest of the plan depends on.
+
+---
+
+## Phase 2 — Post-MVP Roadmap
+
+### Goal and lane choice
+
+The MVP proved the loop is *stable*; it did not make the editor *usable* for a real document or *complete* against Typst's actual syntax. Phase 2 picks up the MVP's "explicitly out of scope" list and works through it in **hybrid order** (agreed with the user over three candidate lanes — content-coverage-first, fidelity-first, and product-completeness-first): ship the app-level basics that make the existing subset usable on a real file first (nothing else matters if you can't open/save one), then grow the content subset by cheapest-to-most-expensive addition, and defer everything that only pays off once the subset is already bigger (`#let`/`#show`, precision work, incremental compilation) to a later phase.
+
+Two things do **not** change in Phase 2: the hub-and-spoke architecture (Editor Model as the canonical ProseMirror doc; Typst/Markdown as two independent spokes; preview always through real compiled Typst source), and the `unsupported_block`/opaque-node policy for anything outside the (now larger) subset. Every milestone below is additive to that architecture, not a redesign of it.
+
+### Milestones
+
+**M7 — File I/O**
+Open/Save/Save As via `@tauri-apps/plugin-dialog` + `@tauri-apps/plugin-fs`. Loading a file picks the Typst or Markdown spoke by extension (`.typ` vs `.md`) and parses into the Editor Model as usual; the open file's path becomes session state the app needs from here on (M10 image resolution depends on it). Track a `dirty` flag on the model (compare against last-saved serialization, not a naive edit-count) for a title-bar/tab indicator and an unsaved-changes guard on close/open-another-file. Recent-files list persisted via `@tauri-apps/plugin-store` (or a small JSON file) since there's no filesystem-agnostic browser storage answer in a Tauri shell. `Ctrl+S`/`Ctrl+O`/`Ctrl+Shift+S` keybindings. No new Editor Model or round-trip logic — purely an app-shell feature, lowest technical risk of the phase.
+
+**M8 — PDF export**
+`typst_pdf::pdf(&paged_document, ...)` (the crate already sits next to `typst-render`/`typst-svg` in the Typst ecosystem, same `PagedDocument` the preview pipeline already produces) → new `export_pdf` Tauri command → Save dialog. Export button/menu item in the frontend. Verification: export a fixture doc, confirm the PDF opens and its page count/text matches the SVG preview (a text-extraction sanity check, not full visual diffing).
+
+**M9 — Links**
+Cheapest content addition — a mark, not a new node type, so it reuses the existing mark infrastructure (`strong`/`em`/`code`) rather than needing new schema plumbing:
+- Typst: `#link("url")[text]` — a self-contained call-like node, parsed/serialized directly (not opaque — unlike `typst_call`, we *do* understand this one's shape) into a `link` mark with a `href` attribute.
+- Markdown: native `[text](url)` — mdast `link` node maps directly.
+- ProseMirror: standard `link` mark (attrs: `href`), toolbar button + keymap, no new leaf/block node.
+- Round-trip fixtures mirroring the M3/M4 pattern, including a link inside other marks (bold link) to confirm mark-stacking survives both spokes.
+
+**M10 — Tables**
+The highest-effort content addition this phase, because Typst has no lightweight table *markup* (unlike Markdown's GFM pipe tables) — a table is a `#table(columns: .., [cell], [cell], ...)` function call, so representing an editable table in the Editor Model means parsing/generating a *structured* subset of call-argument syntax, not treating it as opaque like `typst_call`:
+- Typst ⇄ model: recognize `#table(...)` calls whose arguments match a supported shape (a `columns:` argument plus a flat sequence of content-block cell arguments — no `#table.cell`/rowspan/colspan/styling args in MVP, those fall through to `unsupported_block` as a whole call), and parse each cell's content recursively through the existing subset parser (a cell can contain paragraphs/marks, not just plain text). Serializer re-emits the same call shape deterministically.
+- Markdown ⇄ model: `remark-gfm` table/tableRow/tableCell mdast nodes — GFM tables are cell-flat (no block content per cell), so constrain the Editor Model's table cells to inline content only when round-tripping through Markdown, and treat a table containing block-level cell content (a list or heading inside a cell) as something Markdown can't carry — falls back to the same fenced-passthrough convention used for `typst_call`/`unsupported_block` on that leg.
+- ProseMirror: `prosemirror-tables` (table/table_row/table_cell/table_header nodes, selection/resize commands) rather than hand-rolling table editing.
+- Round-trip + compile-diff fixtures per the M3/M4/M6 pattern, including one table with mixed inline marks in a cell and one that exercises the Markdown-side block-content fallback above.
+
+**M11 — Images & figures**
+Depends on M7 (needs a real on-disk file path to resolve relative image paths against — the MVP `TauriWorld` is in-memory with no filesystem access per the README, so this is the first milestone that gives it one, scoped to the open document's directory only, not arbitrary filesystem access):
+- Typst: `#image("path")` and `#figure(image("path"), caption: [...])` — parsed into an `image` leaf node (`src`, optional `caption`) and a `figure` wrapper; `TauriWorld::file()` resolves relative paths against the open document's directory.
+- Markdown: `![alt](path)` → image node directly; a captioned image maps to/from Typst's `#figure` wrapper (Markdown has no native figure/caption construct, so the caption round-trips as the image's `alt` text — a deliberate, documented lossy-but-stable mapping, same spirit as the `unsupported_block` policy).
+- WYSIWYG rendering: Tauri's asset protocol (`convertFileSrc`) scoped to the document directory, not a data-URI copy — keeps large images out of the Editor Model.
+- Security note: the fs/asset-protocol scope granted here must be narrowed to the open document's directory (and read-only), not project-wide — flag this explicitly in the Tauri capability config, don't default to broad access.
+- Round-trip + compile-diff fixtures per the established pattern, plus a manual check that a missing/broken image path degrades to a diagnostic rather than a crash (mirrors the M1 diagnostics work, new failure mode).
+
+### Deferred past Phase 2 (explicit, not silently dropped)
+
+Carried over from the MVP's out-of-scope list, intentionally not attempted this phase because each only pays off once the subset above exists, or is large enough to be its own phase:
+- **`#let`/`#show`/control-flow** — real semantic (not opaque) support is a substantially larger project than everything above combined (variable binding, scoping, and rule application, not just recognizing a self-contained node span) — worth scoping as its own phase once M9–M11 land.
+- **Fidelity/precision work** — byte-exact WYSIWYG click/cursor sync (currently proportional interpolation inside marked-up runs, see M5 notes above), range/selection-level highlighting (currently point/caret-only), incremental compilation (currently full-recompile-per-keystroke). Deferred because hardening sync/perf for a subset that's about to grow (M9–M11) risks redoing the work twice.
+- **Footnotes/citations, math mode, multi-file imports beyond image assets, collaborative editing** — no change in status from the MVP plan; still out of scope, revisit after the above.
+
+### Risks
+
+- **Table Typst-representation risk**: constraining `#table(...)` to a supported argument shape (M10) is a heuristic, not a full parse of Typst's argument grammar — a real-world document's table call is more likely to fall outside the supported shape (and thus become opaque) than the MVP's other opaque-fallback cases, since `#table` has many legitimate styling arguments in practice. Budget time to widen the supported shape based on real fixtures, not just the minimal one built first.
+- **Image path/security risk**: M11 is the first milestone giving the Rust backend real filesystem access (beyond the in-memory MVP World) — get the Tauri capability scoping right (document-directory-only, read-only) from the start rather than retrofitting it after a broader grant ships.
+- **Markdown fidelity gap widens**: GFM tables (cell-inline-only) and image-caption-as-alt-text (M11) are two more points where the Markdown spoke can't carry everything the Typst spoke can — consistent with the MVP's existing "two independent parsers constrain to their common subset" risk, but worth flagging that Phase 2 grows the number of these deliberate lossy-but-stable fallbacks, not just the one (`unsupported_block`) the MVP shipped with.

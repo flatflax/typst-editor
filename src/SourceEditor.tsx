@@ -1,9 +1,62 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
-import { linter, lintGutter, setDiagnostics } from "@codemirror/lint";
-import { basicSetup } from "codemirror";
+import {
+  EditorView,
+  crosshairCursor,
+  drawSelection,
+  dropCursor,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  highlightSpecialChars,
+  keymap,
+  lineNumbers,
+  rectangularSelection,
+} from "@codemirror/view";
+import {
+  bracketMatching,
+  defaultHighlightStyle,
+  foldGutter,
+  foldKeymap,
+  indentOnInput,
+  syntaxHighlighting,
+} from "@codemirror/language";
+import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
+import { linter, lintGutter, lintKeymap, setDiagnostics } from "@codemirror/lint";
 import { toCMDiagnostics } from "./diagnosticPosition";
+
+// `codemirror`'s own `basicSetup` (see its source: node_modules/codemirror/
+// dist/index.js), minus `closeBrackets()`/`closeBracketsKeymap` — its own
+// doc comment invites exactly this ("once you decide you want to configure
+// your editor more precisely, you take this package's source ... and adjust
+// it as desired"). Bracket auto-closing is a programming-editor convenience
+// that actively fights typing or pasting Typst/Markdown source: both freely
+// use `(`, `[`, `{` as plain syntax characters (e.g. `#table(columns: (1fr,
+// 2fr), [a], [b])`), and a user typing or pasting a *complete* snippet ends
+// up with extra auto-inserted closing brackets duplicating their own —
+// confirmed by directly reproducing it (simulated typing through real
+// keystrokes turned `#table(...)` into mismatched-parenthesis source that
+// then parsed as something else entirely, matching a user-reported bug).
+const plainTextSetup = [
+  lineNumbers(),
+  highlightActiveLineGutter(),
+  highlightSpecialChars(),
+  history(),
+  foldGutter(),
+  drawSelection(),
+  dropCursor(),
+  EditorState.allowMultipleSelections.of(true),
+  indentOnInput(),
+  syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+  bracketMatching(),
+  autocompletion(),
+  rectangularSelection(),
+  crosshairCursor(),
+  highlightActiveLine(),
+  highlightSelectionMatches(),
+  keymap.of([...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, ...completionKeymap, ...lintKeymap]),
+];
 
 export type SourceEditorHandle = {
   setCursor: (offset: number) => void;
@@ -48,7 +101,7 @@ const SourceEditor = forwardRef<SourceEditorHandle, Props>(function SourceEditor
       state: EditorState.create({
         doc: initialValue,
         extensions: [
-          basicSetup,
+          plainTextSetup,
           EditorView.lineWrapping,
           // Diagnostics are pushed externally via setDiagnostics (below)
           // whenever a new compile_typst result arrives. A non-null source
