@@ -50,10 +50,12 @@ const SourceEditor = forwardRef<SourceEditorHandle, Props>(function SourceEditor
           basicSetup,
           EditorView.lineWrapping,
           // Diagnostics are pushed externally via setDiagnostics (below)
-          // whenever a new compile_typst result arrives, rather than
-          // computed by this linter source — it only needs to exist to
-          // register the lint gutter/underline machinery.
-          linter(() => []),
+          // whenever a new compile_typst result arrives. A non-null source
+          // here would have CodeMirror re-run it on its own ~750ms-after-
+          // edit schedule and overwrite our diagnostics with its (empty)
+          // result — `null` sets up the gutter/underline machinery without
+          // any automatic re-linting.
+          linter(null),
           lintGutter(),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) {
