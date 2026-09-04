@@ -28,20 +28,30 @@ function isInsideList(state: Parameters<Command>[0], listType: NodeType): boolea
   return false;
 }
 
-// Toggling a list isn't a single prosemirror-schema-list primitive: wrap the
-// selection in a fresh list when it isn't in one of this kind already,
-// otherwise lift back out to plain paragraphs.
-function toggleList(listType: NodeType, itemType: NodeType): Command {
+// Wraps the selection in a fresh list when it isn't already in one of this
+// kind; a no-op (not a toggle-off/lift) when it already is.
+//
+// An earlier version lifted the item back out on a second click of the same
+// button — the conventional toggle behavior — but that turned out to be a
+// real trap: Enter already continues a list on its own (splitListItem), so
+// a user who *also* re-clicks the list-type button per new line (typing
+// node1, clicking "1. List", Enter, node2, clicking "1. List" again out of
+// habit/uncertainty, ...) unknowingly lifts the just-continued item back
+// out on that second click, fragmenting one list into several — reported as
+// a bug, and confirmed live: exactly this sequence produced
+// `<ol><li>b1</li></ol><p>b2</p><ol><li>b3</li></ol>` instead of one list.
+// Removing a list item is still reachable via Shift-Tab (liftList) at the
+// top nesting level; the toolbar button just never does it as a surprising
+// side effect of clicking it again.
+function toggleList(listType: NodeType): Command {
   return (state, dispatch, view) => {
-    if (isInsideList(state, listType)) {
-      return liftListItem(itemType)(state, dispatch, view);
-    }
+    if (isInsideList(state, listType)) return false;
     return wrapInList(listType)(state, dispatch, view);
   };
 }
 
-export const toggleBulletList = toggleList(schema.nodes.bullet_list, schema.nodes.list_item);
-export const toggleOrderedList = toggleList(schema.nodes.ordered_list, schema.nodes.list_item);
+export const toggleBulletList = toggleList(schema.nodes.bullet_list);
+export const toggleOrderedList = toggleList(schema.nodes.ordered_list);
 
 export const sinkList = sinkListItem(schema.nodes.list_item);
 export const liftList = liftListItem(schema.nodes.list_item);

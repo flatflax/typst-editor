@@ -35,6 +35,8 @@ function textPosition(doc: ReturnType<typeof schema.node>, text: string): number
   return found;
 }
 
+const splitListItemCommand = splitListItem(schema.nodes.list_item);
+
 describe("mark toggles", () => {
   it("toggleStrong applies then removes the mark on the selected range", () => {
     const doc = schema.node("doc", { settings: [] }, [
@@ -88,18 +90,74 @@ describe("block type commands", () => {
 });
 
 describe("list toggling", () => {
-  it("toggleBulletList wraps a paragraph, then lifts it back out on a second toggle", () => {
+  it("toggleBulletList wraps a paragraph into a list", () => {
     const doc = schema.node("doc", { settings: [] }, [
       schema.node("paragraph", null, [schema.text("hello")]),
     ]);
-    let state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 1) });
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 1) });
 
-    state = applyCommand(state, toggleBulletList).state;
-    expect(state.doc.child(0).type).toBe(schema.nodes.bullet_list);
-    expect(state.doc.child(0).child(0).type).toBe(schema.nodes.list_item);
+    const result = applyCommand(state, toggleBulletList);
+    expect(result.applied).toBe(true);
+    expect(result.state.doc.child(0).type).toBe(schema.nodes.bullet_list);
+    expect(result.state.doc.child(0).child(0).type).toBe(schema.nodes.list_item);
+  });
 
-    state = applyCommand(state, toggleBulletList).state;
-    expect(state.doc.child(0).type).toBe(schema.nodes.paragraph);
+  // Regression guard for a second, related user-reported bug: after the
+  // splitListItem/Enter fix above, clicking the *same* list-type toolbar
+  // button again while already inside that list type used to lift the
+  // current item back out (the conventional toggle-off behavior) — a real
+  // trap once Enter already continues the list on its own, since a user
+  // re-clicking the button per new line (out of habit, or not realizing
+  // Enter already worked) would unknowingly un-list the item they just
+  // typed. Confirmed live: node1 <toolbar> Enter node2 <toolbar again>
+  // Enter node3 <toolbar again> produced
+  // <ol><li>b1</li></ol><p>b2</p><ol><li>b3</li></ol> — three lists, not
+  // one. Clicking the button again while already in a list of that type is
+  // now a no-op instead.
+  it("clicking the same list-type button again while already inside that list is a no-op", () => {
+    const doc = schema.node("doc", { settings: [] }, [
+      schema.node("ordered_list", { order: 1 }, [
+        schema.node("list_item", null, [schema.node("paragraph", null, [schema.text("node1")])]),
+      ]),
+    ]);
+    const state = EditorState.create({
+      schema,
+      doc,
+      selection: TextSelection.create(doc, textPosition(doc, "node1")),
+    });
+
+    const result = applyCommand(state, toggleOrderedList);
+    expect(result.applied).toBe(false);
+    expect(result.state.doc.eq(doc)).toBe(true); // nothing changed
+  });
+
+  it("the full reported sequence (type, toolbar, Enter, repeat) stays one list", () => {
+    // node1 <click "1. List"> <Enter> node2 <click "1. List" again>
+    // <Enter> node3 <click "1. List" again> — the exact live repro.
+    let doc = schema.node("doc", { settings: [] }, [
+      schema.node("paragraph", null, [schema.text("node1")]),
+    ]);
+    let state = EditorState.create({
+      schema,
+      doc,
+      selection: TextSelection.create(doc, textPosition(doc, "node1") + "node1".length),
+    });
+
+    state = applyCommand(state, toggleOrderedList).state; // wraps node1
+
+    for (const text of ["node2", "node3"]) {
+      const split = applyCommand(state, splitListItemCommand);
+      expect(split.applied).toBe(true);
+      state = split.state;
+      state = state.apply(state.tr.insertText(text));
+      applyCommand(state, toggleOrderedList); // no-op now; must not fragment the list
+    }
+
+    doc = state.doc;
+    expect(doc.childCount).toBe(1);
+    expect(doc.child(0).type).toBe(schema.nodes.ordered_list);
+    expect(doc.child(0).childCount).toBe(3);
+    expect(pmDocToTypst(doc)).toBe("1. node1\n2. node2\n3. node3");
   });
 
   it("toggling one list kind doesn't touch an unrelated list elsewhere in the doc", () => {
@@ -163,7 +221,6 @@ describe("Enter inside a list item (regression: schema.ts's list_item content or
   // expression's *default* block type — used by splitListItem when Enter
   // creates a fresh empty item — to whichever alternative comes first. Every
   // new item silently became a heading instead of a paragraph.
-  const splitListItemCommand = splitListItem(schema.nodes.list_item);
 
   it("pressing Enter after non-empty item text creates a new paragraph item, not a heading", () => {
     const doc = schema.node("doc", { settings: [] }, [
