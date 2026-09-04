@@ -174,6 +174,35 @@ describe("markdown round trip", () => {
     expect(pmDocToTypst(doc)).toBe('See #link("https://typst.app")[the docs] for more.');
   });
 
+  describe("images (plan.md M11)", () => {
+    it("an uncaptioned image round-trips through markdown", () => {
+      const { doc, regenerated } = assertStableRoundTrip("![](photo.png)");
+      const image = doc.child(0);
+      expect(image.type).toBe(schema.nodes.image);
+      expect(image.attrs).toEqual({ src: "photo.png", caption: null });
+      expect(regenerated).toBe("![](photo.png)");
+    });
+
+    // A captioned Typst figure round-trips as the image's alt text (plan.md
+    // M11's documented, accepted lossy-but-stable mapping).
+    it("alt text round-trips as the image's caption", () => {
+      const { doc, regenerated } = assertStableRoundTrip("![A nice photo](photo.png)");
+      const image = doc.child(0);
+      expect(image.attrs).toEqual({ src: "photo.png", caption: "A nice photo" });
+      expect(regenerated).toBe("![A nice photo](photo.png)");
+    });
+
+    it("a markdown-authored captioned image reaches pmDocToTypst as a real #figure(...) call", () => {
+      const doc = markdownToDoc("![A nice photo](photo.png)");
+      expect(pmDocToTypst(doc)).toBe('#figure(image("photo.png"), caption: [A nice photo])');
+    });
+
+    it("a markdown-authored uncaptioned image reaches pmDocToTypst as a bare #image(...) call", () => {
+      const doc = markdownToDoc("![](photo.png)");
+      expect(pmDocToTypst(doc)).toBe('#image("photo.png")');
+    });
+  });
+
   describe("tables (plan.md M10)", () => {
     it("a table round-trips through GFM markdown", () => {
       const { doc, regenerated } = assertStableRoundTrip("| A | B |\n| --- | --- |\n| 1 | 2 |");

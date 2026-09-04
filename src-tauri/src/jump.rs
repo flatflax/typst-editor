@@ -4,6 +4,8 @@
 //! multi-page offset math is not implemented — a non-blocking enhancement
 //! degrading gracefully, not something the rest of the app depends on.
 
+use std::path::PathBuf;
+
 use serde::Serialize;
 use typst::World;
 use typst::layout::{Abs, Point};
@@ -22,9 +24,13 @@ pub struct CursorTarget {
 
 /// Click-to-source: given a click position (in pt) on the first rendered
 /// page, return the byte offset in the Typst source it corresponds to.
+/// `base_dir` (plan.md M11) must match whatever `compile_typst` was given
+/// for this same source, or a document containing an `#image(...)` will
+/// fail to compile here and this degrades to `None` (same "no target"
+/// result as any other compile failure — see `jump_from_cursor` below).
 #[tauri::command]
-pub fn jump_from_click(source: String, x_pt: f64, y_pt: f64) -> Option<usize> {
-    let world = TauriWorld::new(source);
+pub fn jump_from_click(source: String, x_pt: f64, y_pt: f64, base_dir: Option<String>) -> Option<usize> {
+    let world = TauriWorld::new(source, base_dir.map(PathBuf::from));
     let document: PagedDocument = typst::compile(&world).output.ok()?;
     let page = document.pages().first()?;
     let click = Point::new(Abs::pt(x_pt), Abs::pt(y_pt));
@@ -36,10 +42,10 @@ pub fn jump_from_click(source: String, x_pt: f64, y_pt: f64) -> Option<usize> {
 
 /// Source-to-render: given a byte offset (cursor position) in the Typst
 /// source, return the page + point it renders to, for scroll/highlight
-/// sync in the preview pane.
+/// sync in the preview pane. See `jump_from_click` on `base_dir`.
 #[tauri::command]
-pub fn jump_from_cursor(source: String, cursor: usize) -> Vec<CursorTarget> {
-    let world = TauriWorld::new(source.clone());
+pub fn jump_from_cursor(source: String, cursor: usize, base_dir: Option<String>) -> Vec<CursorTarget> {
+    let world = TauriWorld::new(source.clone(), base_dir.map(PathBuf::from));
     let Ok(document) = typst::compile::<PagedDocument>(&world).output else {
         return Vec::new();
     };
@@ -58,6 +64,16 @@ pub fn jump_from_cursor(source: String, cursor: usize) -> Vec<CursorTarget> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Shadow the outer 3-arg commands so existing tests (none of which care
+    // about image-path resolution, plan.md M11) don't need `, None` added
+    // individually — same approach as compile.rs's test module.
+    fn jump_from_click(source: String, x_pt: f64, y_pt: f64) -> Option<usize> {
+        super::jump_from_click(source, x_pt, y_pt, None)
+    }
+    fn jump_from_cursor(source: String, cursor: usize) -> Vec<CursorTarget> {
+        super::jump_from_cursor(source, cursor, None)
+    }
 
     #[test]
     fn cursor_in_heading_maps_to_a_render_position() {

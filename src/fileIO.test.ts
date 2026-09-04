@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { basename, defaultFileName, spokeForPath, titleFor, withPdfExtension } from "./fileIO";
+import {
+  basename,
+  defaultFileName,
+  dirname,
+  relativePath,
+  spokeForPath,
+  titleFor,
+  withPdfExtension,
+} from "./fileIO";
 
 describe("spokeForPath", () => {
   it("selects the markdown spoke for .md and .markdown", () => {
@@ -41,6 +49,51 @@ describe("basename", () => {
 
   it("returns the whole string when there is no separator", () => {
     expect(basename("doc.typ")).toBe("doc.typ");
+  });
+});
+
+describe("dirname (plan.md M11)", () => {
+  it("returns null with no open file", () => {
+    expect(dirname(null)).toBeNull();
+  });
+
+  it("strips a POSIX filename", () => {
+    expect(dirname("/home/me/docs/doc.typ")).toBe("/home/me/docs");
+  });
+
+  it("strips a Windows filename", () => {
+    expect(dirname("C:\\Users\\me\\doc.typ")).toBe("C:/Users/me");
+  });
+
+  it("returns / for a file at the filesystem root", () => {
+    expect(dirname("/doc.typ")).toBe("/");
+  });
+
+  it("returns null for a bare filename with no directory info", () => {
+    expect(dirname("doc.typ")).toBeNull();
+  });
+});
+
+describe("relativePath (plan.md M11)", () => {
+  it("returns just the filename when it's already in fromDir", () => {
+    expect(relativePath("/home/me/docs", "/home/me/docs/photo.png")).toBe("photo.png");
+  });
+
+  it("descends into a subdirectory", () => {
+    expect(relativePath("/home/me/docs", "/home/me/docs/images/photo.png")).toBe(
+      "images/photo.png",
+    );
+  });
+
+  it("climbs up with .. for a sibling directory", () => {
+    expect(relativePath("/home/me/docs", "/home/me/assets/photo.png")).toBe("../assets/photo.png");
+  });
+
+  it("handles Windows-style paths case-insensitively", () => {
+    expect(relativePath("C:\\Users\\me\\Docs", "C:\\Users\\me\\docs\\photo.png")).toBe("photo.png");
+    expect(relativePath("C:\\Users\\me\\docs", "C:\\Users\\me\\assets\\photo.png")).toBe(
+      "../assets/photo.png",
+    );
   });
 });
 

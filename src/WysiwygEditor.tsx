@@ -1,8 +1,12 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { EditorState, TextSelection, type Command } from "prosemirror-state";
-import { EditorView } from "prosemirror-view";
+import { EditorView, type NodeView } from "prosemirror-view";
+import type { Node as PMNode } from "prosemirror-model";
 import { tableEditing } from "prosemirror-tables";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { schema, type PMDoc, type TypstSet } from "./schema";
+import { relativePath } from "./fileIO";
 import {
   addTableColumn,
   addTableRow,
@@ -31,7 +35,70 @@ type Props = {
   doc: PMDoc;
   onChange: (doc: PMDoc) => void;
   onSelectionChange?: (pos: number) => void;
+  /** The open file's directory (plan.md M11) — `image.attrs.src` resolves
+   * against this. `null` before any file has been opened/saved, in which
+   * case images can't be previewed or inserted (there's nothing to resolve
+   * a relative path against yet). */
+  documentDir: string | null;
 };
+
+// Live-updated by the component on every render (see `documentDirRef`
+// below) so the NodeView factory — captured once at EditorView construction
+// time, since `nodeViews` isn't something `updateState` can change — always
+// resolves image paths against whichever document is *currently* open, not
+// whichever was open when the view was first mounted.
+function imageNodeView(documentDirRef: { current: string | null }) {
+  return (node: PMNode): NodeView => {
+    const dom = document.createElement("figure");
+    dom.className = "wysiwyg-image";
+    const img = document.createElement("img");
+    const figcaption = document.createElement("figcaption");
+    dom.append(img, figcaption);
+
+    let destroyed = false;
+    function render(node: PMNode) {
+      const src = node.attrs.src as string;
+      const caption = node.attrs.caption as string | null;
+      figcaption.textContent = caption ?? "";
+      figcaption.hidden = caption == null;
+
+      const dir = documentDirRef.current;
+      if (!dir || !src) {
+        img.removeAttribute("src");
+        img.alt = src || "(no image)";
+        return;
+      }
+      invoke<string>("read_image_as_data_url", { path: src, baseDir: dir })
+        .then((dataUrl) => {
+          if (!destroyed) img.src = dataUrl;
+        })
+        .catch(() => {
+          if (!destroyed) {
+            img.removeAttribute("src");
+            img.alt = `Couldn't load ${src}`;
+          }
+        });
+    }
+    render(node);
+
+    return {
+      dom,
+      // The async data-URL fetch above sets `img.src` outside of any PM
+      // transaction — without this, ProseMirror (seeing an untracked DOM
+      // mutation on a node it doesn't expect to change on its own) could
+      // try to reconcile it back into the document.
+      ignoreMutation: () => true,
+      update(updatedNode) {
+        if (updatedNode.type.name !== "image") return false;
+        render(updatedNode);
+        return true;
+      },
+      destroy() {
+        destroyed = true;
+      },
+    };
+  };
+}
 
 function editorStateFor(doc: PMDoc): EditorState {
   // tableEditing() (plan.md M10) handles cell selection/navigation — no
@@ -48,7 +115,7 @@ function editorStateFor(doc: PMDoc): EditorState {
 // a reactive prop watch, so the view's own live selection/state isn't reset
 // on every render while the user is actively editing here.
 const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEditor(
-  { doc, onChange, onSelectionChange },
+  { doc, onChange, onSelectionChange, documentDir },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -56,8 +123,10 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
 
   const onChangeRef = useRef(onChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
+  const documentDirRef = useRef(documentDir);
   onChangeRef.current = onChange;
   onSelectionChangeRef.current = onSelectionChange;
+  documentDirRef.current = documentDir;
 
   // `#set` rules aren't editable here (plan.md: "no field-level editing in
   // MVP") and can only change via `setDoc` (a view switch), never from a
@@ -70,6 +139,7 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
 
     const view = new EditorView(containerRef.current, {
       state: editorStateFor(doc),
+      nodeViews: { image: imageNodeView(documentDirRef) },
       dispatchTransaction(tr) {
         const nextState = view.state.apply(tr);
         view.updateState(nextState);
@@ -111,6 +181,26 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
     const view = viewRef.current;
     if (!view) return;
     command(view.state, view.dispatch, view);
+    view.focus();
+  }
+
+  // Prompts for an image file, computes its path relative to the open
+  // document's directory (the Editor Model always stores `src` that way —
+  // see schema.ts's `image` node), and inserts it at the cursor. No-ops
+  // before any file has been opened/saved: there's no directory yet to
+  // resolve a relative path against (plan.md M11).
+  async function handleInsertImage() {
+    const dir = documentDirRef.current;
+    if (!dir) return;
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg"] }],
+    });
+    if (typeof selected !== "string") return;
+    const view = viewRef.current;
+    if (!view) return;
+    const node = schema.nodes.image.create({ src: relativePath(dir, selected), caption: null });
+    view.dispatch(view.state.tr.replaceSelectionWith(node).scrollIntoView());
     view.focus();
   }
 
@@ -161,6 +251,14 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
         </button>
         <button type="button" onClick={() => runCommand(deleteTableColumn)} title="Delete column">
           -Col
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleInsertImage()}
+          disabled={!documentDir}
+          title={documentDir ? "Insert image" : "Save the document first to insert images"}
+        >
+          Image
         </button>
       </div>
       {settings.length > 0 && (

@@ -107,6 +107,12 @@ function convertBlock(node: RootContent, source: string): PMNode {
         : unsupportedBlockFrom(node, source);
     }
     case "paragraph": {
+      // `![alt](src)` (plan.md M11): mdast has no standalone block-level
+      // image construct — even a lone image on its own line parses as a
+      // one-child paragraph — so this is the mdast->PM equivalent of
+      // ast.rs's try_flatten_pending "single significant node" check.
+      const soleImage = imageFromSoleChild(node.children);
+      if (soleImage) return soleImage;
       const children = flattenInline(node.children, []);
       return children
         ? schema.nodes.paragraph.create(null, children)
@@ -129,6 +135,18 @@ function convertBlock(node: RootContent, source: string): PMNode {
       // definitions, footnotes, ... — all outside the MVP subset.
       return unsupportedBlockFrom(node, source);
   }
+}
+
+// A captioned Typst figure round-trips as the image's *alt* text (plan.md
+// M11 — Markdown has no native figure/caption construct, so this is the
+// spoke's accepted ceiling: a caption with marks would need to lose them to
+// survive this leg, so ast.rs's as_figure_call already restricts captions to
+// plain text, matching this exactly rather than being an arbitrary
+// Typst-only limitation).
+function imageFromSoleChild(children: PhrasingContent[]): PMNode | null {
+  if (children.length !== 1 || children[0].type !== "image") return null;
+  const image = children[0];
+  return schema.nodes.image.create({ src: image.url, caption: image.alt || null });
 }
 
 // A GFM table is always a rectangular grid of inline-only cells by
@@ -161,6 +179,7 @@ const LIST_ITEM_PRIMARY_KINDS = new Set([
   "paragraph",
   "typst_call",
   "table",
+  "image",
   "unsupported_block",
 ]);
 const LIST_KINDS = new Set(["bullet_list", "ordered_list"]);
@@ -323,6 +342,20 @@ function blockToMdast(node: PMNode): BlockContent {
       };
     case "typst_call":
       return { type: "code", lang: FENCE_CALL, meta: null, value: node.attrs.raw as string };
+    case "image":
+      // mdast has no standalone block-level image — even a lone image on
+      // its own line is a one-child paragraph (plan.md M11, mirrors
+      // imageFromSoleChild's inverse).
+      return {
+        type: "paragraph",
+        children: [
+          {
+            type: "image",
+            url: node.attrs.src as string,
+            alt: (node.attrs.caption as string | null) ?? "",
+          },
+        ],
+      };
     case "table": {
       const asGfm = tableToMdastIfPossible(node);
       if (asGfm) return asGfm;

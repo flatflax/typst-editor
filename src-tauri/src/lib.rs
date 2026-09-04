@@ -1,10 +1,12 @@
 mod ast;
+mod asset;
 mod compile;
 mod export;
 mod jump;
 mod typst_world;
 
 use ast::parse_typst_ast;
+use asset::read_image_as_data_url;
 use compile::compile_typst;
 use export::export_pdf;
 use jump::{jump_from_click, jump_from_cursor};
@@ -21,7 +23,8 @@ pub fn run() {
             export_pdf,
             jump_from_click,
             jump_from_cursor,
-            parse_typst_ast
+            parse_typst_ast,
+            read_image_as_data_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

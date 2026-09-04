@@ -338,6 +338,23 @@ export const tableWithMarkedUpCell: TypstAstFixture = {
   expected: "#table(columns: 1, [*bold* and _italic_])",
 };
 
+// See ast::tests::bare_image_call_has_no_caption
+export const imageNoCaption: TypstAstFixture = {
+  source: '#image("photo.png")',
+  ast: { settings: [], content: [{ type: "image", src: "photo.png", caption: null }] },
+  expected: '#image("photo.png")',
+};
+
+// See ast::tests::figure_with_caption_becomes_an_image_with_that_caption
+export const imageWithCaption: TypstAstFixture = {
+  source: '#figure(image("photo.png"), caption: [A nice photo])',
+  ast: {
+    settings: [],
+    content: [{ type: "image", src: "photo.png", caption: "A nice photo" }],
+  },
+  expected: '#figure(image("photo.png"), caption: [A nice photo])',
+};
+
 // See ast::tests::top_level_set_rule_is_lifted_into_settings_and_excluded_from_content
 export const typstSet: TypstAstFixture = {
   source: "#set text(size: 11pt)\n\n= Heading",
@@ -496,6 +513,8 @@ export const fixtures = {
   table,
   tableWithArrayColumns,
   tableWithMarkedUpCell,
+  imageNoCaption,
+  imageWithCaption,
   typstSet,
   unsupportedBlockSandwich,
   mixed,

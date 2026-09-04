@@ -16,7 +16,15 @@ import {
   type PositionMapEntry,
 } from "./typstAst";
 import { markdownToDoc, docToMarkdown } from "./markdown";
-import { basename, defaultFileName, spokeForPath, titleFor, withPdfExtension, type Spoke } from "./fileIO";
+import {
+  basename,
+  defaultFileName,
+  dirname,
+  spokeForPath,
+  titleFor,
+  withPdfExtension,
+  type Spoke,
+} from "./fileIO";
 import { addRecentFile, getRecentFiles, removeRecentFile } from "./recentFiles";
 import type { PMDoc } from "./schema";
 import "./App.css";
@@ -135,6 +143,12 @@ function App() {
   const [lastSavedMarkdownText, setLastSavedMarkdownText] = useState(() => docToMarkdown(INITIAL_DOC));
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
 
+  // The open file's directory (plan.md M11) — `#image("relative/path")`
+  // resolves against this on every compile/export/asset-read call.
+  const documentDir = dirname(filePath);
+  const documentDirRef = useRef(documentDir);
+  documentDirRef.current = documentDir;
+
   const wysiwygRef = useRef<WysiwygEditorHandle | null>(null);
   const typstEditorRef = useRef<SourceEditorHandle | null>(null);
   const markdownEditorRef = useRef<SourceEditorHandle | null>(null);
@@ -164,7 +178,7 @@ function App() {
   // active regardless of which view is being edited (plan.md M5).
   useEffect(() => {
     const timer = setTimeout(() => {
-      invoke<CompileResult>("compile_typst", { source: derived.source })
+      invoke<CompileResult>("compile_typst", { source: derived.source, baseDir: documentDirRef.current })
         .then(setResult)
         .catch((err) => setInvokeError(String(err)));
     }, COMPILE_DEBOUNCE_MS);
@@ -327,7 +341,11 @@ function App() {
         filters: [{ name: "PDF", extensions: ["pdf"] }],
       });
       if (!target) return;
-      await invoke("export_pdf", { source: derivedRef.current.source, path: target });
+      await invoke("export_pdf", {
+        source: derivedRef.current.source,
+        path: target,
+        baseDir: documentDir,
+      });
       setInvokeError(null);
     } catch (err) {
       setInvokeError(String(err));
@@ -382,7 +400,12 @@ function App() {
     const svg = previewRef.current?.querySelector("svg");
     if (!svg) return;
     const { xPt, yPt } = svgPointFromClient(svg, event.clientX, event.clientY);
-    invoke<number | null>("jump_from_click", { source: derivedRef.current.source, xPt, yPt })
+    invoke<number | null>("jump_from_click", {
+      source: derivedRef.current.source,
+      xPt,
+      yPt,
+      baseDir: documentDirRef.current,
+    })
       .then((byteOffset) => {
         if (byteOffset == null) return;
         if (viewModeRef.current === "typst") {
@@ -400,7 +423,11 @@ function App() {
   function highlightFromCursor(cursor: number) {
     const svg = previewRef.current?.querySelector("svg");
     if (!svg) return;
-    invoke<CursorTarget[]>("jump_from_cursor", { source: derivedRef.current.source, cursor })
+    invoke<CursorTarget[]>("jump_from_cursor", {
+      source: derivedRef.current.source,
+      cursor,
+      baseDir: documentDirRef.current,
+    })
       .then((targets) => {
         const target = targets[0];
         setHighlight(target ? clientPointFromPt(svg, target.x_pt, target.y_pt) : null);
@@ -486,6 +513,7 @@ function App() {
               doc={doc}
               onChange={setDoc}
               onSelectionChange={handleWysiwygSelectionChange}
+              documentDir={documentDir}
             />
           </div>
           <div hidden={viewMode !== "typst"} className="view-panel">

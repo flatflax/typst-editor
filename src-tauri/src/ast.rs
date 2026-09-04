@@ -55,6 +55,13 @@ pub enum AstBlock {
     /// per-column width styling round-trips byte-exact even though this
     /// module only derives a plain `column_count` from it for structure.
     Table { columns_raw: String, column_count: usize, cells: Vec<Vec<AstBlock>> },
+    /// `#image("src")` or `#figure(image("src"), caption: [text])` (plan.md
+    /// M11) — one node either way; `caption` distinguishes them. A caption
+    /// is plain text only (no marks) — this matches the Markdown spoke's
+    /// ceiling exactly (a caption round-trips as the image's *alt* text
+    /// there, which is inherently unformatted), rather than being an
+    /// arbitrary, Typst-only-representable restriction.
+    Image { src: String, caption: Option<String> },
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -242,9 +249,10 @@ enum FlattenResult {
     /// so it becomes a block-level `typst_call` rather than an inline one.
     SingleCall(String, String),
     /// Same "occupies its own paragraph, alone" shape as `SingleCall`, but
-    /// recognized as a structured table (plan.md M10) — always an
-    /// `AstBlock::Table`.
-    SingleTable(AstBlock),
+    /// recognized as a structured construct instead — a table (plan.md M10,
+    /// always `AstBlock::Table`) or an image/figure (plan.md M11, always
+    /// `AstBlock::Image`).
+    SingleBlock(AstBlock),
     Inline(Vec<AstInline>),
 }
 
@@ -339,6 +347,70 @@ fn column_count_from(expr: ast::Expr) -> Option<(String, usize)> {
     }
 }
 
+/// Recognizes `#image("src")` — a single positional string-literal argument,
+/// nothing else (no `alt:`/`width:`/`fit:`/... — those fall through to the
+/// opaque `typst_call` path, same "narrow, testable shape" policy as
+/// `as_link_call`/`as_table_call`). Also used to recognize the *inner* call
+/// inside `#figure(image("src"), ...)` (see `as_figure_call`).
+fn as_image_call(node: &SyntaxNode) -> Option<String> {
+    let call = node.cast::<ast::FuncCall>()?;
+    if callee_name(call.callee()) != "image" {
+        return None;
+    }
+    let mut items = call.args().items();
+    let ast::Arg::Pos(ast::Expr::Str(src)) = items.next()? else { return None };
+    if items.next().is_some() {
+        return None; // extra args - opaque
+    }
+    Some(src.get().to_string())
+}
+
+/// Recognizes `#figure(image("src"), caption: [text])`: one positional arg
+/// that's itself a recognized `image(...)` call, plus an optional `caption:`
+/// content-block argument whose body is plain text only (see
+/// `AstBlock::Image`'s doc comment on why marks aren't supported there).
+/// Anything else (a non-image positional, an unsupported caption body, extra
+/// args) falls through to the opaque `typst_call` path.
+fn as_figure_call(node: &SyntaxNode) -> Option<(String, Option<String>)> {
+    let call = node.cast::<ast::FuncCall>()?;
+    if callee_name(call.callee()) != "figure" {
+        return None;
+    }
+    let mut items = call.args().items();
+    let ast::Arg::Pos(ast::Expr::FuncCall(inner)) = items.next()? else { return None };
+    let src = as_image_call(inner.to_untyped())?;
+
+    let mut caption = None;
+    for arg in items {
+        let ast::Arg::Named(named) = arg else { return None };
+        if named.name().as_str() != "caption" || caption.is_some() {
+            return None;
+        }
+        let ast::Expr::ContentBlock(cb) = named.expr() else { return None };
+        caption = Some(plain_text_of(cb.body())?);
+    }
+    Some((src, caption))
+}
+
+/// Extracts plain text from a content block's markup, failing (`None`) if it
+/// contains anything beyond bare text (marks, calls, linebreaks, ...) —
+/// reuses `flatten_markup_children` rather than a separate walk, then
+/// rejects any non-`Text`/marked-up result.
+fn plain_text_of(body: ast::Markup) -> Option<String> {
+    let mut inline = Vec::new();
+    if !flatten_markup_children(body, &[], &mut inline) {
+        return None;
+    }
+    let mut text = String::new();
+    for item in inline {
+        match item {
+            AstInline::Text { text: t, marks } if marks.is_empty() => text.push_str(&t),
+            _ => return None,
+        }
+    }
+    Some(text)
+}
+
 fn try_flatten_pending(pending: &[&SyntaxNode], settings: &mut Vec<TypstSet>) -> Option<FlattenResult> {
     let significant: Vec<&SyntaxNode> =
         pending.iter().copied().filter(|n| n.kind() != SyntaxKind::Hash).collect();
@@ -348,11 +420,17 @@ fn try_flatten_pending(pending: &[&SyntaxNode], settings: &mut Vec<TypstSet>) ->
                 .into_iter()
                 .map(|body| convert_markup(body, settings, false))
                 .collect();
-            return Some(FlattenResult::SingleTable(AstBlock::Table {
+            return Some(FlattenResult::SingleBlock(AstBlock::Table {
                 columns_raw,
                 column_count,
                 cells,
             }));
+        }
+        if let Some((src, caption)) = as_figure_call(only) {
+            return Some(FlattenResult::SingleBlock(AstBlock::Image { src, caption }));
+        }
+        if let Some(src) = as_image_call(only) {
+            return Some(FlattenResult::SingleBlock(AstBlock::Image { src, caption: None }));
         }
         if as_link_call(only).is_none() {
             if let Some(call) = only.cast::<ast::FuncCall>() {
@@ -385,8 +463,8 @@ fn finalize_pending(pending: &mut Vec<&SyntaxNode>, content: &mut Vec<AstBlock>,
         Some(FlattenResult::SingleCall(name, raw)) => {
             content.push(AstBlock::TypstCall { name, raw });
         }
-        Some(FlattenResult::SingleTable(table)) => {
-            content.push(table);
+        Some(FlattenResult::SingleBlock(block)) => {
+            content.push(block);
         }
         Some(FlattenResult::Inline(children)) => {
             // A run of pure whitespace (e.g. a lone connecting Space at the
@@ -936,6 +1014,79 @@ mod tests {
             vec![AstBlock::Paragraph {
                 children: vec![AstInline::Text { text: "Plain item".into(), marks: vec![] }]
             }]
+        );
+    }
+
+    #[test]
+    fn bare_image_call_has_no_caption() {
+        let doc = parse("#image(\"photo.png\")");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::Image { src: "photo.png".into(), caption: None }]
+        );
+    }
+
+    #[test]
+    fn figure_with_caption_becomes_an_image_with_that_caption() {
+        let doc = parse("#figure(image(\"photo.png\"), caption: [A nice photo])");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::Image { src: "photo.png".into(), caption: Some("A nice photo".into()) }]
+        );
+    }
+
+    #[test]
+    fn figure_without_a_caption_argument_still_recognized() {
+        let doc = parse("#figure(image(\"photo.png\"))");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::Image { src: "photo.png".into(), caption: None }]
+        );
+    }
+
+    #[test]
+    fn image_call_with_extra_arguments_falls_back_to_an_opaque_call() {
+        // `alt:`/`width:`/etc. are explicitly out of the MVP subset.
+        let doc = parse("#image(\"photo.png\", alt: \"desc\")");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::TypstCall {
+                name: "image".into(),
+                raw: "#image(\"photo.png\", alt: \"desc\")".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn figure_with_a_marked_up_caption_falls_back_to_an_opaque_call() {
+        // A caption is plain text only (AstBlock::Image's doc comment) —
+        // matching the Markdown spoke's alt-text ceiling exactly.
+        let doc = parse("#figure(image(\"photo.png\"), caption: [*Bold* caption])");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::TypstCall {
+                name: "figure".into(),
+                raw: "#figure(image(\"photo.png\"), caption: [*Bold* caption])".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn figure_wrapping_a_non_image_call_falls_back_to_an_opaque_call() {
+        let doc = parse("#figure(rect(), caption: [A shape])");
+        assert!(matches!(doc.content[0], AstBlock::TypstCall { .. }));
+    }
+
+    #[test]
+    fn image_call_compiles_only_when_the_file_actually_exists_but_is_still_recognized_structurally() {
+        // Recognition (parse_typst_ast) doesn't touch the filesystem at all —
+        // it's pure syntax matching; a missing file only surfaces as a
+        // compile diagnostic (see compile.rs's image tests), not a parse
+        // failure. Pins that "recognized" and "resolves" are independent.
+        let doc = parse("#image(\"does-not-exist.png\")");
+        assert_eq!(
+            doc.content,
+            vec![AstBlock::Image { src: "does-not-exist.png".into(), caption: None }]
         );
     }
 

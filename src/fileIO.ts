@@ -28,6 +28,39 @@ export function basename(path: string): string {
   return idx === -1 ? normalized : normalized.slice(idx + 1);
 }
 
+/** The open file's directory — the base `#image("relative/path")` paths
+ * resolve against (plan.md M11) — or `null` before any file has been
+ * opened/saved. Threaded to the Rust `base_dir` parameter on every
+ * compile/export/asset-read call and to the WYSIWYG image NodeView. */
+export function dirname(path: string | null): string | null {
+  if (path == null) return null;
+  const normalized = path.replace(/\\/g, "/");
+  const idx = normalized.lastIndexOf("/");
+  if (idx === -1) return null; // a bare filename carries no directory info
+  return idx === 0 ? "/" : normalized.slice(0, idx);
+}
+
+/** The path from `fromDir` to `toFile`, Typst-style (forward slashes, `..`
+ * for each level up) — used when inserting an image via the WYSIWYG file
+ * picker (plan.md M11), since the Editor Model always stores `#image(...)`'s
+ * `src` as a path relative to the open document's directory, never absolute.
+ * Path segments are compared case-insensitively (matches this app's Windows
+ * target — see README). */
+export function relativePath(fromDir: string, toFile: string): string {
+  const from = fromDir.replace(/\\/g, "/").split("/").filter(Boolean);
+  const to = toFile.replace(/\\/g, "/").split("/").filter(Boolean);
+  let shared = 0;
+  while (
+    shared < from.length &&
+    shared < to.length &&
+    from[shared].toLowerCase() === to[shared].toLowerCase()
+  ) {
+    shared += 1;
+  }
+  const ups = new Array(from.length - shared).fill("..");
+  return [...ups, ...to.slice(shared)].join("/");
+}
+
 /** Title-bar label: filename plus a dirty marker, or "Untitled" before the
  * first save. */
 export function titleFor(path: string | null, dirty: boolean): string {

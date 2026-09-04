@@ -1,6 +1,8 @@
 //! `compile_typst` Tauri command: takes raw Typst source, compiles it with
 //! the real Typst engine, and returns a merged SVG preview plus diagnostics.
 
+use std::path::PathBuf;
+
 use serde::Serialize;
 use typst::diag::{EcoVec, Severity, SourceDiagnostic};
 use typst::layout::Abs;
@@ -64,9 +66,14 @@ pub(crate) fn diagnostics_to_string(world: &TauriWorld, diags: &EcoVec<SourceDia
         .join("\n")
 }
 
+/// `base_dir` (plan.md M11) is the open document's directory (`None` before
+/// any file has been opened/saved), used to resolve `#image("path")` — see
+/// `TauriWorld::file`. Threaded through from `App.tsx`'s `filePath` on every
+/// compile, not just at load time, so editing/saving-as a document with
+/// relative image paths always resolves against whatever is currently open.
 #[tauri::command]
-pub fn compile_typst(source: String) -> CompileResult {
-    let world = TauriWorld::new(source);
+pub fn compile_typst(source: String, base_dir: Option<String>) -> CompileResult {
+    let world = TauriWorld::new(source, base_dir.map(PathBuf::from));
     let warned = typst::compile::<PagedDocument>(&world);
 
     let mut diagnostics: Vec<CompileDiagnostic> =
@@ -87,6 +94,15 @@ pub fn compile_typst(source: String) -> CompileResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Shadows the outer 2-arg `compile_typst` for every existing test below —
+    // none of them care about image-path resolution (plan.md M11), so this
+    // avoids threading `, None` through every one of them individually.
+    // `file_resolution` (below) exercises the real `base_dir`-aware command
+    // directly via `super::compile_typst`.
+    fn compile_typst(source: String) -> CompileResult {
+        super::compile_typst(source, None)
+    }
 
     #[test]
     fn compiles_valid_source_to_svg_with_no_diagnostics() {
@@ -178,6 +194,80 @@ mod tests {
             result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
         assert!(result.svg.is_some());
+    }
+
+    // A real, freshly-encoded 1x1 PNG (via the `image` dev-dependency, not
+    // hand-typed bytes with hand-computed CRC/Adler32 checksums — Typst's
+    // `image()` genuinely decodes the file, so it has to be one a decoder
+    // actually accepts).
+    fn minimal_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::RgbImage::new(1, 1)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    /// Image resolution end to end (plan.md M11): `base_dir` is the *only*
+    /// mechanism `#image("path")` can reach a real file through — a fresh
+    /// temp directory containing a real (decodable) PNG, threaded through
+    /// `compile_typst`'s `base_dir` parameter exactly as `App.tsx` threads
+    /// the open document's directory.
+    #[test]
+    fn image_with_a_real_file_in_base_dir_compiles_successfully() {
+        let dir = std::env::temp_dir().join(format!("typst-editor-test-compile-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("photo.png"), minimal_png()).unwrap();
+
+        let result = super::compile_typst("#image(\"photo.png\")".into(), Some(dir.to_str().unwrap().into()));
+        assert!(
+            result.diagnostics.iter().all(|d| d.severity != "error"),
+            "unexpected error diagnostics: {:?}",
+            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(result.svg.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// plan.md M11: "a manual check that a missing/broken image path
+    /// degrades to a diagnostic rather than a crash" — automated here
+    /// instead, same spirit as reports_diagnostics_instead_of_crashing_on_invalid_source.
+    #[test]
+    fn image_with_a_missing_file_degrades_to_a_diagnostic_not_a_crash() {
+        let dir = std::env::temp_dir().join(format!("typst-editor-test-compile-img-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let result =
+            super::compile_typst("#image(\"nope.png\")".into(), Some(dir.to_str().unwrap().into()));
+        assert!(result.svg.is_none());
+        assert!(!result.diagnostics.is_empty());
+        assert_eq!(result.diagnostics[0].severity, "error");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The realistic, user-triggerable version of
+    /// typst_world.rs's `a_dot_dot_escaping_virtual_path_cannot_even_be_constructed`:
+    /// a document actually containing `#image("../secret.png")`, compiled
+    /// for real through the full command, degrades to a diagnostic — not a
+    /// crash, and (the actual security property) never reads the file that
+    /// genuinely exists just outside `base_dir`.
+    #[test]
+    fn image_path_escaping_base_dir_is_rejected_end_to_end() {
+        let root = std::env::temp_dir().join(format!("typst-editor-test-compile-escape-{}", std::process::id()));
+        let base_dir = root.join("project");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        std::fs::write(root.join("secret.png"), minimal_png()).unwrap();
+
+        let result = super::compile_typst(
+            "#image(\"../secret.png\")".into(),
+            Some(base_dir.to_str().unwrap().into()),
+        );
+        assert!(result.svg.is_none(), "the escaping path must not resolve to a real image");
+        assert!(!result.diagnostics.is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // Same source as ast::tests::MIXED_DOCUMENT (duplicated here rather than

@@ -4,15 +4,21 @@
 //! `typst_pdf::pdf`, and writes the bytes to `path` directly (no separate
 //! frontend fs round-trip needed for the binary PDF data).
 
+use std::path::PathBuf;
+
 use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 
 use crate::compile::diagnostics_to_string;
 use crate::typst_world::TauriWorld;
 
+/// `base_dir` (plan.md M11): see `compile_typst`'s doc comment — an exported
+/// PDF containing an `#image(...)` needs the same open-document directory to
+/// resolve it against, or the export fails with a compile error instead of
+/// silently omitting the image.
 #[tauri::command]
-pub fn export_pdf(source: String, path: String) -> Result<(), String> {
-    let world = TauriWorld::new(source);
+pub fn export_pdf(source: String, path: String, base_dir: Option<String>) -> Result<(), String> {
+    let world = TauriWorld::new(source, base_dir.map(PathBuf::from));
     let warned = typst::compile::<PagedDocument>(&world);
     let document = warned.output.map_err(|errors| diagnostics_to_string(&world, &errors))?;
 
@@ -24,7 +30,11 @@ pub fn export_pdf(source: String, path: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Shadows the outer 3-arg command — these tests don't exercise
+    // image-path resolution (plan.md M11), same approach as compile.rs.
+    fn export_pdf(source: String, path: String) -> Result<(), String> {
+        super::export_pdf(source, path, None)
+    }
 
     #[test]
     fn exports_valid_source_to_a_pdf_file_starting_with_the_pdf_magic_bytes() {

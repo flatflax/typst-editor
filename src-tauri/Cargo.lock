@@ -5495,6 +5495,8 @@ dependencies = [
 name = "typst-editor"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "image",
  "serde",
  "serde_json",
  "tauri",

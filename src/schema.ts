@@ -104,7 +104,7 @@ export const schema = new Schema({
     // in its own new list — hence blank lines between items and each
     // showing "1." independently, its own list's own default order).
     list_item: {
-      content: "(paragraph | heading | typst_call | table | unsupported_block) (bullet_list | ordered_list)*",
+      content: "(paragraph | heading | typst_call | table | image | unsupported_block) (bullet_list | ordered_list)*",
       parseDOM: [{ tag: "li" }],
       toDOM: () => ["li", 0],
     },
@@ -170,6 +170,29 @@ export const schema = new Schema({
         "span",
         { "data-typst-call": node.attrs.name, contenteditable: "false" },
         `#${node.attrs.name}(...)`,
+      ],
+    },
+
+    // `#image("src")` / `#figure(image("src"), caption: [text])` (plan.md
+    // M11) — one node either way, `caption` (null when absent) is what
+    // distinguishes them; see ast.rs's `AstBlock::Image` doc comment for why
+    // a caption is plain text only. `src` is always the relative path as
+    // written in the source, never resolved/embedded here — this `toDOM` is
+    // just the bare fallback (used by e.g. headless tests with no
+    // EditorView); the real WYSIWYG rendering is a custom NodeView in
+    // WysiwygEditor.tsx that resolves `src` against the open document's
+    // directory via the `read_image_as_data_url` command.
+    image: {
+      group: "block",
+      attrs: { src: { default: "" }, caption: { default: null as string | null } },
+      atom: true,
+      isolating: true,
+      selectable: true,
+      toDOM: (node) => [
+        "figure",
+        { "data-image-src": node.attrs.src as string },
+        ["div", { class: "image-placeholder" }, (node.attrs.src as string) || "(no image)"],
+        ["figcaption", {}, (node.attrs.caption as string) || ""],
       ],
     },
 

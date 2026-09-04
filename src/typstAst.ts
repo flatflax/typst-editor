@@ -29,7 +29,10 @@ export type AstBlock =
   // row-major sequence — see ast.rs's `AstBlock::Table` doc comment for why
   // `column_count` chunks it into rows here rather than the Rust side
   // pre-nesting it (Typst's own call arguments are flat too).
-  | { type: "table"; columnsRaw: string; columnCount: number; cells: AstBlock[][] };
+  | { type: "table"; columnsRaw: string; columnCount: number; cells: AstBlock[][] }
+  // `#image("src")` / `#figure(image("src"), caption: [...])` (plan.md M11)
+  // — one node either way, `caption` (null when absent) distinguishes them.
+  | { type: "image"; src: string; caption: string | null };
 
 export type AstDocument = { settings: TypstSet[]; content: AstBlock[] };
 
@@ -58,6 +61,8 @@ function blockToNode(block: AstBlock): PMNode {
       return schema.nodes.typst_call.create({ name: block.name, raw: block.raw });
     case "unsupported_block":
       return schema.nodes.unsupported_block.create({ raw: block.raw });
+    case "image":
+      return schema.nodes.image.create({ src: block.src, caption: block.caption });
     case "table": {
       const rows: PMNode[] = [];
       for (let i = 0; i < block.cells.length; i += block.columnCount) {
@@ -316,12 +321,30 @@ function serializeBlock(node: PMNode, pos: number): Serialized {
       return serializeList(node, pos, 0);
     case "table":
       return serializeTable(node, pos);
+    case "image":
+      return serializeImage(node, pos);
     case "typst_call":
     case "unsupported_block":
       return leaf(pos, pos + node.nodeSize, node.attrs.raw as string);
     default:
       throw new Error(`pmDocToTypst: unexpected top-level block "${node.type.name}"`);
   }
+}
+
+// `#image("src")` or, when captioned, `#figure(image("src"), caption:
+// [text])` (plan.md M11) — one node either way, matching ast.rs's
+// AstBlock::Image. The caption's text goes through the same
+// escapeTypstText as any other plain text embedded in a `[...]`
+// content-block delimiter pair (see withLinkMark's doc comment on why
+// `[`/`]` are in that escape set).
+function serializeImage(node: PMNode, pos: number): Serialized {
+  const src = typstStringLiteral(node.attrs.src as string);
+  const caption = node.attrs.caption as string | null;
+  const text =
+    caption != null
+      ? `#figure(image(${src}), caption: [${escapeTypstText(caption)}])`
+      : `#image(${src})`;
+  return leaf(pos, pos + node.nodeSize, text);
 }
 
 // `#table(columns: .., [cell], [cell], ...)` (plan.md M10). `columnsRaw` is
@@ -413,6 +436,8 @@ function serializePrimary(node: PMNode, pos: number): Serialized {
       return serializeInline(node, pos + 1);
     case "table":
       return serializeTable(node, pos);
+    case "image":
+      return serializeImage(node, pos);
     case "typst_call":
     case "unsupported_block":
       return leaf(pos, pos + node.nodeSize, node.attrs.raw as string);
