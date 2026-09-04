@@ -82,8 +82,21 @@ export const schema = new Schema({
     // `parse_typst_ast` degrades either case rather than failing the whole
     // list) — `heading` is included for schema symmetry with `doc` even
     // though Typst's grammar never actually nests one inside a list item.
+    //
+    // `paragraph` MUST be the first alternative: ProseMirror resolves a
+    // content expression's *default* block type (used whenever it needs to
+    // create fresh empty content — e.g. prosemirror-schema-list's
+    // splitListItem on Enter) to whichever alternative comes first. With
+    // `heading` listed first, every new item created by pressing Enter in a
+    // WYSIWYG list silently became a heading instead of a paragraph —
+    // confirmed live and matching a user report of list items scattering
+    // into separate single-item lists (each new "heading" item apparently
+    // couldn't continue as a list item the way a paragraph does, so the
+    // toolbar got re-clicked per line, each click wrapping a lone paragraph
+    // in its own new list — hence blank lines between items and each
+    // showing "1." independently, its own list's own default order).
     list_item: {
-      content: "(heading | paragraph | typst_call | unsupported_block) (bullet_list | ordered_list)*",
+      content: "(paragraph | heading | typst_call | unsupported_block) (bullet_list | ordered_list)*",
       parseDOM: [{ tag: "li" }],
       toDOM: () => ["li", 0],
     },
