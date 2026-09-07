@@ -47,8 +47,17 @@ import type {
   TableRow as MdTableRow,
 } from "mdast";
 import { Node as PMNode, type Mark } from "prosemirror-model";
-import { schema, type PMDoc, type TypstSet } from "../model/schema";
+import {
+  schema,
+  type BlockNodeName,
+  LIST_ITEM_PRIMARY_TYPES,
+  LIST_TYPES,
+  type PMDoc,
+  type TypstSet,
+} from "../model/schema";
 import { pmDocToTypst } from "./typstAst";
+import { atomSpecByMdast, atomSpecByPmType, parseCallName } from "./inlineLeaves";
+import { assertNever } from "../util/assertNever";
 
 const FENCE_CALL = "typst-call";
 const FENCE_SET = "typst-set";
@@ -174,15 +183,12 @@ function convertTable(node: MdTable): PMNode | null {
   return schema.nodes.table.create({ columnsRaw: String(columnCount), columnCount }, rows);
 }
 
-const LIST_ITEM_PRIMARY_KINDS = new Set([
-  "heading",
-  "paragraph",
-  "typst_call",
-  "table",
-  "image",
-  "unsupported_block",
-]);
-const LIST_KINDS = new Set(["bullet_list", "ordered_list"]);
+// plan.md M13: derived from schema.ts's declared position-validity arrays
+// rather than a separately hand-maintained Set, so this can't drift from
+// typstAst.ts's serializePrimary (which casts against the same arrays' types
+// for switch-exhaustiveness) or from list_item's generated content spec.
+const LIST_ITEM_PRIMARY_KINDS = new Set<string>(LIST_ITEM_PRIMARY_TYPES);
+const LIST_KINDS = new Set<string>(LIST_TYPES);
 
 function convertList(node: MdList, source: string): PMNode {
   const items = node.children.map((item) => convertListItem(item, source));
@@ -239,24 +245,27 @@ function flattenInlineNode(node: PhrasingContent, marks: string[], out: PMNode[]
       if (node.value.length > 0) out.push(schema.text(node.value, marksFor(marks)));
       return true;
     case "break":
-      out.push(schema.nodes.hard_break.create());
+      // Construction logic lives once in inlineLeaves.ts's shared table
+      // (plan.md M13) — `atomSpecByMdast` is guaranteed to match here since
+      // `break` always maps to the hard_break spec.
+      out.push(atomSpecByMdast(node)!.fromMdast(node));
       return true;
     case "strong":
       return flattenChildren(node.children, addMark(marks, "strong"), out);
     case "emphasis":
       return flattenChildren(node.children, addMark(marks, "em"), out);
-    case "inlineCode":
-      if (node.value.startsWith("#")) {
-        out.push(
-          schema.nodes.typst_call_inline.create({
-            name: parseCallName(node.value),
-            raw: node.value,
-          }),
-        );
+    case "inlineCode": {
+      // Ambiguous by mdast node type alone (plain code vs. a call chip) —
+      // `atomSpecByMdast`'s `matchesMdast` predicate resolves it via the
+      // same `#`-prefix heuristic documented in inlineLeaves.ts.
+      const spec = atomSpecByMdast(node);
+      if (spec) {
+        out.push(spec.fromMdast(node));
       } else {
         out.push(schema.text(node.value, marksFor(addMark(marks, "code"))));
       }
       return true;
+    }
     case "link": {
       // A `link` mark, not a node (plan.md M9) — mirrors typstAst.ts's
       // AstInline::Link handling: recurse into the body with the *inherited*
@@ -286,13 +295,24 @@ function parseSetFunction(raw: string): string {
   return raw.match(/^#set\s+([^\s(]+)/)?.[1] ?? "";
 }
 
-function parseCallName(raw: string): string {
-  return raw.match(/^#([^\s([]+)/)?.[1] ?? "";
-}
-
+// unist's `position` (and even `offset` within a present `position`) is
+// spec-optional — a node "generated" rather than parsed from real source is
+// allowed to have neither. remark-parse always attaches both for every node
+// it produces, but this fallback path exists precisely for nodes outside the
+// MVP subset (blockquotes, raw HTML, ...), i.e. exactly where an unexpected
+// synthetic/positionless node is most likely to land — silently returning ""
+// here would violate plan.md's "Unsupported input policy" ("no silent data
+// loss") by producing an `unsupported_block` whose `raw` isn't actually the
+// verbatim source it claims to be. Throw instead, so that ever happening is
+// a loud test failure, not quietly empty content.
 function sliceSource(node: RootContent | MdListItem, source: string): string {
   const position = node.position;
-  return position ? source.slice(position.start.offset, position.end.offset) : "";
+  if (!position || position.start.offset === undefined || position.end.offset === undefined) {
+    throw new Error(
+      `sliceSource: node of type "${node.type}" has no position/offset — can't recover its verbatim source text`,
+    );
+  }
+  return source.slice(position.start.offset, position.end.offset);
 }
 
 function unsupportedBlockFrom(node: RootContent | MdListItem, source: string): PMNode {
@@ -315,7 +335,12 @@ export function pmDocToMdast(doc: PMDoc): Root {
 }
 
 function blockToMdast(node: PMNode): BlockContent {
-  switch (node.type.name) {
+  // Same exhaustiveness pattern as typstAst.ts's serializeBlock (plan.md
+  // M13): cast against schema.ts's declared BlockNodeName so a name missing
+  // a case fails to compile via `assertNever` below, instead of only
+  // throwing the first time an unhandled block type reaches here.
+  const kind = node.type.name as BlockNodeName;
+  switch (kind) {
     case "heading":
       return {
         type: "heading",
@@ -379,7 +404,7 @@ function blockToMdast(node: PMNode): BlockContent {
     case "unsupported_block":
       return { type: "code", lang: FENCE_UNSUPPORTED, meta: null, value: node.attrs.raw as string };
     default:
-      throw new Error(`pmDocToMdast: unexpected block "${node.type.name}"`);
+      return assertNever(kind);
   }
 }
 
@@ -419,11 +444,14 @@ function inlineToMdast(node: PMNode): PhrasingContent[] {
   node.forEach((child) => {
     if (child.isText) {
       out.push(withLinkMark(wrapMarks(child.text ?? "", child.marks.map((mark) => mark.type.name)), child.marks));
-    } else if (child.type.name === "hard_break") {
-      out.push(withLinkMark({ type: "break" }, child.marks));
-    } else if (child.type.name === "typst_call_inline") {
-      out.push(withLinkMark({ type: "inlineCode", value: child.attrs.raw as string }, child.marks));
+      return;
     }
+    // hard_break / typst_call_inline (plan.md M13): construction logic lives
+    // once in inlineLeaves.ts's shared table rather than duplicated here and
+    // in typstAst.ts's serializeInline (atomSpecByPmType throws its own clear
+    // error if `child.type.name` isn't a known atom kind).
+    const spec = atomSpecByPmType(child.type.name);
+    out.push(withLinkMark(spec.toMdast(child), child.marks));
   });
   return out;
 }

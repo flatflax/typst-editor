@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { docToMarkdown, markdownToDoc } from "./markdown";
+import type { Root } from "mdast";
+import { docToMarkdown, markdownToDoc, mdastToDoc } from "./markdown";
 import { pmDocToTypst } from "./typstAst";
 import { schema } from "../model/schema";
 
@@ -115,6 +116,21 @@ describe("markdown round trip", () => {
     // same unsupported_block on the next parse, which is what "stable"
     // means here — assertStableRoundTrip already checked that above.
     expect(regenerated).toBe("Before.\n\n```typst-raw\n> quoted\n```\n\nAfter.");
+  });
+
+  // unist's `position` is spec-optional ("generated" nodes may lack it
+  // entirely) — remark-parse always attaches it for real source, so this
+  // constructs a synthetic mdast tree (not from parser.parse) to exercise
+  // that path directly. Guards against the silent-empty-string regression
+  // discussed in plan.md's "Unsupported input policy": a positionless node
+  // reaching the unsupported_block fallback must fail loudly, not produce an
+  // unsupported_block whose `raw` silently isn't the verbatim source at all.
+  it("throws rather than silently losing content when a node has no position", () => {
+    const root: Root = {
+      type: "root",
+      children: [{ type: "blockquote", children: [] }],
+    };
+    expect(() => mdastToDoc(root, "> quoted")).toThrow(/no position\/offset/);
   });
 
   it("a fenced code block without our special lang tags is unsupported", () => {

@@ -25,6 +25,46 @@ export type TypstSet = { function: string; raw: string };
 // are out of the MVP subset — see ast.rs's `as_table_call`).
 const tableNodeSpecs = tableNodes({ tableGroup: "block", cellContent: "block+", cellAttributes: {} });
 
+// Central declaration of structural position validity per content-shaped
+// block node type (plan.md M13's "structural position-validity, made
+// explicit"). `LIST_ITEM_PRIMARY_TYPES` is what's legal as a list item's
+// *primary* content; a list item's nested sublists are a separate
+// structural role (`LIST_TYPES`), not primary content, so bullet_list/
+// ordered_list are deliberately excluded from the first array.
+// `BLOCK_NODE_TYPES` (both roles combined) is what's legal as a top-level
+// document block or inside a table cell — both recurse through the same
+// serializeBlock/blockToMdast in the two spokes.
+//
+// Previously this rule existed only implicitly: as a switch statement's
+// case list silently omitting bullet_list/ordered_list
+// (src/spokes/typstAst.ts's serializePrimary) mirrored by a separately
+// hand-maintained Set (src/spokes/markdown.ts's old LIST_ITEM_PRIMARY_KINDS)
+// — two independently-maintained facts about the same rule, relying on a
+// human remembering to keep a switch's omissions and a Set's membership in
+// sync across files. Declaring it once here fixes that two ways: (a)
+// `list_item`'s content expression below is *generated* from these arrays
+// rather than a hand-written string that could drift from them, and (b)
+// both spokes cast `node.type.name` (which prosemirror-model types as plain
+// `string`, so it doesn't get switch-exhaustiveness for free) against these
+// literal-union types as the switch scrutinee — a case missing from
+// serializeBlock/serializePrimary/blockToMdast now fails to compile instead
+// of only failing the first time an unhandled node type reaches that path.
+export const LIST_ITEM_PRIMARY_TYPES = [
+  "paragraph",
+  "heading",
+  "typst_call",
+  "table",
+  "image",
+  "unsupported_block",
+] as const;
+export type ListItemPrimaryName = (typeof LIST_ITEM_PRIMARY_TYPES)[number];
+
+export const LIST_TYPES = ["bullet_list", "ordered_list"] as const;
+export type ListTypeName = (typeof LIST_TYPES)[number];
+
+export const BLOCK_NODE_TYPES = [...LIST_ITEM_PRIMARY_TYPES, ...LIST_TYPES] as const;
+export type BlockNodeName = (typeof BLOCK_NODE_TYPES)[number];
+
 export const schema = new Schema({
   nodes: {
     doc: {
@@ -104,7 +144,7 @@ export const schema = new Schema({
     // in its own new list — hence blank lines between items and each
     // showing "1." independently, its own list's own default order).
     list_item: {
-      content: "(paragraph | heading | typst_call | table | image | unsupported_block) (bullet_list | ordered_list)*",
+      content: `(${LIST_ITEM_PRIMARY_TYPES.join(" | ")}) (${LIST_TYPES.join(" | ")})*`,
       parseDOM: [{ tag: "li" }],
       toDOM: () => ["li", 0],
     },

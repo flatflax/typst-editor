@@ -4,7 +4,15 @@
 // recognizing Typst's real syntax tree, this module only owns mapping that
 // pruned AST into/out of the ProseMirror schema (src/model/schema.ts).
 import { Node as PMNode, type Mark } from "prosemirror-model";
-import { schema, type PMDoc, type TypstSet } from "../model/schema";
+import {
+  schema,
+  type BlockNodeName,
+  type ListItemPrimaryName,
+  type PMDoc,
+  type TypstSet,
+} from "../model/schema";
+import { atomSpecByAstType, atomSpecByPmType } from "./inlineLeaves";
+import { assertNever } from "../util/assertNever";
 
 export type { TypstSet };
 
@@ -77,22 +85,24 @@ function blockToNode(block: AstBlock): PMNode {
   }
 }
 
-// A table cell's blocks, same "fall back to an empty paragraph" shape as
-// listItemToNode below — schema.ts's `cellContent: "block+"` requires at
-// least one block, but an empty Typst content-block cell (`[]`) produces no
-// content from the parser.
+// Shared by tableCellToNode/listItemToNode below: both schema.ts content
+// specs require at least one child block (`table_cell`'s `block+`, `list_item`'s
+// leading primary-content alternative), but an empty Typst content-block
+// (`[]`, or a bare `- ` with nothing after it) produces no blocks from the
+// parser — fall back to a single empty paragraph so the node still satisfies
+// the schema either way.
+function blocksOrEmptyParagraph(items: AstBlock[]): PMNode[] {
+  return items.length > 0 ? items.map(blockToNode) : [schema.nodes.paragraph.create()];
+}
+
 function tableCellToNode(items: AstBlock[]): PMNode {
-  const children = items.length > 0 ? items.map(blockToNode) : [schema.nodes.paragraph.create()];
-  return schema.nodes.table_cell.create(null, children);
+  return schema.nodes.table_cell.create(null, blocksOrEmptyParagraph(items));
 }
 
 // A list item's blocks are [primary content, ...nested sublists] (matching
-// the `list_item` content spec in schema.ts). An empty item (a bare `- `
-// with nothing after it) has no primary content from the parser — fall back
-// to an empty paragraph so the node still satisfies the schema.
+// the `list_item` content spec in schema.ts).
 function listItemToNode(items: AstBlock[]): PMNode {
-  const children = items.length > 0 ? items.map(blockToNode) : [schema.nodes.paragraph.create()];
-  return schema.nodes.list_item.create(null, children);
+  return schema.nodes.list_item.create(null, blocksOrEmptyParagraph(items));
 }
 
 function inlineToNodes(children: AstInline[]): PMNode[] {
@@ -120,21 +130,31 @@ function inlineToNodes(children: AstInline[]): PMNode[] {
       continue;
     }
     flush();
-    if (child.type === "linebreak") {
-      nodes.push(schema.nodes.hard_break.create());
-    } else if (child.type === "typst_call") {
-      nodes.push(schema.nodes.typst_call_inline.create({ name: child.name, raw: child.raw }));
-    } else {
-      // "link": recurse into its body, then stack a `link` mark (with href)
-      // on top of every node that recursion produced — text, hard_break, or
-      // a nested typst_call_inline all carry marks in this schema, so this
-      // handles "bold link" and "link wrapping a call" uniformly.
-      // `addToSet` (not `[linkMark, ...node.marks]`) matters: ProseMirror
-      // requires a node's marks to be sorted by the schema's mark rank, and
-      // link is declared after strong/em/code, so prepending it produces an
-      // invalid [link, strong] order that fails `doc.check()`.
-      const linkMark = schema.marks.link.create({ href: child.href });
-      nodes.push(...inlineToNodes(child.children).map((node) => node.mark(linkMark.addToSet(node.marks))));
+    switch (child.type) {
+      case "linebreak":
+      case "typst_call":
+        // Shared with serializeInline's reverse direction (plan.md M13): the
+        // actual node-construction logic lives once in inlineLeaves.ts's
+        // table, keyed by AstInline variant — the switch here only exists to
+        // keep this dispatch exhaustively checked against the real
+        // AstInline union (see plan.md's note that this direction "already
+        // gets exhaustiveness for free" from switching on a discriminated
+        // union, unlike the PM-node-name-keyed switches below).
+        nodes.push(atomSpecByAstType(child.type).fromAst(child));
+        break;
+      case "link": {
+        // Recurse into its body, then stack a `link` mark (with href) on top
+        // of every node that recursion produced — text, hard_break, or a
+        // nested typst_call_inline all carry marks in this schema, so this
+        // handles "bold link" and "link wrapping a call" uniformly.
+        // `addToSet` (not `[linkMark, ...node.marks]`) matters: ProseMirror
+        // requires a node's marks to be sorted by the schema's mark rank,
+        // and link is declared after strong/em/code, so prepending it
+        // produces an invalid [link, strong] order that fails `doc.check()`.
+        const linkMark = schema.marks.link.create({ href: child.href });
+        nodes.push(...inlineToNodes(child.children).map((node) => node.mark(linkMark.addToSet(node.marks))));
+        break;
+      }
     }
   }
   flush();
@@ -308,7 +328,13 @@ function findEntry(
 }
 
 function serializeBlock(node: PMNode, pos: number): Serialized {
-  switch (node.type.name) {
+  // prosemirror-model types `node.type.name` as plain `string`, so this cast
+  // against schema.ts's declared `BlockNodeName` (plan.md M13) is what makes
+  // the switch below exhaustively checked: a name missing a case falls
+  // through to `default`, where `assertNever` fails to compile rather than
+  // only throwing the first time an unhandled block type reaches here.
+  const kind = node.type.name as BlockNodeName;
+  switch (kind) {
     case "heading":
       return concat(
         leaf(pos, pos + 1, `${"=".repeat(node.attrs.level as number)} `),
@@ -327,7 +353,7 @@ function serializeBlock(node: PMNode, pos: number): Serialized {
     case "unsupported_block":
       return leaf(pos, pos + node.nodeSize, node.attrs.raw as string);
     default:
-      throw new Error(`pmDocToTypst: unexpected top-level block "${node.type.name}"`);
+      return assertNever(kind);
   }
 }
 
@@ -426,7 +452,12 @@ function serializeListItem(item: PMNode, pos: number, marker: string, depth: num
 }
 
 function serializePrimary(node: PMNode, pos: number): Serialized {
-  switch (node.type.name) {
+  // See serializeBlock's comment above: same exhaustiveness pattern, but
+  // against the narrower ListItemPrimaryName domain (schema.ts) — a list
+  // item's primary content excludes bullet_list/ordered_list, which are a
+  // separate structural role (nested sublists), not primary content.
+  const kind = node.type.name as ListItemPrimaryName;
+  switch (kind) {
     case "heading":
       return concat(
         leaf(pos, pos + 1, `${"=".repeat(node.attrs.level as number)} `),
@@ -442,7 +473,7 @@ function serializePrimary(node: PMNode, pos: number): Serialized {
     case "unsupported_block":
       return leaf(pos, pos + node.nodeSize, node.attrs.raw as string);
     default:
-      throw new Error(`pmDocToTypst: unexpected list item content "${node.type.name}"`);
+      return assertNever(kind);
   }
 }
 
@@ -452,11 +483,14 @@ function serializeInline(node: PMNode, contentStart: number): Serialized {
     const pos = contentStart + offset;
     if (child.isText) {
       parts.push(leaf(pos, pos + child.nodeSize, serializeTextRun(child.text ?? "", child.marks)));
-    } else if (child.type.name === "hard_break") {
-      parts.push(leaf(pos, pos + child.nodeSize, withLinkMark("\\\n", child.marks)));
-    } else if (child.type.name === "typst_call_inline") {
-      parts.push(leaf(pos, pos + child.nodeSize, withLinkMark(child.attrs.raw as string, child.marks)));
+      return;
     }
+    // hard_break / typst_call_inline (plan.md M13): construction logic lives
+    // once in inlineLeaves.ts's shared table rather than duplicated here and
+    // in markdown.ts's inlineToMdast (atomSpecByPmType throws its own clear
+    // error if `child.type.name` isn't a known atom kind).
+    const spec = atomSpecByPmType(child.type.name);
+    parts.push(leaf(pos, pos + child.nodeSize, withLinkMark(spec.toTypstText(child), child.marks)));
   });
   return concat(...parts);
 }

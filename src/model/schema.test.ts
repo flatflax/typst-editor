@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Node as PMNode } from "prosemirror-model";
-import { schema } from "./schema";
+import { BLOCK_NODE_TYPES, schema } from "./schema";
 import { fixtures } from "./schema.fixtures";
 
 describe("schema", () => {
@@ -43,6 +43,20 @@ describe("schema", () => {
       if (node.type === schema.nodes.unsupported_block) raw = node.attrs.raw;
     });
     expect(raw).toBe("#table(\n  columns: 2,\n  [a], [b],\n)");
+  });
+
+  // plan.md M13's structural-position-validity arrays (LIST_ITEM_PRIMARY_TYPES/
+  // LIST_TYPES, combined here as BLOCK_NODE_TYPES) are hand-written string
+  // literals, independent of `schema.nodes`' actual keys — renaming a node
+  // type in `schema.nodes` wouldn't make these arrays fail to compile, only
+  // fail here at test time. Borrowed from how pytorch/tensordict's
+  // dynamically-registered op tables (which Python can't check exhaustively
+  // at compile time either) rely on this kind of import/test-time consistency
+  // check instead.
+  it("keeps BLOCK_NODE_TYPES in sync with schema.nodes' actual keys", () => {
+    for (const name of BLOCK_NODE_TYPES) {
+      expect(schema.nodes[name], `schema.nodes has no "${name}"`).toBeDefined();
+    }
   });
 
   it("allows one level of list nesting under a list_item", () => {
