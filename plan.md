@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG | M13–M17 | Collapse the editing surface and preview into one — the long-term product target | M13 done; M14/M14A (feasibility spikes) not started |
+| 3 — Single-View WYSIWYG | M13–M17 | Collapse the editing surface and preview into one — the long-term product target | M13/M14 done (M14: partial-negative — see below); M14A not started |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
@@ -47,12 +47,21 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
 - **M13 — done.** Refactored node-type dispatch (`spokes/markdown.ts`,
   `spokes/typstAst.ts`) onto a shared table + exhaustiveness checks — a prerequisite
   for adding more Typst content types cleanly.
-- **M14 — not started.** Feasibility spike: is whole-document incremental
-  recompilation fast enough per keystroke, or is block-scoped compilation required?
+- **Perf baseline (parallel, non-gating) — not started.** Instrument the existing
+  pipeline end-to-end (parse/convert/render/edit/serialize/compile/preview) across a
+  sweep of fixture sizes, not just one file. Not a gate — doesn't block M14A+ and can
+  run any time; doubles as a regression guard for M14's linear-in-pages finding, and
+  its tooling is meant to be reused by M14A/M15/M16's own perf checks.
+- **M14 — done, partial-negative.** Whole-doc recompile-after-edit scales ~linearly
+  with page count, not page-count-independent — fast enough for short/medium
+  documents, too slow for long ones, and `comemo` caching doesn't rescue it (Typst's
+  pagination pass is inherently whole-document-sequential). Doesn't block M15, but
+  M15/M16 must design around this cost. Measurements and consequences in
+  [doc/phase3-single-view.md](doc/phase3-single-view.md).
 - **M14A — not started.** Feasibility spike: can `typst-ide`/`Frame` data yield stable
   per-range rendered geometry (page/x/y/width/height/baseline/line boxes)?
-- **M15–M17 — blocked on M14/M14A.** Per-block render/edit swap, reflow/pagination
+- **M15–M17 — blocked on M14A.** Per-block render/edit swap, reflow/pagination
   handling, cursor continuity across swaps.
 
-M14 and M14A are hard gates: a negative result on either requires redesigning M15+
-before further implementation.
+M14A is a hard gate: a negative result requires redesigning M15+ before further
+implementation.

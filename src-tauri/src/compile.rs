@@ -341,6 +341,134 @@ $ x^2 $
         );
     }
 
+    /// Builds a deterministic, realistically long document (`sections`
+    /// headings, each with two filler paragraphs and a bullet list) so M14's
+    /// spike measures against something closer to a real multi-page document
+    /// than `MIXED_DOCUMENT` — that one is a single page.
+    fn multi_page_fixture(sections: usize) -> String {
+        const SENTENCE: &str = "The quick brown fox jumps over the lazy dog while autumn leaves drift across the quiet valley below the ridge.";
+        let paragraph = format!("{SENTENCE} {SENTENCE} {SENTENCE} {SENTENCE}");
+        let mut doc = String::from("#set text(size: 11pt)\n\n");
+        for i in 0..sections {
+            doc.push_str(&format!(
+                "= Section {i}\n\n{paragraph}\n\n{paragraph}\n\n- Alpha\n- Beta\n- Gamma\n\n"
+            ));
+        }
+        doc
+    }
+
+    /// M14 (plan.md): before assuming block-scoped/partial compilation is
+    /// required for the single-view swap mechanism (M15+), measure whether
+    /// recompiling the *whole* document after a single-character edit,
+    /// applied to a realistic multi-page fixture, already lands under a
+    /// per-keystroke budget. Prints the actual measurement
+    /// (`cargo test --release -- --nocapture`) since the point of a spike is
+    /// the number itself, not just a pass/fail — see phase3-single-view.md
+    /// for the recorded release-mode result (~75-390ms depending on page
+    /// count, scaling roughly linearly) and its consequence for M15's
+    /// design.
+    ///
+    /// Unlike `compiling_an_mvp_sized_document_is_well_under_the_debounce_window`,
+    /// this doesn't assert a tight release-mode budget: Typst's layout pass
+    /// is 10x+ slower under `cargo test`'s default debug profile (measured
+    /// ~870ms for this same fixture vs. ~75ms release), so a threshold tight
+    /// enough to mean anything in release would make this test fail every
+    /// debug run. The loose ceiling below only guards against a genuine
+    /// hang/regression; the real answer to M14's question has to come from
+    /// a `--release` run, recorded in the docs rather than pinned in CI.
+    #[test]
+    fn single_character_edit_on_a_multi_page_document_recompile_latency() {
+        use std::time::Instant;
+
+        let fixture = multi_page_fixture(40);
+
+        compile_typst(fixture.clone()); // warm up the font-book cache
+
+        // Confirm the fixture is genuinely multi-page before treating the
+        // timing below as informative for M14's question.
+        let world = TauriWorld::new(fixture.clone(), None);
+        let page_count = typst::compile::<PagedDocument>(&world)
+            .output
+            .expect("fixture must compile")
+            .pages()
+            .len();
+        assert!(
+            page_count >= 5,
+            "fixture only produced {page_count} page(s), not realistically multi-page — increase `sections`"
+        );
+
+        let start = Instant::now();
+        let baseline = compile_typst(fixture.clone());
+        let baseline_elapsed = start.elapsed();
+        assert!(baseline.svg.is_some());
+
+        // Simulate one keystroke: insert a single character mid-document
+        // (ASCII filler text throughout, so any byte offset is a char
+        // boundary) rather than editing at an edge, where a real edit is
+        // most likely to land in a multi-page document.
+        let mid = fixture.len() / 2;
+        let mut edited = fixture.clone();
+        edited.insert(mid, 'x');
+
+        let start = Instant::now();
+        let edited_result = compile_typst(edited);
+        let edit_elapsed = start.elapsed();
+        assert!(edited_result.svg.is_some());
+
+        eprintln!(
+            "M14 spike: {page_count}-page fixture — whole-doc recompile after warmup: \
+             {baseline_elapsed:?}; after a single-character edit: {edit_elapsed:?}"
+        );
+
+        assert!(
+            edit_elapsed.as_millis() < 5000,
+            "single-character-edit recompile took {edit_elapsed:?} on a {page_count}-page \
+             document — that's far beyond even debug-profile levels of slow, likely a hang \
+             or a real regression rather than normal build-profile variance"
+        );
+    }
+
+    /// M14, second half: `single_character_edit_on_a_multi_page_document_recompile_latency`
+    /// measures the *current* `compile_typst` architecture, which builds a
+    /// fresh `TauriWorld` (and so a fresh `Source`/`FileId`) on every call —
+    /// that discards `comemo`'s memoization entirely, since cached results
+    /// are keyed against the old `FileId`/`Source` instance. This variant
+    /// keeps one `TauriWorld` alive and uses `Source::edit` (incremental
+    /// reparse, same mechanism `typst-cli --watch` uses) to apply the same
+    /// single-character edit, to see whether `comemo` gives a real speedup
+    /// once the World/FileId are actually held stable across edits — the
+    /// premise M14 set out to check ("`typst::compile` already uses
+    /// `comemo`-based memoization internally").
+    #[test]
+    fn incremental_edit_on_a_persistent_world_shows_comemos_real_speedup() {
+        use std::time::Instant;
+
+        let fixture = multi_page_fixture(40);
+        let mut world = TauriWorld::new(fixture.clone(), None);
+
+        // Warm up: first compile of this World pays the same one-time costs
+        // as compile_typst's own warmup call.
+        typst::compile::<PagedDocument>(&world).output.expect("fixture must compile");
+
+        let start = Instant::now();
+        typst::compile::<PagedDocument>(&world).output.expect("fixture must compile");
+        let unedited_repeat_elapsed = start.elapsed();
+
+        let mid = fixture.len() / 2;
+        world.edit_source(mid..mid, "x");
+
+        let start = Instant::now();
+        let edited = typst::compile::<PagedDocument>(&world).output.expect("edited fixture must compile");
+        let _ = typst_svg::svg_merged(&edited, &SvgOptions::default(), Abs::pt(10.0));
+        let incremental_edit_elapsed = start.elapsed();
+
+        eprintln!(
+            "M14 spike (persistent World): repeat compile of unchanged source: \
+             {unedited_repeat_elapsed:?}; after Source::edit of one character: \
+             {incremental_edit_elapsed:?}"
+        );
+    }
+
     #[test]
     fn diagnostics_resolve_correctly_past_cjk_text_on_earlier_lines() {
         // A regression guard for the earlier UTF-16/UTF-8 offset bug (see

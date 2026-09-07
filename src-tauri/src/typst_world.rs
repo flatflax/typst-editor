@@ -56,6 +56,19 @@ impl TauriWorld {
             base_dir,
         }
     }
+
+    /// Incrementally edits the in-memory source in place
+    /// (`typst_syntax::Source::edit`'s own incremental reparse), preserving
+    /// this `TauriWorld`'s `FileId` — the same mechanism `typst-cli
+    /// --watch` relies on for `comemo`'s memoization to skip recomputing
+    /// anything unaffected by the edit. Exposed for M14's incremental-vs.
+    /// fresh-`World` recompile benchmark (compile.rs); the `compile_typst`
+    /// Tauri command itself still constructs a fresh `TauriWorld` per call
+    /// (see compile.rs's doc comment for what that measurement showed).
+    #[cfg(test)]
+    pub(crate) fn edit_source(&mut self, replace: std::ops::Range<usize>, with: &str) {
+        self.source.edit(replace, with);
+    }
 }
 
 impl World for TauriWorld {

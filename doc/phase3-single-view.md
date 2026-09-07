@@ -5,8 +5,9 @@ Architecture reference: [architecture.md](architecture.md). Design rules: [desig
 ## Reframing
 
 The goal: one view, no separate preview pane, backed by real Typst rendering — made
-feasible by fast incremental compilation and by mapping source ranges to rendered
-geometry (M14/M14A, both open questions). An earlier framing assumed single-view meant
+feasible by fast-enough recompilation (M14, done for short/medium documents — see
+below for the measured limit) and by mapping source ranges to rendered geometry (M14A,
+still an open question). An earlier framing assumed single-view meant
 hand-rolling cursor/selection/IME directly on the compiled SVG/Frame output — an
 open-ended rewrite, correctly rejected for the MVP.
 
@@ -31,7 +32,9 @@ exposes real cases).
 
 ## Milestones
 
-Tentative — M14 and M14A are feasibility spikes the rest depend on.
+Tentative — M14 and M14A are feasibility spikes the rest depend on; M14 is done (see
+its entry for the result), M14A remains the open gate. The perf baseline task below
+is not part of that dependency chain (see its own entry for why).
 
 **M13 — Node-type dispatch refactor — done.** Not part of the single-view mechanism
 itself; landed ahead of the next content node type. `spokes/markdown.ts`/
@@ -56,15 +59,74 @@ Typst content coverage (footnotes, math, grids, citations, ...).
 - Landed as a pure refactor (zero behavior change) gated on the existing round-trip
   suite passing unchanged, before any new content node type is added on top.
 
-**M14 — Incremental compilation feasibility spike (not started).** Before designing
-the swap UI, establish the actual latency budget. `typst::compile` already uses
-`comemo`-based memoization internally — benchmark whether recompiling the *whole*
-document after editing one block of a realistic multi-page fixture already lands
-under a per-keystroke budget (~16–50ms), before assuming block-scoped/partial
-compilation is required. If whole-doc recompilation is fast enough, M15+ is
-simpler (no need to isolate a block's output from document-level context); if not,
-this produces a concrete measurement of the wall, informing whether block-scoped
-compilation is worth its complexity.
+**Perf baseline (parallel, non-gating) — not started.** Instrument the existing
+end-to-end pipeline (`parse_typst_ast` → `typstAstToDoc` → PM render/edit →
+`pmDocToTypst` → `compile_typst` → preview render, plus IPC serialization between the
+Rust/TS boundary) and measure wall time per stage for open and per-keystroke edit,
+across a small sweep of fixture sizes (e.g. ~1, ~10, ~40 pages — reuse M14's
+`multi_page_fixture` shape rather than a single "realistic medium" doc) so growth
+trends are visible, not just one point-in-time number. Unlike M14/M14A, this isn't a
+gate — it doesn't block and isn't blocked by anything below, and can run at any time
+since the pipeline it measures already exists post-M13. Purpose is threefold: (1) find
+out now whether any stage of the *current* loop is already a bottleneck worth fixing,
+rather than assuming the Rust compile step is the only one that matters; (2) stand up
+measurement infrastructure/tooling that M14A/M15 (geometry + swap latency) and M16
+(reflow) each reuse for their own new perf surface instead of rebuilding
+per-milestone; (3) double as an ongoing regression guard for M14's linear-in-pages
+recompile-latency finding (above) — the per-size sweep should keep failing loudly if a
+future change makes the scaling worse, or should stop showing the linear trend at all
+once a session-held `World` (M14's follow-up (a)) actually lands.
+
+**M14 — Incremental compilation feasibility spike — done, partial-negative
+result.** Benchmarked in `src-tauri/src/compile.rs`
+(`single_character_edit_on_a_multi_page_document_recompile_latency`,
+`incremental_edit_on_a_persistent_world_shows_comemos_real_speedup`; release-mode
+numbers below, `cargo test --release -- --nocapture`).
+
+Measurements (release mode, synthetic multi-section fixture — see
+`multi_page_fixture` in compile.rs):
+
+| Architecture | Pages | Edit | Latency |
+|---|---|---|---|
+| Fresh `World` per call (today's `compile_typst`) | 14 | none (repeat compile) | ~75–110ms |
+| Fresh `World` per call | 14 | 1 character | ~75–110ms |
+| Fresh `World` per call | 27 | 1 character | ~240ms |
+| Fresh `World` per call | 40 | 1 character | ~390ms |
+| Persistent `World` + `Source::edit` | 14 | none (repeat compile) | ~9µs |
+| Persistent `World` + `Source::edit` | 14 | 1 character | ~60ms |
+
+- **Whole-doc recompile scales roughly linearly with page count, ~8–10ms/page.**
+  It comfortably meets the *existing* 250ms debounce window (`COMPILE_DEBOUNCE_MS`,
+  App.tsx) for short-to-medium documents (roughly ≤20 pages) but not the
+  milestone's tighter ~16–50ms "instant-per-keystroke" target, and it keeps
+  getting worse as documents grow — it is not the page-count-independent result
+  M15+ would ideally want.
+- **`comemo` doesn't rescue this, even with a persistent `World`.** The current
+  `compile_typst` command builds a fresh `TauriWorld`/`Source` (fresh `FileId`) on
+  every call, which discards `comemo`'s cache entirely — that alone explains why
+  the fresh-`World` row is identical whether or not the source actually changed.
+  Holding one `TauriWorld` alive and applying a real incremental edit via
+  `typst_syntax::Source::edit` (the same mechanism `typst-cli --watch` uses) makes
+  an *unmodified* repeat-compile nearly free (full cache hit), but a genuine
+  one-character edit is still only modestly better than the fresh-`World` number
+  at the same page count. Typst's flow/pagination pass is inherently sequential
+  across the whole document (a page break anywhere depends on cumulative height of
+  everything before it), so an edit can force re-layout of everything after it
+  regardless of caching — `comemo` saves parse/eval work, not the page-layout pass
+  itself.
+- **Consequence for M15+**: whole-document recompilation is fast enough to *not
+  block* starting M15 for realistic short/medium documents under the current
+  debounce-based architecture, but the linear page-count scaling is a real,
+  measured ceiling, not a hypothetical one — long documents (tens of pages) will
+  feel laggy under a naive "recompile-and-swap on every keystroke" design. Two
+  follow-ups, both deferred to M15/M16 rather than resolved here: (a) switch
+  `compile_typst`'s architecture from a fresh `World` per call to a session-held
+  `World` + `Source::edit`, which is a low-risk win regardless (near-free
+  no-op recompiles) even though it doesn't fix the linear-in-pages cost of a real
+  edit; (b) for long documents, M16's "bounded window" idea (recompile/reposition
+  only the edited block's numbering/page scope, not the whole document) may need
+  to apply at the *compile* layer, not just the reposition layer its current
+  wording assumes.
 
 **M14A — Layout geometry spike (not started).** Companion to M14; prerequisite for
 M15's swap positioning and M16's reflow. `jump_from_cursor` currently returns only a
@@ -77,7 +139,8 @@ this cleanly, or needs deeper Rust-side Frame-walking. If not obtainable, M15 fa
 back to coarser per-block bounding boxes only (no baseline alignment, no sub-block
 fragments) — a call to make before M15 starts.
 
-**M15 — Direct-content render/edit swap (blocked on M14/M14A).** Extend PM node views
+**M15 — Direct-content render/edit swap (blocked on M14A; M14's linear-in-pages
+recompile cost, above, is a design input, not a blocker).** Extend PM node views
 so each top-level block that is both geometry-producing and directly authored
 (paragraph, heading, list item, table, image, ...) presents as either an inline
 Typst-rendered SVG fragment (inactive) or today's editable node view (active),
@@ -123,9 +186,12 @@ load-bearing infrastructure firing on every click.
   first version to accept some inaccuracy rather than solving this upfront.
 - **Page-boundary UX is genuinely undefined** — decide as a product call before
   building M15, not during.
-- **M14/M14A are hard gates**: if M14 shows incremental recompilation can't hit an
-  acceptable latency budget even for whole-doc recompilation, or M14A shows stable
-  per-range geometry isn't obtainable from `Frame` data, the M15+ milestone plan needs
-  revisiting (block-scoped partial compilation, or a coarser bounding-box-only
-  fallback, are both bigger lifts than sketched above) before further design or
+- **M14A is a hard gate**: if it shows stable per-range geometry isn't obtainable from
+  `Frame` data, the M15+ milestone plan needs revisiting (a coarser bounding-box-only
+  fallback is a bigger lift than sketched above) before further design or
   implementation time is spent.
+- **M14's measured linear-in-pages recompile cost** (above) means whole-doc
+  recompile-and-swap will feel laggy on long documents even though it's fine for
+  short/medium ones — M15/M16 need to design for this explicitly (session-held
+  `World`, and/or a bounded-window recompile scope for long documents) rather than
+  assume recompilation is free at any document length.
