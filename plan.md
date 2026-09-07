@@ -47,11 +47,15 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
 - **M13 — done.** Refactored node-type dispatch (`spokes/markdown.ts`,
   `spokes/typstAst.ts`) onto a shared table + exhaustiveness checks — a prerequisite
   for adding more Typst content types cleanly.
-- **Perf baseline (parallel, non-gating) — not started.** Instrument the existing
-  pipeline end-to-end (parse/convert/render/edit/serialize/compile/preview) across a
-  sweep of fixture sizes, not just one file. Not a gate — doesn't block M14A+ and can
-  run any time; doubles as a regression guard for M14's linear-in-pages finding, and
-  its tooling is meant to be reused by M14A/M15/M16's own perf checks.
+- **Perf baseline (parallel, non-gating) — edit-position follow-up done (negative
+  result); full pipeline instrumentation not started.** Full task: instrument the
+  existing pipeline end-to-end (parse/convert/render/edit/serialize/compile/preview)
+  across a sweep of fixture sizes, not just one file. Not a gate — doesn't block M14A+
+  and can run any time; doubles as a regression guard for M14's linear-in-pages
+  finding, and its tooling is meant to be reused by M14A/M15/M16's own perf checks.
+  Its edit-position follow-up (below) is done: recompile cost tracks total document
+  size, not proximity of the edit to the end — rules out a bounded-window recompile at
+  the compile layer as a perf lever. See [doc/phase3-single-view.md](doc/phase3-single-view.md).
 - **M14 — done, partial-negative.** Whole-doc recompile-after-edit scales ~linearly
   with page count, not page-count-independent — fast enough for short/medium
   documents, too slow for long ones, and `comemo` caching doesn't rescue it (Typst's

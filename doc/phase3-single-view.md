@@ -59,7 +59,8 @@ Typst content coverage (footnotes, math, grids, citations, ...).
 - Landed as a pure refactor (zero behavior change) gated on the existing round-trip
   suite passing unchanged, before any new content node type is added on top.
 
-**Perf baseline (parallel, non-gating) — not started.** Instrument the existing
+**Perf baseline (parallel, non-gating) — in progress** (edit-position follow-up done,
+full pipeline instrumentation not started). Instrument the existing
 end-to-end pipeline (`parse_typst_ast` → `typstAstToDoc` → PM render/edit →
 `pmDocToTypst` → `compile_typst` → preview render, plus IPC serialization between the
 Rust/TS boundary) and measure wall time per stage for open and per-keystroke edit,
@@ -73,17 +74,34 @@ rather than assuming the Rust compile step is the only one that matters; (2) sta
 measurement infrastructure/tooling that M14A/M15 (geometry + swap latency) and M16
 (reflow) each reuse for their own new perf surface instead of rebuilding
 per-milestone; (3) double as an ongoing regression guard for M14's linear-in-pages
-recompile-latency finding (above) — the per-size sweep should keep failing loudly if a
+recompile-latency finding (below) — the per-size sweep should keep failing loudly if a
 future change makes the scaling worse, or should stop showing the linear trend at all
 once a session-held `World` (M14's follow-up (a)) actually lands.
-- **Follow-up: vary edit position, not just document size.** M14's table varies page
-  count and edit-vs-no-edit but never *where* in the document the edit lands. Cross the
-  existing size sweep with an edit-position axis (near the document's start / middle /
-  end) to separate two explanations for the linear-in-pages result: cost tracking
-  *total document size* vs. cost tracking *content after the edit point*. If near-end
-  edits stay cheap independent of document length while near-start edits scale with it,
-  that's direct evidence a bounded-window recompile (M16's undecided direction (a)) is a
-  real lever, not just a plausible-sounding idea.
+- **Follow-up: vary edit position, not just document size — done, negative
+  result.** Benchmarked in `src-tauri/src/compile.rs`
+  (`recompile_latency_after_an_edit_depends_on_position_not_just_document_length`;
+  release-mode numbers below). M14's table varied page count and edit-vs-no-edit but
+  never *where* in the document the edit lands. Crossed two document lengths (14/40
+  sections) with three edit positions (near-start/middle/near-end, persistent `World` +
+  `Source::edit`) to separate two explanations for the linear-in-pages result: cost
+  tracking *total document size* vs. cost tracking *content after the edit point*.
+
+  | Sections | near-start | middle | near-end |
+  |---|---|---|---|
+  | 14 | ~21ms | ~29ms | ~28ms |
+  | 40 | ~69ms | ~58ms | ~61ms |
+
+  Edit position is within noise at each document length; the ~2.4x cost increase from
+  14→40 sections roughly tracks the 2.9x section-count ratio regardless of where the
+  edit landed.
+  **Cost tracks total document size, not content after the edit point** — confirms
+  M14's read that Typst's pagination pass is sequential over the whole document (a page
+  break anywhere depends on cumulative height of everything before it) rather than
+  scoped to the edit site. Rules out a bounded-window recompile at the *compile* layer
+  (M16's undecided direction (a)) as a real lever — M16 should not pursue it on the
+  premise that near-end edits are cheaper; whatever mitigates long-document latency has
+  to act elsewhere (e.g. reducing recompile frequency/scope at the UI layer, or
+  accepting the linear cost for long documents as a known limit).
 
 **M14 — Incremental compilation feasibility spike — done, partial-negative
 result.** Benchmarked in `src-tauri/src/compile.rs`
@@ -134,7 +152,9 @@ Measurements (release mode, synthetic multi-section fixture — see
   edit; (b) for long documents, M16's "bounded window" idea (recompile/reposition
   only the edited block's numbering/page scope, not the whole document) may need
   to apply at the *compile* layer, not just the reposition layer its current
-  wording assumes.
+  wording assumes — since resolved: the perf-baseline edit-position follow-up above
+  shows it does *not* help at the compile layer; the reposition layer remains a
+  separate, still-open question.
 
 **M14A — Layout geometry spike — done, positive result.** Prototyped in
 `src-tauri/src/geometry.rs` (`geometry_for_range`): given a source byte range, walk
@@ -221,6 +241,33 @@ territory; the old split-pane preview never had to solve it).
   same numbering scope/page) — more correct, more expensive; (b) accept staleness with
   a visible affordance (a "recompute" trigger, or full settle on blur). Needed before
   M15's swap-trigger scope (which blocks re-render vs. just reposition) can be built.
+- **Interim direction (decided 2026-09-07), pending M16's own data below**: don't
+  design invalidation yet — build on the whole-document recompile M14 already
+  validated, and measure before choosing between whole-document / page-range /
+  dependency-aware invalidation.
+  1. Correctness baseline: keystroke → PM updates the active block immediately →
+     debounce → whole-document compile + render → geometry settle. No bounded-window
+     or dependency-aware invalidation until the data below shows it's needed. Debounce
+     starts at 100–150ms as an experimental value, not fixed — M14 measured
+     ~8–10ms/page for whole-doc recompile, so this window may need to widen once the
+     settle-latency data (point 3) comes in.
+  2. Cross-page active block: while editing, let the PM editing region expand
+     continuously across the page break — the source stays paginated by Typst, only
+     the editing surface ignores it — and restore real pagination on blur. This is
+     candidate (b) above, applied specifically to page-break visual continuity: it
+     resolves only that half of the open scope question, not the numbering/`#set`/
+     footnote correctness problem (a sibling block showing wrong *content*, not just
+     wrong position) above, which stays unresolved and needs its own decision.
+  3. M16 records two datasets before deciding on invalidation strategy: (i) which
+     pages/blocks actually show geometry/render changes after an edit at a given
+     position; (ii) whole-document settle latency at 10/20/40 pages. Reuse M14's
+     benchmark fixtures/tooling (`compile.rs`) rather than building new measurement
+     infra. Note the perf-baseline edit-position follow-up (above) already answers part
+     of (ii): settle latency is position-independent, a function of document length
+     alone — so a compile-layer bounded window (recompute less by starting from the
+     edit point) isn't a viable invalidation strategy; (i) remains open and targets a
+     different lever (shrinking *render/swap* surface at the frontend layer after a
+     whole-document compile, not shrinking the compile itself).
 
 **M17 — Cursor/selection continuity across swaps (blocked on M15).** Generalize
 `jump_from_click`/`jump_from_cursor` so clicking a rendered (inactive) block activates
@@ -234,8 +281,11 @@ load-bearing infrastructure firing on every click.
   a function of its own content (earlier `#set` rules, auto-numbering, widow/orphan
   control) — full accuracy may need re-rendering a window of neighbors. Scope the
   first version to accept some inaccuracy rather than solving this upfront.
-- **Page-boundary UX is genuinely undefined** — decide as a product call before
-  building M15, not during.
+- **Page-boundary UX was genuinely undefined; now partly decided.** M16's interim
+  direction (above) resolves the editing-surface half (the active block's editing
+  region spans page breaks while focused; real pagination restores on blur) — the
+  numbering/`#set`/footnote correctness half (Open scope question, above) is still an
+  open product decision, needed before M15's swap-trigger scope is finalized.
 - **M14A's line-box reconstruction is a heuristic (baseline clustering), not an API
   guarantee** — two visually distinct lines sharing an exact baseline (e.g. a
   multi-column layout) would currently merge into one box. Untested; would need an
@@ -243,5 +293,7 @@ load-bearing infrastructure firing on every click.
 - **M14's measured linear-in-pages recompile cost** (above) means whole-doc
   recompile-and-swap will feel laggy on long documents even though it's fine for
   short/medium ones — M15/M16 need to design for this explicitly (session-held
-  `World`, and/or a bounded-window recompile scope for long documents) rather than
-  assume recompilation is free at any document length.
+  `World`, and/or reducing recompile frequency/scope at the UI layer — the
+  perf-baseline edit-position follow-up above rules out a bounded-window recompile at
+  the *compile* layer as a fix) rather than assume recompilation is free at any
+  document length.

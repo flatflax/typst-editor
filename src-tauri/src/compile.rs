@@ -469,6 +469,62 @@ $ x^2 $
         );
     }
 
+    /// Perf-baseline follow-up (plan.md): M14 above established that
+    /// whole-doc recompile scales linearly with page count, but never varied
+    /// *where* the edit lands, so it can't distinguish two different
+    /// explanations for that linear cost: (a) cost tracks total document
+    /// size regardless of edit position, or (b) cost tracks the amount of
+    /// content *after* the edit point (plausible since Typst's pagination
+    /// pass is sequential — a page break anywhere depends on cumulative
+    /// height of everything before it, so an edit near the end has little
+    /// downstream layout left to redo).
+    ///
+    /// Crosses two document lengths with three edit positions (near-start,
+    /// middle, near-end) on the persistent-`World` + `Source::edit` path
+    /// (the realistic per-keystroke architecture, unlike the fresh-`World`
+    /// path which recompiles everything from scratch regardless of edit
+    /// position by construction). If near-end edit cost stays roughly flat
+    /// across the two document lengths while near-start/middle cost grows
+    /// with length, that's direct evidence a bounded-window recompile
+    /// (M16's undecided direction (a), phase3-single-view.md) is a real
+    /// lever, not just a plausible-sounding idea. Prints all six
+    /// measurements (`cargo test --release -- --nocapture`) since, as with
+    /// M14, the point is the numbers themselves, not a pass/fail.
+    #[test]
+    fn recompile_latency_after_an_edit_depends_on_position_not_just_document_length() {
+        use std::time::Instant;
+
+        for sections in [14usize, 40usize] {
+            let fixture = multi_page_fixture(sections);
+
+            for (label, fraction) in [("near-start", 0.02), ("middle", 0.5), ("near-end", 0.98)] {
+                let mut world = TauriWorld::new(fixture.clone(), None);
+
+                // Warm up: pay the one-time font-scan/parse cost before
+                // timing, same as M14's other benchmarks.
+                typst::compile::<PagedDocument>(&world).output.expect("fixture must compile");
+
+                // ASCII filler text throughout, so any byte offset is a
+                // valid char boundary.
+                let at = ((fixture.len() as f64) * fraction) as usize;
+                world.edit_source(at..at, "x");
+
+                let start = Instant::now();
+                let edited = typst::compile::<PagedDocument>(&world)
+                    .output
+                    .expect("edited fixture must compile");
+                let _ = typst_svg::svg_merged(&edited, &SvgOptions::default(), Abs::pt(10.0));
+                let elapsed = start.elapsed();
+
+                eprintln!(
+                    "perf-baseline: {sections}-section fixture, edit at {label} \
+                     (byte {at}/{}): {elapsed:?}",
+                    fixture.len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn diagnostics_resolve_correctly_past_cjk_text_on_earlier_lines() {
         // A regression guard for the earlier UTF-16/UTF-8 offset bug (see
