@@ -145,9 +145,9 @@ Measurements (release mode, synthetic multi-section fixture — see
   debounce-based architecture, but the linear page-count scaling is a real,
   measured ceiling, not a hypothetical one — long documents (tens of pages) will
   feel laggy under a naive "recompile-and-swap on every keystroke" design. Two
-  follow-ups, both deferred to M15/M16 rather than resolved here: (a) switch
-  `compile_typst`'s architecture from a fresh `World` per call to a session-held
-  `World` + `Source::edit`, which is a low-risk win regardless (near-free
+  follow-ups: (a) switch `compile_typst`'s architecture from a fresh `World` per
+  call to a session-held `World` + `Source::edit` — **done** (`compile.rs`,
+  M15's first implemented slice; see below), a low-risk win regardless (near-free
   no-op recompiles) even though it doesn't fix the linear-in-pages cost of a real
   edit; (b) for long documents, M16's "bounded window" idea (recompile/reposition
   only the edited block's numbering/page scope, not the whole document) may need
@@ -208,9 +208,9 @@ gives real line-level boxes with baselines and correctly locates content rendere
 away from its source position (footnotes) or across a page break. M15 can build
 directly on this rather than redesigning around a coarser data source.
 
-**M15 — Direct-content render/edit swap (unblocked — M14/M14A both done; their
-findings above, session-held `World` and glyph-span-based geometry, are design inputs
-to build on, not blockers).** Extend PM node views
+**M15 — Direct-content render/edit swap (in progress — unblocked, M14/M14A both
+done; their findings above, session-held `World` and glyph-span-based geometry, are
+design inputs to build on).** Extend PM node views
 so each top-level block that is both geometry-producing and directly authored
 (paragraph, heading, list item, table, image, ...) presents as either an inline
 Typst-rendered SVG fragment (inactive) or today's editable node view (active),
@@ -223,24 +223,39 @@ preview pane goes away; its role is absorbed into per-block rendered fragments.
   not a direct swap. The addressing scheme for it (hierarchical tuple-path keys, e.g.
   `("footnote", 3)`, akin to `pytorch/tensordict`'s `NestedKey`) is deferred until the
   prototype exposes concrete cases.
+- **First slice landed: session-held `World`.** `compile_typst` (`compile.rs`) now
+  holds one `TauriWorld` per app session (`Mutex`, managed in lib.rs) instead of
+  constructing one per call, applying each incoming full-document string as a
+  diffed `Source::edit` (`compute_edit`: longest-common-prefix/suffix, snapped to
+  UTF-8 char boundaries) rather than reparsing from scratch. The frontend's IPC
+  shape is unchanged — it still sends the whole current document every call; only
+  the backend's handling of repeated calls changed. `geometry_for_range` (M14A) is
+  not yet wired to a command; the PM node-view swap UI itself hasn't started.
 
-**M16 — Reflow and pagination handling (blocked on M15).** An edited block's height
-change shifts every later block's position (real Typst pagination, not CSS reflow) —
-the document container must reposition subsequent fragments after each incremental
-compile. Requires an explicit answer for a block straddling a page break (new UX
-territory; the old split-pane preview never had to solve it).
-- **Open scope question (raised 2026-09-04, decide before M15 starts)**: M15/M16
-  assume a block is one contiguous, independently swappable unit whose neighbors only
-  need *repositioning*, not re-rendering. That holds for Markdown/Typora but not fully
+**M16 — Reflow and pagination handling.** An edited block's height change shifts
+every later block's position (real Typst pagination, not CSS reflow) — the document
+container must reposition subsequent fragments after each incremental compile.
+Requires an explicit answer for a block straddling a page break (new UX territory;
+the old split-pane preview never had to solve it). Implementation is blocked on M15
+(needs the swap mechanism to reposition around); the scope question and interim
+direction below are not — M15's swap-trigger scope depends on them, not the other
+way around.
+- **Open scope question (raised 2026-09-04).** M15/M16 assume a block is one
+  contiguous, independently swappable unit whose neighbors only need
+  *repositioning*, not re-rendering. That holds for Markdown/Typora but not fully
   for Typst: auto-numbering (heading/list numbers), `#set` rules (effective for
   everything after them), and footnotes (render at page bottom, not source position)
-  mean editing one block can change *displayed content* of later untouched blocks, not
-  just position — a correctness bug ("sibling shows a wrong number"), sharper than the
-  general layout-dependency risk below. Two candidate directions, not chosen: (a)
-  recompile-and-reposition a bounded window (edited block + everything after it in the
-  same numbering scope/page) — more correct, more expensive; (b) accept staleness with
-  a visible affordance (a "recompute" trigger, or full settle on blur). Needed before
-  M15's swap-trigger scope (which blocks re-render vs. just reposition) can be built.
+  mean editing one block can change *displayed content* of later untouched blocks,
+  not just position — a correctness bug ("sibling shows a wrong number"), sharper
+  than the general layout-dependency risk below. ~~Two candidate directions: (a)
+  recompile-and-reposition a bounded window (edited block + everything after it in
+  the same numbering scope/page) — more correct, more expensive; (b) accept
+  staleness with a visible affordance (a "recompute" trigger, or full settle on
+  blur).~~ Outdated: the perf-baseline edit-position follow-up (above) shows a
+  bounded window costs the same as a full recompile, so (a) has no cost advantage
+  now that whole-document recompile is the default (interim direction below); (b) is
+  adopted below for page-break visual continuity only — this correctness bug is
+  still undecided.
 - **Interim direction (decided 2026-09-07), pending M16's own data below**: don't
   design invalidation yet — build on the whole-document recompile M14 already
   validated, and measure before choosing between whole-document / page-range /
@@ -254,10 +269,11 @@ territory; the old split-pane preview never had to solve it).
   2. Cross-page active block: while editing, let the PM editing region expand
      continuously across the page break — the source stays paginated by Typst, only
      the editing surface ignores it — and restore real pagination on blur. This is
-     candidate (b) above, applied specifically to page-break visual continuity: it
-     resolves only that half of the open scope question, not the numbering/`#set`/
-     footnote correctness problem (a sibling block showing wrong *content*, not just
-     wrong position) above, which stays unresolved and needs its own decision.
+     the accept-staleness direction from the open scope question above, applied
+     specifically to page-break visual continuity: it resolves only that half of the
+     question, not the numbering/`#set`/footnote correctness problem (a sibling
+     block showing wrong *content*, not just wrong position) above, which stays
+     unresolved and needs its own decision.
   3. M16 records two datasets before deciding on invalidation strategy: (i) which
      pages/blocks actually show geometry/render changes after an edit at a given
      position; (ii) whole-document settle latency at 10/20/40 pages. Reuse M14's

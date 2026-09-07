@@ -6,11 +6,14 @@ mod geometry;
 mod jump;
 mod typst_world;
 
+use std::sync::Mutex;
+
 use ast::parse_typst_ast;
 use asset::read_image_as_data_url;
 use compile::compile_typst;
 use export::export_pdf;
 use jump::{jump_from_click, jump_from_cursor};
+use typst_world::TauriWorld;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,6 +22,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        // Held for the app's lifetime (plan.md M14's follow-up (a)) so
+        // `compile_typst` can apply incremental `Source::edit`s instead of
+        // reconstructing a `TauriWorld` from scratch on every keystroke —
+        // see compile.rs's module doc comment.
+        .manage(Mutex::new(TauriWorld::new(String::new(), None)))
         .invoke_handler(tauri::generate_handler![
             compile_typst,
             export_pdf,

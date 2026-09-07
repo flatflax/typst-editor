@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG | M13–M17 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A done (M14: partial-negative — see below); M15 next |
+| 3 — Single-View WYSIWYG | M13–M17 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A done (M14: partial-negative — see below); M15 in progress |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
@@ -69,5 +69,12 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
   content pulled out of flow (footnotes) fall out for free. No coarse-bounding-box
   fallback needed. Prototype and limitations in
   [doc/phase3-single-view.md](doc/phase3-single-view.md) (`geometry.rs`).
-- **M15–M17 — next.** Per-block render/edit swap, reflow/pagination handling, cursor
-  continuity across swaps, building on M14/M14A's findings above.
+- **M15 — in progress.** Per-block render/edit swap. First slice landed:
+  `compile_typst` now holds one `TauriWorld` per app session instead of
+  reconstructing one per call, applying each incoming full-document string as a
+  diffed `Source::edit` (M14's follow-up (a)) — IPC shape unchanged, only the
+  backend's handling of repeated calls. Swap UI and wiring `geometry_for_range`
+  (M14A) to a real command haven't started. Detail in
+  [doc/phase3-single-view.md](doc/phase3-single-view.md).
+- **M16–M17 — blocked on M15.** Reflow/pagination handling, cursor continuity
+  across swaps.

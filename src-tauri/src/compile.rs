@@ -1,7 +1,23 @@
 //! `compile_typst` Tauri command: takes raw Typst source, compiles it with
 //! the real Typst engine, and returns a merged SVG preview plus diagnostics.
+//!
+//! M14 (plan.md) measured that a fresh `TauriWorld`/`Source` per call
+//! discards `comemo`'s memoization entirely, and that a session-held
+//! `World` + `Source::edit` is a low-risk win for the common case (repeat
+//! compiles of unchanged content become near-free). This module now holds
+//! one `TauriWorld` per app session (`Mutex<TauriWorld>`, managed in
+//! lib.rs) instead of constructing one per call — matching `typst::World`'s
+//! own doc comment: "Advanced clients like language servers can also retain
+//! the source files and edit them in-place to benefit from better
+//! incremental performance." The frontend still sends the whole current
+//! document on every call (unchanged IPC shape); `compute_edit` recovers the
+//! underlying single-keystroke edit by diffing it against the session's
+//! previous text, since Typst has no API to apply an edit without first
+//! knowing its byte range.
 
+use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::Serialize;
 use typst::diag::{EcoVec, Severity, SourceDiagnostic};
@@ -66,18 +82,64 @@ pub(crate) fn diagnostics_to_string(world: &TauriWorld, diags: &EcoVec<SourceDia
         .join("\n")
 }
 
-/// `base_dir` (plan.md M11) is the open document's directory (`None` before
-/// any file has been opened/saved), used to resolve `#image("path")` — see
-/// `TauriWorld::file`. Threaded through from `App.tsx`'s `filePath` on every
-/// compile, not just at load time, so editing/saving-as a document with
-/// relative image paths always resolves against whatever is currently open.
-#[tauri::command]
-pub fn compile_typst(source: String, base_dir: Option<String>) -> CompileResult {
-    let world = TauriWorld::new(source, base_dir.map(PathBuf::from));
-    let warned = typst::compile::<PagedDocument>(&world);
+/// The smallest `Source::edit`-compatible edit (byte range to replace, plus
+/// replacement text) that turns `old` into `new`: trim the longest common
+/// prefix and suffix, snapped to UTF-8 char boundaries so a shared prefix/
+/// suffix that happens to end mid-multi-byte-character never produces an
+/// invalid byte range. A single keystroke anywhere in the document reduces
+/// to a small edit at that point; pasting or replacing the whole document
+/// reduces to one large edit spanning most of it — both are just points on
+/// the same continuum, not special-cased.
+fn compute_edit<'new>(old: &str, new: &'new str) -> (Range<usize>, &'new str) {
+    let prefix = common_prefix_len(old, new);
+    let max_suffix = old.len().min(new.len()) - prefix;
+    let suffix = common_suffix_len(old, new, max_suffix);
+    (prefix..old.len() - suffix, &new[prefix..new.len() - suffix])
+}
+
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    let mut len = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    while len > 0 && !(a.is_char_boundary(len) && b.is_char_boundary(len)) {
+        len -= 1;
+    }
+    len
+}
+
+/// Common suffix length of `a`/`b`, capped at `max` so it can never overlap
+/// a prefix already claimed by [`common_prefix_len`].
+fn common_suffix_len(a: &str, b: &str, max: usize) -> usize {
+    let mut len = 0;
+    for (x, y) in a.bytes().rev().zip(b.bytes().rev()) {
+        if len >= max || x != y {
+            break;
+        }
+        len += 1;
+    }
+    while len > 0 && !(a.is_char_boundary(a.len() - len) && b.is_char_boundary(b.len() - len)) {
+        len -= 1;
+    }
+    len
+}
+
+/// The actual, testable compile logic: apply `source`/`base_dir` to a
+/// caller-held `TauriWorld` — via a diffed incremental `Source::edit`, not a
+/// reconstruction — and compile. Split out from the `#[tauri::command]`
+/// below purely so tests can call it directly against a `TauriWorld` they
+/// construct themselves, without needing a running Tauri app to obtain a
+/// `State`.
+fn compile_with_world(world: &mut TauriWorld, source: String, base_dir: Option<PathBuf>) -> CompileResult {
+    world.set_base_dir(base_dir);
+
+    let old_text = world.text();
+    if old_text != source {
+        let (range, replacement) = compute_edit(old_text, &source);
+        world.edit_source(range, replacement);
+    }
+
+    let warned = typst::compile::<PagedDocument>(&*world);
 
     let mut diagnostics: Vec<CompileDiagnostic> =
-        warned.warnings.iter().map(|d| to_diagnostic(&world, d)).collect();
+        warned.warnings.iter().map(|d| to_diagnostic(world, d)).collect();
 
     match warned.output {
         Ok(document) => {
@@ -85,23 +147,176 @@ pub fn compile_typst(source: String, base_dir: Option<String>) -> CompileResult 
             CompileResult { svg: Some(svg), diagnostics }
         }
         Err(errors) => {
-            diagnostics.extend(errors.iter().map(|d| to_diagnostic(&world, d)));
+            diagnostics.extend(errors.iter().map(|d| to_diagnostic(world, d)));
             CompileResult { svg: None, diagnostics }
         }
     }
+}
+
+/// `base_dir` (plan.md M11) is the open document's directory (`None` before
+/// any file has been opened/saved), used to resolve `#image("path")` — see
+/// `TauriWorld::file`. Threaded through from `App.tsx`'s `filePath` on every
+/// compile, not just at load time, so editing/saving-as a document with
+/// relative image paths always resolves against whatever is currently open
+/// (a session's `TauriWorld` outlives any single open document, so this is
+/// applied fresh on every call rather than only at session start).
+///
+/// `session` is this app's single `TauriWorld`, held for the process
+/// lifetime (managed in lib.rs) — see this module's doc comment for why.
+#[tauri::command]
+pub fn compile_typst(
+    source: String,
+    base_dir: Option<String>,
+    session: tauri::State<'_, Mutex<TauriWorld>>,
+) -> CompileResult {
+    let mut world = session.lock().unwrap();
+    compile_with_world(&mut world, source, base_dir.map(PathBuf::from))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Shadows the outer 2-arg `compile_typst` for every existing test below —
-    // none of them care about image-path resolution (plan.md M11), so this
-    // avoids threading `, None` through every one of them individually.
-    // `file_resolution` (below) exercises the real `base_dir`-aware command
-    // directly via `super::compile_typst`.
+    // The outer `compile_typst` is now a thin `#[tauri::command]` shim over
+    // `compile_with_world` (a `tauri::State` isn't constructible without a
+    // running Tauri app) — these helpers call `compile_with_world` directly
+    // against a fresh `TauriWorld` instead, giving every test below the same
+    // per-call isolation the old 2-arg `compile_typst` had (no session
+    // persists *between* tests; the `session_*` tests further down exercise
+    // persistence *within* one deliberately).
+    fn compile_typst_with_base_dir(source: String, base_dir: Option<String>) -> CompileResult {
+        let mut world = TauriWorld::new(String::new(), None);
+        compile_with_world(&mut world, source, base_dir.map(PathBuf::from))
+    }
+
     fn compile_typst(source: String) -> CompileResult {
-        super::compile_typst(source, None)
+        compile_typst_with_base_dir(source, None)
+    }
+
+    mod compute_edit_tests {
+        use super::compute_edit;
+
+        #[test]
+        fn identical_strings_produce_an_empty_edit() {
+            let (range, replacement) = compute_edit("hello world", "hello world");
+            assert_eq!(range, 11..11);
+            assert_eq!(replacement, "");
+        }
+
+        #[test]
+        fn a_single_inserted_character_is_a_minimal_edit() {
+            let (range, replacement) = compute_edit("hello world", "hello, world");
+            assert_eq!(range, 5..5);
+            assert_eq!(replacement, ",");
+        }
+
+        #[test]
+        fn a_deletion_in_the_middle_is_a_minimal_edit() {
+            let (range, replacement) = compute_edit("hello world", "hello orld");
+            assert_eq!(range, 6..7);
+            assert_eq!(replacement, "");
+        }
+
+        #[test]
+        fn totally_different_strings_still_produce_a_valid_edit() {
+            let (range, replacement) = compute_edit("abc", "xyz");
+            assert_eq!(range, 0..3);
+            assert_eq!(replacement, "xyz");
+        }
+
+        #[test]
+        fn empty_old_string_is_a_pure_insertion() {
+            let (range, replacement) = compute_edit("", "new content");
+            assert_eq!(range, 0..0);
+            assert_eq!(replacement, "new content");
+        }
+
+        #[test]
+        fn empty_new_string_is_a_pure_deletion() {
+            let (range, replacement) = compute_edit("old content", "");
+            assert_eq!(range, 0..11);
+            assert_eq!(replacement, "");
+        }
+
+        /// The char-boundary-snapping regression guard: U+4E00 ("一") and
+        /// U+4E01 ("丁") both encode as 3 UTF-8 bytes sharing their first two
+        /// bytes (`E4 B8`) and differing only in the third (`80` vs `81`) —
+        /// so a naive byte-by-byte common-prefix scan finds 2 matching bytes
+        /// before the mismatch, landing *inside* the character rather than
+        /// before or after it. Slicing a string at a non-boundary byte index
+        /// panics, so every computed boundary must land on a real char
+        /// boundary in *both* strings, not just wherever bytes stop matching.
+        #[test]
+        fn multi_byte_characters_never_produce_a_boundary_inside_a_character() {
+            let old = "丁二三四五";
+            let new = "一二三四五";
+            let (range, replacement) = compute_edit(old, new);
+            assert!(old.is_char_boundary(range.start) && old.is_char_boundary(range.end));
+            assert_eq!(range, 0..3, "should snap down to replacing the whole first character");
+            assert_eq!(replacement, "一");
+            // Applying the edit must reproduce `new` exactly.
+            let mut rebuilt = old.to_string();
+            rebuilt.replace_range(range, replacement);
+            assert_eq!(rebuilt, new);
+        }
+    }
+
+    /// A session-held `TauriWorld` (M14's follow-up (a), now real rather
+    /// than benchmark-only) must keep producing *correct* output across a
+    /// sequence of incremental edits, not just fast ones — M14's own
+    /// benchmarks already covered speed; these cover correctness of the
+    /// diff-then-`Source::edit` path `compile_with_world` now always takes.
+    #[test]
+    fn a_session_produces_correct_output_across_a_sequence_of_incremental_edits() {
+        let mut world = TauriWorld::new(String::new(), None);
+
+        let first = compile_with_world(&mut world, "= Hello".into(), None);
+        assert!(first.diagnostics.is_empty());
+        assert!(first.svg.is_some());
+
+        // Same content as a from-scratch compile would produce — this is
+        // the correctness property that matters, not merely "doesn't crash".
+        let expected_after_edit = compile_typst("= Hello, world!".into());
+        let after_edit = compile_with_world(&mut world, "= Hello, world!".into(), None);
+        assert_eq!(after_edit.svg, expected_after_edit.svg);
+
+        // An edit that introduces an error, then one that fixes it again —
+        // the session must recover cleanly in both directions.
+        let broken = compile_with_world(&mut world, "#unknown_function()".into(), None);
+        assert!(broken.svg.is_none());
+        assert!(!broken.diagnostics.is_empty());
+
+        let expected_fixed = compile_typst("= Hello, world!".into());
+        let fixed = compile_with_world(&mut world, "= Hello, world!".into(), None);
+        assert_eq!(fixed.svg, expected_fixed.svg);
+        assert!(fixed.diagnostics.is_empty());
+    }
+
+    /// `base_dir` must update within a session (e.g. after Save As), not
+    /// only at construction — `TauriWorld` outlives any single open
+    /// document now, unlike before this change.
+    #[test]
+    fn a_session_resolves_images_against_a_base_dir_set_after_construction() {
+        let dir = std::env::temp_dir().join(format!("typst-editor-test-session-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("photo.png"), minimal_png()).unwrap();
+
+        let mut world = TauriWorld::new(String::new(), None);
+        compile_with_world(&mut world, "no image yet".into(), None);
+
+        let result = compile_with_world(
+            &mut world,
+            "#image(\"photo.png\")".into(),
+            Some(dir.clone()),
+        );
+        assert!(
+            result.diagnostics.iter().all(|d| d.severity != "error"),
+            "unexpected error diagnostics: {:?}",
+            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(result.svg.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -219,7 +434,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("photo.png"), minimal_png()).unwrap();
 
-        let result = super::compile_typst("#image(\"photo.png\")".into(), Some(dir.to_str().unwrap().into()));
+        let result = compile_typst_with_base_dir("#image(\"photo.png\")".into(), Some(dir.to_str().unwrap().into()));
         assert!(
             result.diagnostics.iter().all(|d| d.severity != "error"),
             "unexpected error diagnostics: {:?}",
@@ -239,7 +454,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let result =
-            super::compile_typst("#image(\"nope.png\")".into(), Some(dir.to_str().unwrap().into()));
+            compile_typst_with_base_dir("#image(\"nope.png\")".into(), Some(dir.to_str().unwrap().into()));
         assert!(result.svg.is_none());
         assert!(!result.diagnostics.is_empty());
         assert_eq!(result.diagnostics[0].severity, "error");
@@ -260,7 +475,7 @@ mod tests {
         std::fs::create_dir_all(&base_dir).unwrap();
         std::fs::write(root.join("secret.png"), minimal_png()).unwrap();
 
-        let result = super::compile_typst(
+        let result = compile_typst_with_base_dir(
             "#image(\"../secret.png\")".into(),
             Some(base_dir.to_str().unwrap().into()),
         );

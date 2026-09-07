@@ -61,13 +61,29 @@ impl TauriWorld {
     /// (`typst_syntax::Source::edit`'s own incremental reparse), preserving
     /// this `TauriWorld`'s `FileId` — the same mechanism `typst-cli
     /// --watch` relies on for `comemo`'s memoization to skip recomputing
-    /// anything unaffected by the edit. Exposed for M14's incremental-vs.
-    /// fresh-`World` recompile benchmark (compile.rs); the `compile_typst`
-    /// Tauri command itself still constructs a fresh `TauriWorld` per call
-    /// (see compile.rs's doc comment for what that measurement showed).
-    #[cfg(test)]
+    /// anything unaffected by the edit. First exposed for M14's
+    /// incremental-vs.-fresh-`World` recompile benchmark; `compile_typst`
+    /// (compile.rs) now uses this for real, against a session-held
+    /// `TauriWorld` (M14's follow-up (a)) rather than a fresh one per call.
     pub(crate) fn edit_source(&mut self, replace: std::ops::Range<usize>, with: &str) {
         self.source.edit(replace, with);
+    }
+
+    /// The full current text of the in-memory source — lets a caller holding
+    /// a session's `TauriWorld` diff it against an incoming full-document
+    /// string to compute the minimal edit for [`Self::edit_source`], without
+    /// the frontend having to track/send an explicit diff itself.
+    pub(crate) fn text(&self) -> &str {
+        self.source.text()
+    }
+
+    /// Updates the resolution root for `#image(...)` paths (plan.md M11) in
+    /// place, without touching the source/`FileId` — a session's
+    /// `TauriWorld` outlives any single open document, so this needs to be
+    /// mutable independently of `edit_source`, e.g. after Save As or opening
+    /// a different file.
+    pub(crate) fn set_base_dir(&mut self, base_dir: Option<PathBuf>) {
+        self.base_dir = base_dir;
     }
 }
 

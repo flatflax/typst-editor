@@ -11,6 +11,12 @@
 //! point, generalized to a range and to collecting geometry instead of just
 //! a byte offset. See phase3-single-view.md for the recorded findings and
 //! their consequence for M15.
+//!
+//! Not yet wired to a Tauri command or consumed outside its own tests — M15
+//! is what will call this for real (positioning the render/edit swap); until
+//! then everything here is only reachable from `#[cfg(test)]`, hence the
+//! blanket allow rather than one per item.
+#![allow(dead_code)]
 
 use std::ops::Range;
 
