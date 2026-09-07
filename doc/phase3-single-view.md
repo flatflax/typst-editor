@@ -7,7 +7,7 @@ Architecture reference: [architecture.md](architecture.md). Design rules: [desig
 The goal: one view, no separate preview pane, backed by real Typst rendering — made
 feasible by fast-enough recompilation (M14, done for short/medium documents — see
 below for the measured limit) and by mapping source ranges to rendered geometry (M14A,
-still an open question). An earlier framing assumed single-view meant
+done — see below). An earlier framing assumed single-view meant
 hand-rolling cursor/selection/IME directly on the compiled SVG/Frame output — an
 open-ended rewrite, correctly rejected for the MVP.
 
@@ -32,9 +32,9 @@ exposes real cases).
 
 ## Milestones
 
-Tentative — M14 and M14A are feasibility spikes the rest depend on; M14 is done (see
-its entry for the result), M14A remains the open gate. The perf baseline task below
-is not part of that dependency chain (see its own entry for why).
+Tentative — M14 and M14A were feasibility spikes M15+ depended on; both are now done
+(see their entries for results and follow-on design notes for M15/M16). The perf
+baseline task below is not part of that dependency chain (see its own entry for why).
 
 **M13 — Node-type dispatch refactor — done.** Not part of the single-view mechanism
 itself; landed ahead of the next content node type. `spokes/markdown.ts`/
@@ -76,6 +76,14 @@ per-milestone; (3) double as an ongoing regression guard for M14's linear-in-pag
 recompile-latency finding (above) — the per-size sweep should keep failing loudly if a
 future change makes the scaling worse, or should stop showing the linear trend at all
 once a session-held `World` (M14's follow-up (a)) actually lands.
+- **Follow-up: vary edit position, not just document size.** M14's table varies page
+  count and edit-vs-no-edit but never *where* in the document the edit lands. Cross the
+  existing size sweep with an edit-position axis (near the document's start / middle /
+  end) to separate two explanations for the linear-in-pages result: cost tracking
+  *total document size* vs. cost tracking *content after the edit point*. If near-end
+  edits stay cheap independent of document length while near-start edits scale with it,
+  that's direct evidence a bounded-window recompile (M16's undecided direction (a)) is a
+  real lever, not just a plausible-sounding idea.
 
 **M14 — Incremental compilation feasibility spike — done, partial-negative
 result.** Benchmarked in `src-tauri/src/compile.rs`
@@ -128,19 +136,61 @@ Measurements (release mode, synthetic multi-section fixture — see
   to apply at the *compile* layer, not just the reposition layer its current
   wording assumes.
 
-**M14A — Layout geometry spike (not started).** Companion to M14; prerequisite for
-M15's swap positioning and M16's reflow. `jump_from_cursor` currently returns only a
-single `Point` per source position. M15 needs, for an arbitrary source byte range
-`[a, b]`: page(s) it renders on, x/y position, width/height, baseline (to align an
-editable view with its rendered counterpart), line boxes (one per soft-wrapped visual
-line), and fragment boxes (one per disjoint rendered fragment, for content pulled out
-of flow). Deliverable is whether `typst::layout`/`typst-ide`'s `Frame` data exposes
-this cleanly, or needs deeper Rust-side Frame-walking. If not obtainable, M15 falls
-back to coarser per-block bounding boxes only (no baseline alignment, no sub-block
-fragments) — a call to make before M15 starts.
+**M14A — Layout geometry spike — done, positive result.** Prototyped in
+`src-tauri/src/geometry.rs` (`geometry_for_range`): given a source byte range, walk
+every page's `Frame` tree and collect every rendered item whose span overlaps it —
+the same span-matching `jump_from_click`/`jump_from_cursor` (`typst-ide`, jump.rs)
+already do for a single point, generalized to a range and to collecting geometry
+(page, x/y, width/height, baseline) instead of just a byte offset. 6 tests, each
+checking one piece of what M15 needs:
 
-**M15 — Direct-content render/edit swap (blocked on M14A; M14's linear-in-pages
-recompile cost, above, is a design input, not a blocker).** Extend PM node views
+| What M15 needs | Verified by | Result |
+|---|---|---|
+| Page(s) a range renders on | `a_range_crossing_a_page_break_yields_boxes_on_both_pages` | ✅ direct from per-page walk |
+| x/y, width/height | `a_single_line_paragraph_...`, `an_image_yields_an_exact_size_box_...` | ✅ exact for images (`FrameItem::Image`'s own `Size`); approximated from font size for text (see below) |
+| Baseline | `a_single_line_paragraph_...` (`baseline_from_top_pt`) | ✅ a `Text` item's frame position *is* its baseline — no extra API needed |
+| Line boxes (one per wrapped line) | `a_wrapped_paragraph_yields_one_line_box_per_visual_line` | ✅, but reconstructed by clustering glyph hits with matching baselines — see limitation below |
+| Fragment boxes (content pulled out of flow) | `a_footnote_body_is_locatable_even_though_it_renders_away_from_its_reference` | ✅ falls out for free — a footnote body's span still resolves to a real box wherever it actually renders |
+
+Mechanism: each `Glyph` carries `span: (Span, u16)` — a syntax node span plus a
+per-glyph byte offset within it — so `world.range(span).start + offset` gives the
+*exact* source byte position of that specific glyph (the same computation
+`jump_from_click_in_frame` does for click hit-testing), not just "this whole text run
+overlaps somewhere." Checking that offset against the target range, per glyph, is
+enough to collect every hit; `FrameItem::Image`/`Shape` carry one span for their whole
+item instead.
+
+Two real limitations, not blockers:
+- **No explicit per-line boundary in `Frame` itself.** `Frame::push_frame` inlines
+  ("flattens") short soft sub-frames (≤5 items) into their parent rather than keeping
+  them as a nested `Group` — which is what a single-style text line normally is (one
+  `FrameItem::Text` per style). So line boxes are reconstructed here by clustering
+  glyph hits that share a page and baseline, not by reading an authoritative
+  "line N" boundary off the tree. This worked cleanly on every fixture tried, but two
+  genuinely different lines that happen to share an identical baseline (e.g. a
+  multi-column layout) would currently merge into one box — untested, and would need
+  an x-discontinuity check added to the clustering, not a different approach.
+  Real font-metrics ascent/descent also aren't exposed per glyph run, only the font
+  size used to lay it out — `geometry.rs` uses the same size-based approximation
+  `typst-ide` itself uses for click hit-testing (jump.rs), which is precise enough to
+  align an overlay but isn't the font's actual metrics.
+- **`Group` transforms aren't composed**, only translated — `geometry_for_range`
+  accumulates each nested frame's *position* but not `GroupItem::transform`'s
+  rotation/scale. Correct for ordinary flow content (paragraphs, headings, lists,
+  images — everything M15's swap mechanism scopes to), wrong under `#rotate`/`#scale`
+  (out of M15's stated scope anyway). `jump_from_click_in_frame` already has the
+  matrix-inversion code (`Transform::invert`/`Point::transform_inf`) this would need
+  to reuse if that scope ever grows.
+
+**Consequence for M15+**: no fallback to coarse per-block bounding boxes is needed —
+`Frame` data, walked the same way `typst-ide` already walks it for click/cursor sync,
+gives real line-level boxes with baselines and correctly locates content rendered
+away from its source position (footnotes) or across a page break. M15 can build
+directly on this rather than redesigning around a coarser data source.
+
+**M15 — Direct-content render/edit swap (unblocked — M14/M14A both done; their
+findings above, session-held `World` and glyph-span-based geometry, are design inputs
+to build on, not blockers).** Extend PM node views
 so each top-level block that is both geometry-producing and directly authored
 (paragraph, heading, list item, table, image, ...) presents as either an inline
 Typst-rendered SVG fragment (inactive) or today's editable node view (active),
@@ -186,10 +236,10 @@ load-bearing infrastructure firing on every click.
   first version to accept some inaccuracy rather than solving this upfront.
 - **Page-boundary UX is genuinely undefined** — decide as a product call before
   building M15, not during.
-- **M14A is a hard gate**: if it shows stable per-range geometry isn't obtainable from
-  `Frame` data, the M15+ milestone plan needs revisiting (a coarser bounding-box-only
-  fallback is a bigger lift than sketched above) before further design or
-  implementation time is spent.
+- **M14A's line-box reconstruction is a heuristic (baseline clustering), not an API
+  guarantee** — two visually distinct lines sharing an exact baseline (e.g. a
+  multi-column layout) would currently merge into one box. Untested; would need an
+  x-discontinuity check added before M15 relies on it for that case.
 - **M14's measured linear-in-pages recompile cost** (above) means whole-doc
   recompile-and-swap will feel laggy on long documents even though it's fine for
   short/medium ones — M15/M16 need to design for this explicitly (session-held

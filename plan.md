@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG | M13–M17 | Collapse the editing surface and preview into one — the long-term product target | M13/M14 done (M14: partial-negative — see below); M14A not started |
+| 3 — Single-View WYSIWYG | M13–M17 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A done (M14: partial-negative — see below); M15 next |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
@@ -58,10 +58,12 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
   pagination pass is inherently whole-document-sequential). Doesn't block M15, but
   M15/M16 must design around this cost. Measurements and consequences in
   [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M14A — not started.** Feasibility spike: can `typst-ide`/`Frame` data yield stable
-  per-range rendered geometry (page/x/y/width/height/baseline/line boxes)?
-- **M15–M17 — blocked on M14A.** Per-block render/edit swap, reflow/pagination
-  handling, cursor continuity across swaps.
-
-M14A is a hard gate: a negative result requires redesigning M15+ before further
-implementation.
+- **M14A — done, positive.** `Frame` data (via `typst-ide`'s own span-matching
+  mechanism, generalized from a point to a range) does cleanly yield page, x/y,
+  width/height, and baseline; line boxes are reconstructed by clustering same-baseline
+  glyph hits (`Frame` doesn't preserve a per-line boundary itself); fragment boxes for
+  content pulled out of flow (footnotes) fall out for free. No coarse-bounding-box
+  fallback needed. Prototype and limitations in
+  [doc/phase3-single-view.md](doc/phase3-single-view.md) (`geometry.rs`).
+- **M15–M17 — next.** Per-block render/edit swap, reflow/pagination handling, cursor
+  continuity across swaps, building on M14/M14A's findings above.

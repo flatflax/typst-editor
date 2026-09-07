@@ -2,6 +2,7 @@ mod ast;
 mod asset;
 mod compile;
 mod export;
+mod geometry;
 mod jump;
 mod typst_world;
 
