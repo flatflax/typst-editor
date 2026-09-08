@@ -112,29 +112,49 @@ export function caretRectFromBoxes(
   return null;
 }
 
-// Empirical: real Typst baseline-to-baseline line spacing (font size +
-// default paragraph leading) measured about 1.38x the font size in a sample
-// document (two consecutive text lines' SVG transforms 19.36pt apart at
-// 14pt text — see the M18 IME harness's generated SVG). `caret.heightPt`
-// (ascent+descent alone, ~1.25x font size) undershoots that by ~10% —
-// small per press, but enough that a synthesized click sometimes landed
-// back on the *same* line instead of clearing into the next one, which
-// read as "Up/Down doesn't work." This multiplier adds a safety margin
-// beyond just closing that gap exactly, since real leading varies by font/
-// size and undershooting fails outright while overshooting merely risks
-// skipping into the line beyond the immediate next one.
-const LINE_STEP_MULTIPLIER = 1.4;
+// A line/shape box reduced to just what vertical navigation needs — real
+// geometry to search through, not a distance to guess. `AbsoluteRect` (used
+// for selection highlights) keeps x/width too, which this doesn't need.
+export type LineBox = {
+  yTopPt: number;
+  heightPt: number;
+};
 
-// Where a synthesized click should land (in the merged coordinate space) to
-// move the caret up/down by approximately one line — `caret.heightPt` (the
-// full ascent+descent box, not the trimmed `visualHeightPt`) is used as the
-// line-height estimate, so it degrades gracefully across differently-sized
-// text but isn't exact for varying line heights within a paragraph.
-// `jump_from_click` (jump.rs, fixed for M20) resolves whichever page this Y
-// actually falls on and clamps to the document's start/end, so overshooting
-// slightly at the first/last line is fine.
-export function verticalMoveTargetY(caret: CaretRect, direction: "up" | "down"): number {
-  const midY = caret.yTopPt + caret.heightPt / 2;
-  const step = caret.heightPt * LINE_STEP_MULTIPLIER;
-  return direction === "up" ? midY - step : midY + step;
+export function lineBoxesFromRaw(pageOffsetsPt: number[], boxes: RawRangeBox[]): LineBox[] {
+  return boxes.map((box) => {
+    const abs = toAbsolute(pageOffsetsPt, box);
+    return { yTopPt: abs.yTopPt, heightPt: abs.heightPt };
+  });
+}
+
+// Line spacing genuinely differs across block types in the same document —
+// a heading's line height, a paragraph's, and a list item's are all
+// different, and Typst's own block spacing (space after a heading, spacing
+// between list items) adds further variance on top of plain line leading.
+// An earlier version of this function stepped by a multiplier of the
+// *current* line's own height, which is exactly the assumption that breaks
+// here: moving down from a heading skipped over the paragraph's first
+// wrapped line entirely (the heading's line height overshot it), moving
+// down from a list item's first line sometimes didn't move at all
+// (undershot the gap to the next item), and moving up from body text past a
+// list skipped its last item (same overshoot, opposite direction). No
+// single multiplier holds across all three.
+//
+// This finds the real nearest line instead of guessing: given every line
+// box in the (rendered) document, or a window around the caret, return
+// whichever one sits strictly above/below `currentYPt` and is closest to
+// it. `EPSILON_PT` absorbs floating-point noise and multiple boxes
+// belonging to the *same* visual line (e.g. a line rendered as several
+// glyph-run hits) without needing exact equality.
+const SAME_LINE_EPSILON_PT = 0.5;
+
+export function nearestAdjacentLine(lines: LineBox[], currentYPt: number, direction: "up" | "down"): LineBox | null {
+  const candidates = lines.filter((line) =>
+    direction === "down" ? line.yTopPt > currentYPt + SAME_LINE_EPSILON_PT : line.yTopPt < currentYPt - SAME_LINE_EPSILON_PT,
+  );
+  if (candidates.length === 0) return null;
+  return candidates.reduce((closest, line) => {
+    const isCloser = direction === "down" ? line.yTopPt < closest.yTopPt : line.yTopPt > closest.yTopPt;
+    return isCloser ? line : closest;
+  });
 }

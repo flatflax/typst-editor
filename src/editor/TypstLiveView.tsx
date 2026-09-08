@@ -19,11 +19,13 @@ import type { EditorDiagnostic } from "./SourceEditor";
 import { svgPointFromClient } from "../util/svgGeometry";
 import {
   caretRectFromBoxes,
+  lineBoxesFromRaw,
+  nearestAdjacentLine,
   selectionRectsFromBoxes,
   stepByteOffset,
-  verticalMoveTargetY,
   type AbsoluteRect,
   type CaretRect,
+  type LineBox,
   type RawRangeBox,
 } from "./typstCursor";
 
@@ -98,6 +100,37 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
     } catch {
       return null;
     }
+  }
+
+  // Every line box in the document, for vertical navigation
+  // (`nearestAdjacentLine`) to search — real line-spacing data, not a
+  // guessed multiplier, since line spacing genuinely differs across block
+  // types (headings vs. body text vs. list items). Cached per `source`
+  // string so a burst of Up/Down presses (or plain repeated navigation)
+  // doesn't re-fetch the whole document's geometry on every keypress; the
+  // cache is naturally invalidated once the document actually changes
+  // (M21) since `source` itself will differ then.
+  const documentLinesCacheRef = useRef<{ source: string; lines: Promise<LineBox[]> } | null>(null);
+  function fetchDocumentLines(): Promise<LineBox[]> {
+    if (documentLinesCacheRef.current?.source === source) {
+      return documentLinesCacheRef.current.lines;
+    }
+    const promise = (async () => {
+      const byteLen = new TextEncoder().encode(source).length;
+      if (byteLen === 0) return [];
+      try {
+        const results = await invoke<RawRangeBox[][]>("block_geometry", {
+          source,
+          baseDir: documentDir,
+          ranges: [[0, byteLen]],
+        });
+        return lineBoxesFromRaw(pageOffsetsPt, results[0]);
+      } catch {
+        return [];
+      }
+    })();
+    documentLinesCacheRef.current = { source, lines: promise };
+    return promise;
   }
 
   // Re-derive displayed geometry whenever the cursor/selection or the
@@ -206,16 +239,20 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
     // dropped rapid Up/Down presses.
     const fromRect = await fetchCaretRect(cursorOffsetRef.current);
     if (fromRect) {
-      const xPt = preferredXPtRef.current ?? fromRect.xPt;
-      preferredXPtRef.current = xPt;
-      const targetY = verticalMoveTargetY(fromRect, next.direction);
-      const offset = await invoke<number | null>("jump_from_click", {
-        source,
-        xPt,
-        yPt: targetY,
-        baseDir: documentDir,
-      }).catch(() => null);
-      if (offset != null) moveTo(offset, next.extend);
+      const lines = await fetchDocumentLines();
+      const target = nearestAdjacentLine(lines, fromRect.yTopPt, next.direction);
+      if (target) {
+        const xPt = preferredXPtRef.current ?? fromRect.xPt;
+        preferredXPtRef.current = xPt;
+        const targetY = target.yTopPt + target.heightPt / 2;
+        const offset = await invoke<number | null>("jump_from_click", {
+          source,
+          xPt,
+          yPt: targetY,
+          baseDir: documentDir,
+        }).catch(() => null);
+        if (offset != null) moveTo(offset, next.extend);
+      }
     }
     drainVerticalMoveQueue();
   }

@@ -389,6 +389,17 @@
   position: relative;
   outline: none;
   cursor: text;
+  /* `.typst-live-view`'s flex column defaults every child to `align-items:
+     stretch`, which would stretch this to the *container's* full width --
+     wider than the SVG's own rendered width whenever the window is wide
+     enough that `max-width: 100%` isn't the binding constraint (it only
+     ever shrinks, never grows past the SVG's intrinsic size). That
+     mismatch made the overlay <svg> below (sized to 100% of *this* box)
+     center itself via its default `preserveAspectRatio` inside slack width
+     the real content doesn't have -- correct in a narrow window, visibly
+     offset once the window was wide/maximized. `flex-start` makes this
+     shrink-wrap to its actual content (the SVG) instead. */
+  align-self: flex-start;
 }
 
 .typst-live-stage svg {

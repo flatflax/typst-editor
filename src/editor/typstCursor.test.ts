@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   caretRectFromBoxes,
+  lineBoxesFromRaw,
+  nearestAdjacentLine,
   selectionRectsFromBoxes,
   stepByteOffset,
-  verticalMoveTargetY,
   type RawRangeBox,
 } from "./typstCursor";
 
@@ -120,18 +121,54 @@ describe("stepByteOffset", () => {
   });
 });
 
-describe("verticalMoveTargetY", () => {
-  it("moves up by more than one full line height, from the caret's vertical center", () => {
-    const caret = { xPt: 0, yTopPt: 100, heightPt: 12, visualHeightPt: 9 };
-    const target = verticalMoveTargetY(caret, "up");
-    expect(target).toBeLessThan(100 + 6 - 12); // clears a full line height...
-    expect(target).toBeCloseTo(100 + 6 - 12 * 1.4); // ...by the empirical safety margin
+describe("lineBoxesFromRaw", () => {
+  it("reduces raw boxes to just yTopPt/heightPt in the merged coordinate space", () => {
+    const pageOffsetsPt = [0, 300];
+    const lines = lineBoxesFromRaw(pageOffsetsPt, [box({ page: 2, y_top_pt: 20, height_pt: 12 })]);
+    expect(lines).toEqual([{ yTopPt: 320, heightPt: 12 }]);
+  });
+});
+
+describe("nearestAdjacentLine", () => {
+  // The three real failure modes found testing a document mixing a heading,
+  // a wrapped paragraph, and a bullet list -- a single guessed multiplier of
+  // "the current line's own height" couldn't handle all three at once
+  // (see this function's own doc comment).
+  it("does not skip past a paragraph's first wrapped line when moving down from a heading", () => {
+    // A heading's own line is much taller than the body text below it.
+    const headingLine = { yTopPt: 0, heightPt: 30 };
+    const paragraphLine1 = { yTopPt: 40, heightPt: 12 };
+    const paragraphLine2 = { yTopPt: 55, heightPt: 12 };
+    const lines = [headingLine, paragraphLine1, paragraphLine2];
+    expect(nearestAdjacentLine(lines, headingLine.yTopPt, "down")).toEqual(paragraphLine1);
   });
 
-  it("moves down by more than one full line height, from the caret's vertical center", () => {
-    const caret = { xPt: 0, yTopPt: 100, heightPt: 12, visualHeightPt: 9 };
-    const target = verticalMoveTargetY(caret, "down");
-    expect(target).toBeGreaterThan(100 + 6 + 12);
-    expect(target).toBeCloseTo(100 + 6 + 12 * 1.4);
+  it("moves to the very next list item even when list-item spacing exceeds plain line height", () => {
+    const item1 = { yTopPt: 0, heightPt: 12 };
+    const item2 = { yTopPt: 25, heightPt: 12 }; // gap wider than heightPt alone
+    const lines = [item1, item2];
+    expect(nearestAdjacentLine(lines, item1.yTopPt, "down")).toEqual(item2);
+  });
+
+  it("does not skip a list's last item when moving up from the paragraph after it", () => {
+    const item1 = { yTopPt: 0, heightPt: 12 };
+    const item2 = { yTopPt: 20, heightPt: 12 };
+    const paragraph = { yTopPt: 45, heightPt: 12 };
+    const lines = [item1, item2, paragraph];
+    expect(nearestAdjacentLine(lines, paragraph.yTopPt, "up")).toEqual(item2);
+  });
+
+  it("ignores other boxes belonging to the same visual line (within the epsilon)", () => {
+    const currentLine = { yTopPt: 20, heightPt: 12 };
+    const sameLineOtherHit = { yTopPt: 20.2, heightPt: 12 }; // within SAME_LINE_EPSILON_PT
+    const nextLine = { yTopPt: 35, heightPt: 12 };
+    const lines = [currentLine, sameLineOtherHit, nextLine];
+    expect(nearestAdjacentLine(lines, currentLine.yTopPt, "down")).toEqual(nextLine);
+  });
+
+  it("returns null when there is nothing further in that direction (document start/end)", () => {
+    const onlyLine = { yTopPt: 20, heightPt: 12 };
+    expect(nearestAdjacentLine([onlyLine], onlyLine.yTopPt, "up")).toBeNull();
+    expect(nearestAdjacentLine([onlyLine], onlyLine.yTopPt, "down")).toBeNull();
   });
 });
