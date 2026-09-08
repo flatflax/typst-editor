@@ -308,36 +308,75 @@ parse → transform → serialize round trip rather than a persistent PM DOM tre
 [design-principles.md](design-principles.md)'s revised rule 2 for the corrected
 role split.
 
-**M18 — CJK IME composition spike (in progress — harness built, awaiting manual
-test results).** The one risk M14/M14A didn't cover, and the one open question
-that decides whether M20–M23 are worth building: can a self-drawn cursor/
-selection layer over a static Typst-rendered SVG host CJK IME composition
-acceptably? Standalone harness at `spike/m18-ime/index.html` — a static page,
-no build step, no compile/backend integration at runtime (its background SVG
-was compiled once from the real `compile_typst` pipeline and hardcoded in, so
-its glyphs are real Typst output, not a CSS mockup) — isolating input handling
-from every other variable. A hidden `<input>` captures keystrokes/composition;
-a self-drawn caret and composition overlay render from `compositionupdate`'s
-`data` field as a full replace every time, never a diff/append (the harness's
-own inline comment explains why: an append-only assumption would misrender
-Korean). An event log records every `keydown`/`beforeinput`/`input`/
-`composition*` event for inspection. Composition can't be exercised
-meaningfully by synthetic events — needs a real IME — so this milestone's
-result depends on manual testing. Must cover, not just Chinese:
-- **Chinese** (Pinyin, Wubi, ...): one composition string, shown underlined,
-  replaced wholesale on candidate selection.
-- **Japanese**: multi-segment conversion (bunsetsu) — a composition can hold both
-  confirmed and unconfirmed segments simultaneously, needing distinct highlight
-  states, and segment boundaries are user-adjustable mid-composition.
-  Compositions run longer than Chinese's.
-- **Korean**: jamo-to-syllable composition — typing ㄱ→ㅏ→ㄴ replaces the
-  displayed character in place (가 → 간), not appending to it. An overlay that
-  assumes a composition only grows will misrender Korean specifically.
+**M18 — CJK IME composition spike — done, positive result.** The one risk
+M14/M14A didn't cover, and the one open question deciding whether M20–M23 are
+worth building: can a self-drawn cursor/selection layer over a static
+Typst-rendered SVG host CJK IME composition acceptably? Tested manually
+(composition can't be exercised meaningfully by synthetic events) against real
+Chinese (Microsoft Pinyin), Japanese, and Korean IMEs on Windows, using the
+harness at `spike/m18-ime/index.html` — a standalone static page, no build
+step, no compile/backend integration at runtime (its background SVG was
+compiled once from the real `compile_typst` pipeline, so its glyphs are real
+Typst output, not a CSS mockup). Result: **yes, for all three**, with two
+harness bugs found and fixed along the way and one architectural finding to
+carry forward.
 
-Also covers candidate-window positioning (the window itself is native OS UI; only
-the anchor point — derived from `compositionupdate` timing against current
-geometry — needs to be correct) and backspace/cancel mid-composition. Blocking:
-the entire M20–M23 direction's viability rests on this holding for all three.
+- **The full-replace model holds for all three languages, including the
+  hard cases.** The harness always sets the composition overlay to
+  `compositionupdate`'s `data` field wholesale, never a diff/append. This
+  correctly handles Chinese's wholesale-replace-on-candidate-selection,
+  Japanese's candidate *cycling* (confirmed live: `きょう` → `今日` → `協力`
+  → back to `今日` — unrelated kanji candidates for the same reading, not
+  extensions of each other, delivered through the identical event/field), and
+  Korean's in-place jamo-to-syllable replacement (`ㄴ` → `내` → `낸`, each a
+  full replace of the previous, not an append).
+- **No segment/clause-boundary information is exposed by the standard
+  Composition Event API.** Nothing in `compositionupdate` distinguishes "you
+  typed another character" from "you cycled to a different candidate for an
+  existing segment," and nothing marks a Japanese multi-segment composition's
+  confirmed vs. unconfirmed clauses. Not a blocker: the full-replace model
+  never needed that distinction to render correctly, and the OS's own
+  candidate popup already shows segment/clause state visually — a page-level
+  overlay doesn't need to reproduce it.
+- **Korean commits per-syllable, not per-word — a real frequency difference
+  for M20/M21 to design for.** Chinese and Japanese ran one long
+  `compositionstart`…`compositionend` per phrase; Korean fired a full
+  start/update/end cycle per syllable (sometimes per single jamo), confirmed
+  live: `ㄴ→내→낸→(end "낸")→(start)→ㅁ→므→(end "므")→...`. An
+  implementation that assumes "one composition ≈ one word" will see far more
+  composition-lifecycle churn per second of typing for Korean than for
+  Chinese/Japanese. The harness already handles this correctly (each
+  `compositionend` commits and advances the caret independently, regardless
+  of how short-lived the composition was) — the finding is about expected
+  event *frequency*, not a correctness gap.
+- **Candidate-window positioning is correct, confirmed visually (not just
+  inferred from the log) for all three languages.** Positioning the real
+  (if visually tiny and transparent) `<input>` element at the caret's actual
+  screen location was sufficient for the browser/OS to anchor its native
+  candidate popup correctly — no dedicated IME-positioning API call was
+  needed beyond keeping that element's position in sync with the caret.
+- **Two real bugs found and fixed in the harness's own logic** (not the
+  browser/OS) — both are genuine lessons for M20/M21, not spike-only quirks:
+  1. Chromium fires the terminal `input` event for a composition emptied via
+     backspace with `isComposing:false` and `inputType:"deleteContentBackward"`,
+     ~0.3ms *before* `compositionend` actually fires. Code that trusts that
+     event's `isComposing` flag will treat a cancelled composition as a real
+     backspace and delete a character from already-committed content instead.
+     Fix: track composition state with your own flag (set on
+     `compositionstart`, cleared on `compositionend`), not the individual
+     event's own flag.
+  2. A self-drawn caret does not automatically track the growing/shrinking
+     end of an in-progress composition — it must be explicitly repositioned
+     on every `compositionupdate` (here, via the overlay's own rendered
+     width), or it stays frozen wherever the composition started for its
+     whole duration.
+- **Not tested, and out of scope for this milestone**: arrow-key navigation
+  through already-committed text. That needs a real position↔geometry
+  mapping (M14A's `geometry_for_range`), which is M20's job, not something
+  this harness approximates.
+
+**Consequence for M20+**: the one existential risk blocking this direction is
+cleared. M20 can start.
 
 **M20 — Static cursor, selection, and hit-testing on live Typst rendering (not
 started).** Click-to-position, arrow-key navigation, and drag-to-select directly
@@ -402,8 +441,9 @@ milestone here; lowest technical risk.
   is deferred until real usage shows it's needed (the perf-baseline edit-position
   follow-up already rules out a compile-layer bounded window as a fix, so any such
   future work would need a different lever).
-- **CJK IME composition (new, M18) is the mechanism's one unvalidated risk.**
-  Every other piece (geometry, hit-testing, recompile cost) traces to a measured
-  spike; self-drawn cursor/selection hosting IME composition does not yet. If M18
-  fails for any of Chinese/Japanese/Korean, the revised mechanism needs rework
-  before M20+ is worth building on top of it.
+- **CJK IME composition (M18) — resolved, positive.** Was the mechanism's one
+  unvalidated risk; now traces to a real test against Chinese/Japanese/Korean
+  IMEs, same as geometry/hit-testing/recompile cost. One residual risk carried
+  forward: Korean's much higher composition-lifecycle event frequency
+  (per-syllable, not per-word) is a load characteristic M20/M21 should keep in
+  mind, not a correctness gap — see M18's entry above.

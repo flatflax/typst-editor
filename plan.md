@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15 done (M14: partial-negative, M15: negative — see below); M18 in progress |
+| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15/M18 done (M14: partial-negative, M15: negative, M18: positive — see below); M20 next |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
@@ -83,18 +83,21 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
   kept — load-bearing for M21, independent of the swap's fate. Full account,
   including the revised mechanism and design-principles.md rule 2's
   correction, in [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M18 — in progress.** CJK IME composition spike. Harness built:
-  `spike/m18-ime/index.html`, a standalone static page (no build step, no
-  backend integration) — a real Typst-rendered SVG paragraph (compiled once
-  from the actual `compile_typst` pipeline, not a mockup), a hidden input
-  capturing keystrokes/composition, a self-drawn caret and composition
-  overlay, and an event log. Awaiting manual testing with real Chinese/
-  Japanese/Korean IMEs (composition can't be synthesized meaningfully without
-  one). The one unvalidated risk the revised mechanism depends on; blocks
-  M20–M23.
-- **M20 — not started, parallel with M18.** Static cursor/selection/hit-testing
-  directly on live Typst rendering, using M14A's geometry — no editing, no IME.
-  First visible positive milestone since M12.
+- **M18 — done, positive.** CJK IME composition spike. Tested manually against
+  real Chinese/Japanese/Korean IMEs on `spike/m18-ime/index.html`: the
+  full-replace-from-`compositionupdate.data` model holds for all three,
+  including Japanese candidate-cycling and Korean's in-place jamo-to-syllable
+  replacement; candidate-window positioning is correct in all three
+  (confirmed visually); two harness bugs found and fixed (backspace-cancelled
+  composition corrupting committed text, caret not tracking the composition's
+  growing end). One finding to carry forward: Korean commits per-syllable, a
+  real composition-event frequency difference from Chinese/Japanese, not a
+  correctness gap. The one unvalidated risk the revised mechanism depended on
+  is now cleared. Full account in
+  [doc/phase3-single-view.md](doc/phase3-single-view.md).
+- **M20 — not started, next.** Static cursor/selection/hit-testing directly on
+  live Typst rendering, using M14A's geometry — no editing, no IME. First
+  visible positive milestone since M12.
 - **M21 — not started, depends on M18+M20.** Edit loop: keystroke → whole-
   document recompile (session `World`) → redraw SVG → redraw cursor from fresh
   geometry. No block-scoped/second-`World` compilation for v1.
