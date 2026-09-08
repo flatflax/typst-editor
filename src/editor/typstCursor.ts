@@ -112,6 +112,19 @@ export function caretRectFromBoxes(
   return null;
 }
 
+// Empirical: real Typst baseline-to-baseline line spacing (font size +
+// default paragraph leading) measured about 1.38x the font size in a sample
+// document (two consecutive text lines' SVG transforms 19.36pt apart at
+// 14pt text — see the M18 IME harness's generated SVG). `caret.heightPt`
+// (ascent+descent alone, ~1.25x font size) undershoots that by ~10% —
+// small per press, but enough that a synthesized click sometimes landed
+// back on the *same* line instead of clearing into the next one, which
+// read as "Up/Down doesn't work." This multiplier adds a safety margin
+// beyond just closing that gap exactly, since real leading varies by font/
+// size and undershooting fails outright while overshooting merely risks
+// skipping into the line beyond the immediate next one.
+const LINE_STEP_MULTIPLIER = 1.4;
+
 // Where a synthesized click should land (in the merged coordinate space) to
 // move the caret up/down by approximately one line — `caret.heightPt` (the
 // full ascent+descent box, not the trimmed `visualHeightPt`) is used as the
@@ -122,5 +135,6 @@ export function caretRectFromBoxes(
 // slightly at the first/last line is fine.
 export function verticalMoveTargetY(caret: CaretRect, direction: "up" | "down"): number {
   const midY = caret.yTopPt + caret.heightPt / 2;
-  return direction === "up" ? midY - caret.heightPt : midY + caret.heightPt;
+  const step = caret.heightPt * LINE_STEP_MULTIPLIER;
+  return direction === "up" ? midY - step : midY + step;
 }

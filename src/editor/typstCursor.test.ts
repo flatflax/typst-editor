@@ -121,13 +121,17 @@ describe("stepByteOffset", () => {
 });
 
 describe("verticalMoveTargetY", () => {
-  it("moves up by approximately one line height from the caret's vertical center", () => {
+  it("moves up by more than one full line height, from the caret's vertical center", () => {
     const caret = { xPt: 0, yTopPt: 100, heightPt: 12, visualHeightPt: 9 };
-    expect(verticalMoveTargetY(caret, "up")).toBe(100 + 6 - 12);
+    const target = verticalMoveTargetY(caret, "up");
+    expect(target).toBeLessThan(100 + 6 - 12); // clears a full line height...
+    expect(target).toBeCloseTo(100 + 6 - 12 * 1.4); // ...by the empirical safety margin
   });
 
-  it("moves down by approximately one line height from the caret's vertical center", () => {
+  it("moves down by more than one full line height, from the caret's vertical center", () => {
     const caret = { xPt: 0, yTopPt: 100, heightPt: 12, visualHeightPt: 9 };
-    expect(verticalMoveTargetY(caret, "down")).toBe(100 + 6 + 12);
+    const target = verticalMoveTargetY(caret, "down");
+    expect(target).toBeGreaterThan(100 + 6 + 12);
+    expect(target).toBeCloseTo(100 + 6 + 12 * 1.4);
   });
 });
