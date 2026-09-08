@@ -26,6 +26,35 @@ use typst::syntax::Span;
 use typst::text::Glyph;
 use typst_layout::PagedDocument;
 
+/// Vertical gap between stacked pages in `typst_svg::svg_merged`'s output.
+/// Shared by `compile.rs` (passed straight to `svg_merged`) and
+/// `page_offsets_pt` below, so the two can never drift apart — a page-offset
+/// computed here must match the actual merged-SVG layout exactly, or
+/// multi-page click/geometry mapping (M20) silently lands on the wrong page.
+pub const PAGE_GAP_PT: f64 = 10.0;
+
+/// The absolute Y (in `svg_merged`'s merged coordinate space) where each
+/// page starts — `offsets[0] == 0.0`, `offsets[i] == offsets[i-1] +
+/// height(page i-1) + PAGE_GAP_PT`. Mirrors `svg_merged`'s own stacking
+/// arithmetic exactly (see its source: page heights summed with a fixed gap
+/// between them, no bleed since `compile.rs` always renders with
+/// `SvgOptions::default()`) rather than reimplementing page layout —
+/// `page.frame.size()` is already the same size `svg_merged` itself uses per
+/// page. Used by both directions of multi-page point-mapping: `jump_from_click`
+/// (jump.rs) to turn a merged-SVG click point into a page + page-relative
+/// point, and the frontend (via `CompileResult::page_offsets_pt`) to turn a
+/// `RangeBox`'s page-relative `y_top_pt` back into a merged-SVG position for
+/// rendering a caret/selection overlay.
+pub fn page_offsets_pt(document: &PagedDocument) -> Vec<f64> {
+    let mut offsets = Vec::with_capacity(document.pages().len());
+    let mut y = 0.0;
+    for page in document.pages() {
+        offsets.push(y);
+        y += page.frame.size().y.to_pt() + PAGE_GAP_PT;
+    }
+    offsets
+}
+
 /// One reconstructed visual line (for text) or one whole shape/image box,
 /// in page-absolute point coordinates, `y_top_pt` measured from the page's
 /// top-left as Typst frames do.
@@ -334,5 +363,31 @@ mod tests {
 
         let pages: std::collections::BTreeSet<_> = boxes.iter().map(|b| b.page).collect();
         assert_eq!(pages, std::collections::BTreeSet::from([1, 2]), "{boxes:?}");
+    }
+
+    #[test]
+    fn page_offsets_pt_matches_svg_merged_own_stacking_for_a_single_page() {
+        let (_, document) = compile("Hello world.");
+        assert_eq!(page_offsets_pt(&document), vec![0.0]);
+    }
+
+    /// Must match `typst_svg::svg_merged`'s own arithmetic exactly (cumulative
+    /// page heights plus `PAGE_GAP_PT` between them) — this is the one piece
+    /// of the merged coordinate space `svg_merged` itself doesn't expose, so
+    /// this function's whole job is not drifting from what it actually does.
+    #[test]
+    fn page_offsets_pt_accumulates_page_height_plus_gap_for_each_page() {
+        let source = "#set page(height: 60pt, margin: 5pt)\n\
+                       First page line.\n#pagebreak()\nSecond page line.\n#pagebreak()\nThird page line.";
+        let (_, document) = compile(source);
+        assert_eq!(document.pages().len(), 3, "fixture must actually paginate into 3 pages");
+
+        let offsets = page_offsets_pt(&document);
+        assert_eq!(offsets.len(), 3);
+        assert_eq!(offsets[0], 0.0);
+        for i in 1..3 {
+            let expected = offsets[i - 1] + document.pages()[i - 1].frame.size().y.to_pt() + PAGE_GAP_PT;
+            assert!((offsets[i] - expected).abs() < 1e-9, "{offsets:?}");
+        }
     }
 }

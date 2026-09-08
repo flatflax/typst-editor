@@ -361,6 +361,65 @@
   pointer-events: none;
 }
 
+/* M20 (plan.md): static cursor/selection/hit-testing directly on live Typst
+   rendering. */
+.typst-live-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: auto;
+  padding: 1rem;
+}
+
+.scope-note {
+  margin: 0 0 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 4px;
+  background: #fffbe6;
+  border: 1px solid #f0e0a0;
+  color: #6b5a1e;
+  font-size: 0.8em;
+}
+
+/* `.typst-live-svg` and `.typst-live-overlay` occupy the exact same box —
+   the overlay's `viewBox` is kept identical to the base SVG's own (see
+   TypstLiveView.tsx), so caret/selection rects drawn in pt line up with the
+   rendered glyphs beneath them without any px conversion. */
+.typst-live-stage {
+  position: relative;
+  outline: none;
+  cursor: text;
+}
+
+.typst-live-stage svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.typst-live-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.selection-rect {
+  fill: rgba(57, 108, 216, 0.25);
+}
+
+.caret-bar {
+  fill: #d33;
+  animation: typst-live-caret-blink 1s steps(1) infinite;
+}
+
+@keyframes typst-live-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;
@@ -371,6 +430,12 @@
   .preview-pane {
     background: #1e1e1e;
     border-color: #444;
+  }
+
+  .scope-note {
+    background: #3a331a;
+    border-color: #5c4f24;
+    color: #e8d9a0;
   }
 
   .view-switcher button,

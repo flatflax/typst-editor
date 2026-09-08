@@ -378,12 +378,53 @@ carry forward.
 **Consequence for M20+**: the one existential risk blocking this direction is
 cleared. M20 can start.
 
-**M20 — Static cursor, selection, and hit-testing on live Typst rendering (not
-started).** Click-to-position, arrow-key navigation, and drag-to-select directly
-against the full-document Typst SVG, using M14A's `geometry_for_range`/
-`jump_from_click` — no text editing yet, no IME. Independent of M18 (pure
-geometry/hit-testing) — can run in parallel rather than after it. First milestone
-since M12 with a directly visible, positive result.
+**M20 — Static cursor, selection, and hit-testing on live Typst rendering
+(built, awaiting manual verification).** Click-to-position, arrow-key
+navigation (with Shift to extend), and drag-to-select directly against the
+full-document Typst SVG, using M14A's `geometry_for_range`/`jump_from_click`
+— no text editing yet, no IME. Independent of M18 (pure geometry/hit-testing)
+— ran in parallel rather than after it. New "Live cursor (M20)" view mode in
+`App.tsx`, alongside (not replacing) WYSIWYG/Typst/Markdown — first milestone
+since M12 with a directly visible result, once confirmed working.
+
+- **Fixed a real, pre-existing gap this milestone's own premise depends on**:
+  `jump_from_click` (jump.rs, M1-era) hardcoded `document.pages().first()` —
+  a click anywhere on `svg_merged`'s full multi-page output beyond page 1 was
+  silently hit-tested against page 1's content instead. Harmless for the old
+  split-pane preview (MVP documents fit on one page, and click-sync was a
+  nicety); a real correctness gap for M20, whose whole point is a clickable
+  *full* document. Fixed via a new `geometry::page_offsets_pt` (the merged-
+  coordinate-space Y where each page starts, mirroring `svg_merged`'s own
+  stacking arithmetic exactly via a shared `PAGE_GAP_PT` constant) — used by
+  `jump_from_click` to resolve which page a merged-Y click point actually
+  falls on, and returned to the frontend via `CompileResult` so `RangeBox`
+  geometry (page-relative) can be placed on the single rendered SVG
+  (merged-absolute). 3 new Rust tests (`geometry.rs`, `jump.rs`).
+- **Mechanism**: the compiled SVG renders once, unmodified; a second `<svg>`
+  overlay with the identical `viewBox` sits exactly on top via CSS and holds
+  only the caret/selection `<rect>`s — both in the same pt coordinate space,
+  so no px conversion is needed to *draw* them (only to *hit-test* a click,
+  via the existing `svgPointFromClient`, now shared from `util/svgGeometry.ts`
+  instead of living only in `App.tsx`).
+- Caret placement prefers the leading edge of the character after the
+  cursor, falling back to the trailing edge of the character before it (end
+  of document, or an empty "after" query) — doesn't attempt to resolve
+  line-wrap-boundary affinity, a known heuristic limit inherited from
+  M14A's line-box clustering.
+- Up/Down navigation reuses `jump_from_click` itself: computes a target Y
+  approximately one line above/below (the caret's own box height as the
+  line-height estimate) at a sticky "preferred X" column, and synthesizes a
+  click there — rather than reconstructing line-by-line character positions
+  independently. `jump_from_click`'s clamp-to-document-bounds behavior means
+  overshooting slightly at the first/last line is harmless.
+- Pure geometry/offset math lives in `editor/typstCursor.ts` (box→absolute-
+  position conversion, caret placement, vertical-move target, UTF-8-byte
+  code-point stepping), tested independently of React/Tauri — the component
+  (`editor/TypstLiveView.tsx`) only wires it to `invoke` calls and DOM events.
+- Drag-select coalesces `jump_from_click` calls to the latest mouse position
+  rather than queuing every `mousemove` — that command isn't on the
+  session-held `World` `block_geometry` uses, and an uncoalesced fast drag
+  could both lag and resolve out of order.
 
 **M21 — Edit loop: keystroke to whole-document recompile-and-redraw (not
 started, depends on M18+M20).** Keystroke → edit the session `World`'s source →

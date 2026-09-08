@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { byteToUtf16Offset, utf16ToByteOffset } from "./offsets";
+import { byteToUtf16Offset, nextCodePointOffset, prevCodePointOffset, utf16ToByteOffset } from "./offsets";
 
 // Mirrors the user-reported bug: CodeMirror's cursor offset (UTF-16 code
 // units) was passed straight through to the Rust `jump_from_cursor`/
@@ -46,6 +46,48 @@ describe("byteToUtf16Offset", () => {
     for (let utf16Offset = 0; utf16Offset <= DOCUMENT.length; utf16Offset++) {
       const byteOffset = utf16ToByteOffset(DOCUMENT, utf16Offset);
       expect(byteToUtf16Offset(DOCUMENT, byteOffset)).toBe(utf16Offset);
+    }
+  });
+});
+
+// M20: arrow-key navigation steps by one Unicode code point at a time over
+// the UTF-16 offsets these helpers otherwise convert to/from bytes.
+describe("nextCodePointOffset / prevCodePointOffset", () => {
+  it("steps by one UTF-16 unit for BMP characters (ASCII and CJK alike)", () => {
+    const text = "a苹b";
+    expect(nextCodePointOffset(text, 0)).toBe(1);
+    expect(nextCodePointOffset(text, 1)).toBe(2);
+    expect(nextCodePointOffset(text, 2)).toBe(3);
+    expect(prevCodePointOffset(text, 3)).toBe(2);
+    expect(prevCodePointOffset(text, 2)).toBe(1);
+    expect(prevCodePointOffset(text, 1)).toBe(0);
+  });
+
+  it("steps over a surrogate pair as one unit, not splitting it", () => {
+    const text = "a😀b"; // 😀 is U+1F600, a surrogate pair (2 UTF-16 units)
+    expect(text.length).toBe(4);
+    expect(nextCodePointOffset(text, 1)).toBe(3); // skip both halves of 😀
+    expect(prevCodePointOffset(text, 3)).toBe(1); // and back
+    expect(nextCodePointOffset(text, 3)).toBe(4); // b
+    expect(prevCodePointOffset(text, 1)).toBe(0); // a
+  });
+
+  it("clamps at the string's start and end instead of going out of bounds", () => {
+    const text = "ab";
+    expect(prevCodePointOffset(text, 0)).toBe(0);
+    expect(nextCodePointOffset(text, text.length)).toBe(text.length);
+  });
+
+  it("round-trips forward then back to the same offset for every valid boundary", () => {
+    // BMP-only text: every integer offset is a valid code-point boundary,
+    // unlike text containing a surrogate pair (see the dedicated test above
+    // for astral-character correctness — mid-pair offsets aren't valid
+    // boundaries to begin with, so round-tripping *from* one isn't
+    // meaningful).
+    const text = "a苹b香蕉c";
+    for (let offset = 0; offset < text.length; offset++) {
+      const next = nextCodePointOffset(text, offset);
+      expect(prevCodePointOffset(text, next)).toBe(offset);
     }
   });
 });

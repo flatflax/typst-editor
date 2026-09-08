@@ -45,6 +45,12 @@ pub struct CompileDiagnostic {
 pub struct CompileResult {
     svg: Option<String>,
     diagnostics: Vec<CompileDiagnostic>,
+    /// The absolute Y (in `svg`'s merged coordinate space) where each page
+    /// starts — `geometry::page_offsets_pt`, M20. Lets the frontend convert
+    /// a `block_geometry` `RangeBox`'s page-relative `y_top_pt` into a
+    /// position on the single rendered `svg`, without reimplementing
+    /// `svg_merged`'s page-stacking math. Empty when `svg` is `None`.
+    page_offsets_pt: Vec<f64>,
 }
 
 fn to_diagnostic(world: &TauriWorld, diag: &SourceDiagnostic) -> CompileDiagnostic {
@@ -153,12 +159,13 @@ fn compile_with_world(world: &mut TauriWorld, source: String, base_dir: Option<P
 
     match warned.output {
         Ok(document) => {
-            let svg = typst_svg::svg_merged(&document, &SvgOptions::default(), Abs::pt(10.0));
-            CompileResult { svg: Some(svg), diagnostics }
+            let page_offsets_pt = geometry::page_offsets_pt(&document);
+            let svg = typst_svg::svg_merged(&document, &SvgOptions::default(), Abs::pt(geometry::PAGE_GAP_PT));
+            CompileResult { svg: Some(svg), diagnostics, page_offsets_pt }
         }
         Err(errors) => {
             diagnostics.extend(errors.iter().map(|d| to_diagnostic(world, d)));
-            CompileResult { svg: None, diagnostics }
+            CompileResult { svg: None, diagnostics, page_offsets_pt: Vec::new() }
         }
     }
 }
@@ -770,7 +777,7 @@ $ x^2 $
 
         let start = Instant::now();
         let edited = typst::compile::<PagedDocument>(&world).output.expect("edited fixture must compile");
-        let _ = typst_svg::svg_merged(&edited, &SvgOptions::default(), Abs::pt(10.0));
+        let _ = typst_svg::svg_merged(&edited, &SvgOptions::default(), Abs::pt(geometry::PAGE_GAP_PT));
         let incremental_edit_elapsed = start.elapsed();
 
         eprintln!(
@@ -824,7 +831,7 @@ $ x^2 $
                 let edited = typst::compile::<PagedDocument>(&world)
                     .output
                     .expect("edited fixture must compile");
-                let _ = typst_svg::svg_merged(&edited, &SvgOptions::default(), Abs::pt(10.0));
+                let _ = typst_svg::svg_merged(&edited, &SvgOptions::default(), Abs::pt(geometry::PAGE_GAP_PT));
                 let elapsed = start.elapsed();
 
                 eprintln!(

@@ -5,7 +5,9 @@ import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./editor/SourceEditor";
 import WysiwygEditor, { type WysiwygEditorHandle } from "./editor/WysiwygEditor";
+import TypstLiveView from "./editor/TypstLiveView";
 import { byteToUtf16Offset, utf16ToByteOffset } from "./util/offsets";
+import { svgPointFromClient, clientPointFromPt } from "./util/svgGeometry";
 import {
   typstAstToDoc,
   pmDocToTypst,
@@ -84,11 +86,14 @@ const INITIAL_DOC = typstAstToDoc(INITIAL_AST);
 
 const COMPILE_DEBOUNCE_MS = 250;
 
-type ViewMode = "wysiwyg" | "typst" | "markdown";
+type ViewMode = "wysiwyg" | "typst" | "markdown" | "typst-live";
 
 type CompileResult = {
   svg: string | null;
   diagnostics: EditorDiagnostic[];
+  /** Absolute Y (in `svg`'s merged coordinate space) where each page starts
+   * — `geometry::page_offsets_pt`, M20. Empty when `svg` is `null`. */
+  page_offsets_pt: number[];
 };
 
 type CursorTarget = {
@@ -96,29 +101,6 @@ type CursorTarget = {
   x_pt: number;
   y_pt: number;
 };
-
-// `viewBox.x`/`viewBox.y` matter once a rendered fragment's `viewBox` doesn't
-// start at `0 0` (e.g. a cropped region of a larger page, per M20) — omitting
-// the offset would put every click a fixed amount short of where it should
-// land. The main preview's SVG always has a `0 0 ...` viewBox today, so this
-// has no visible effect yet.
-function svgPointFromClient(svg: SVGSVGElement, clientX: number, clientY: number) {
-  const rect = svg.getBoundingClientRect();
-  const viewBox = svg.viewBox.baseVal;
-  return {
-    xPt: viewBox.x + ((clientX - rect.left) / rect.width) * viewBox.width,
-    yPt: viewBox.y + ((clientY - rect.top) / rect.height) * viewBox.height,
-  };
-}
-
-function clientPointFromPt(svg: SVGSVGElement, xPt: number, yPt: number) {
-  const rect = svg.getBoundingClientRect();
-  const viewBox = svg.viewBox.baseVal;
-  return {
-    clientX: rect.left + (xPt / viewBox.width) * rect.width,
-    clientY: rect.top + (yPt / viewBox.height) * rect.height,
-  };
-}
 
 function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("wysiwyg");
@@ -383,6 +365,9 @@ function App() {
   // when leaving Typst source, or the pure-JS mappers otherwise.
   async function commitCurrentView(): Promise<PMDoc> {
     if (viewMode === "wysiwyg") return wysiwygRef.current?.getDoc() ?? doc;
+    // Read-only (M20): never mutates `doc`, so leaving it just keeps
+    // whatever was last committed, same as staying on it.
+    if (viewMode === "typst-live") return doc;
     if (viewMode === "markdown") return markdownToDoc(markdownText);
     const ast = await invoke<AstDocument>("parse_typst_ast", { source: typstText });
     return typstAstToDoc(ast);
@@ -395,7 +380,10 @@ function App() {
       setDoc(nextDoc);
       if (nextMode === "wysiwyg") wysiwygRef.current?.setDoc(nextDoc);
       else if (nextMode === "markdown") markdownEditorRef.current?.setValue(docToMarkdown(nextDoc));
-      else typstEditorRef.current?.setValue(pmDocToTypst(nextDoc));
+      else if (nextMode === "typst") typstEditorRef.current?.setValue(pmDocToTypst(nextDoc));
+      // "typst-live": nothing to push into — it derives everything from
+      // `doc`/`result` props reactively, unlike the other views' own
+      // internal editor state.
       setViewMode(nextMode);
     } catch (err) {
       setInvokeError(String(err));
@@ -460,7 +448,7 @@ function App() {
           <span className="file-title">{titleFor(filePath, dirty)}</span>
         </div>
         <div className="view-switcher" role="tablist">
-          {(["wysiwyg", "typst", "markdown"] as const).map((mode) => (
+          {(["wysiwyg", "typst", "markdown", "typst-live"] as const).map((mode) => (
             <button
               key={mode}
               type="button"
@@ -469,7 +457,13 @@ function App() {
               className={viewMode === mode ? "active" : ""}
               onClick={() => switchView(mode)}
             >
-              {mode === "wysiwyg" ? "WYSIWYG" : mode === "typst" ? "Typst source" : "Markdown source"}
+              {mode === "wysiwyg"
+                ? "WYSIWYG"
+                : mode === "typst"
+                  ? "Typst source"
+                  : mode === "markdown"
+                    ? "Markdown source"
+                    : "Live cursor (M20)"}
             </button>
           ))}
         </div>
@@ -499,6 +493,15 @@ function App() {
           </div>
           <div hidden={viewMode !== "markdown"} className="view-panel">
             <SourceEditor ref={markdownEditorRef} initialValue={markdownText} onChange={setMarkdownText} />
+          </div>
+          <div hidden={viewMode !== "typst-live"} className="view-panel">
+            <TypstLiveView
+              source={derived.source}
+              svg={result?.svg ?? null}
+              pageOffsetsPt={result?.page_offsets_pt ?? []}
+              documentDir={documentDir}
+              diagnostics={result?.diagnostics ?? []}
+            />
           </div>
         </div>
 
