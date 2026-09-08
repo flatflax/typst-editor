@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   caretRectFromBoxes,
   clampXToLine,
+  lineContainingY,
   nearestAdjacentLine,
   selectionRectsFromBoxes,
   stepByteOffset,
@@ -187,5 +188,41 @@ describe("clampXToLine", () => {
   it("leaves the column unchanged when it already falls within the line", () => {
     const line = rect({ xPt: 10, widthPt: 20 });
     expect(clampXToLine(15, line)).toBe(15);
+  });
+});
+
+describe("lineContainingY", () => {
+  // The real bug this fixes: clicking blank space (past a short line's
+  // end, below the last line, in the margins, in the gap between lines)
+  // gave jump_from_click nothing to resolve to, so the caret didn't move
+  // at all -- unlike the vertical-navigation case, there's no "current
+  // line" to clamp against here, since finding the right line *is* the
+  // point of a click.
+  it("prefers a line whose own vertical span actually contains the point", () => {
+    const line1 = rect({ yTopPt: 0, heightPt: 12 });
+    const line2 = rect({ yTopPt: 20, heightPt: 12 });
+    expect(lineContainingY([line1, line2], 25)).toEqual(line2);
+  });
+
+  it("falls back to the nearest line when the point is above the first line", () => {
+    const line1 = rect({ yTopPt: 20, heightPt: 12 });
+    const line2 = rect({ yTopPt: 40, heightPt: 12 });
+    expect(lineContainingY([line1, line2], 0)).toEqual(line1);
+  });
+
+  it("falls back to the nearest line when the point is below the last line", () => {
+    const line1 = rect({ yTopPt: 0, heightPt: 12 });
+    const line2 = rect({ yTopPt: 20, heightPt: 12 });
+    expect(lineContainingY([line1, line2], 1000)).toEqual(line2);
+  });
+
+  it("falls back to the nearest line for a point landing in the gap between two lines", () => {
+    const line1 = rect({ yTopPt: 0, heightPt: 12 }); // center at 6
+    const line2 = rect({ yTopPt: 30, heightPt: 12 }); // center at 36
+    expect(lineContainingY([line1, line2], 20)).toEqual(line1); // closer to line1's center
+  });
+
+  it("returns null for an empty document", () => {
+    expect(lineContainingY([], 10)).toBeNull();
   });
 });

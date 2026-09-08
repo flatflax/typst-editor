@@ -20,6 +20,7 @@ import { svgPointFromClient } from "../util/svgGeometry";
 import {
   caretRectFromBoxes,
   clampXToLine,
+  lineContainingY,
   nearestAdjacentLine,
   selectionRectsFromBoxes,
   stepByteOffset,
@@ -168,11 +169,27 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
     return stageRef.current?.querySelector<SVGSVGElement>(".typst-live-svg svg") ?? null;
   }
 
-  function offsetAtClient(clientX: number, clientY: number): Promise<number | null> {
+  async function offsetAtClient(clientX: number, clientY: number): Promise<number | null> {
     const base = baseSvgEl();
-    if (!base) return Promise.resolve(null);
+    if (!base) return null;
     const { xPt, yPt } = svgPointFromClient(base, clientX, clientY);
-    return invoke<number | null>("jump_from_click", { source, xPt, yPt, baseDir: documentDir }).catch(() => null);
+    const direct = await invoke<number | null>("jump_from_click", { source, xPt, yPt, baseDir: documentDir }).catch(
+      () => null,
+    );
+    if (direct != null) return direct;
+    // Clicked blank space (past a short line's end, below the last line,
+    // in the margins, in the gap between lines) — jump_from_click found no
+    // content exactly there. Snap to the nearest actual line instead of
+    // leaving the click with no effect.
+    const lines = await fetchDocumentLines();
+    const nearestLine = lineContainingY(lines, yPt);
+    if (!nearestLine) return null;
+    return invoke<number | null>("jump_from_click", {
+      source,
+      xPt: clampXToLine(xPt, nearestLine),
+      yPt: nearestLine.yTopPt + nearestLine.heightPt / 2,
+      baseDir: documentDir,
+    }).catch(() => null);
   }
 
   function handleMouseDown(event: React.MouseEvent<HTMLDivElement>) {

@@ -161,3 +161,24 @@ export function nearestAdjacentLine(
 export function clampXToLine(xPt: number, line: AbsoluteRect): number {
   return Math.max(line.xPt, Math.min(line.xPt + line.widthPt, xPt));
 }
+
+// Same underlying problem as `nearestAdjacentLine`/`clampXToLine`, but for a
+// *direct* click rather than a synthesized one: clicking blank space (past
+// a short line's end, below the last line, in the margins, in the gap
+// between lines) gives `jump_from_click` nothing to resolve to, so it
+// returns null and the caret doesn't move at all — no line to clamp
+// against, since finding the right line *is* the point of a click. Prefers
+// a line whose own vertical span actually contains `yPt`; otherwise (a
+// click above the first line, below the last, or landing exactly in an
+// inter-line gap) falls back to whichever line's vertical center is
+// nearest. Returns `null` only for an empty document.
+export function lineContainingY(lines: AbsoluteRect[], yPt: number): AbsoluteRect | null {
+  const containing = lines.find((line) => yPt >= line.yTopPt && yPt < line.yTopPt + line.heightPt);
+  if (containing) return containing;
+  if (lines.length === 0) return null;
+  return lines.reduce((closest, line) => {
+    const closestDist = Math.abs(yPt - (closest.yTopPt + closest.heightPt / 2));
+    const lineDist = Math.abs(yPt - (line.yTopPt + line.heightPt / 2));
+    return lineDist < closestDist ? line : closest;
+  });
+}
