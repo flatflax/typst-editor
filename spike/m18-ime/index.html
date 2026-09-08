@@ -202,6 +202,24 @@
     }
   }
 
+  // The overlay's own left edge stays pinned at the composition's start
+  // (renderCaret, above, only repositions it when idle) and grows text
+  // rightward via `white-space: pre` as compositionupdate fires. Without
+  // this, the caret/input themselves stayed frozen at that same start
+  // position for the whole composition instead of trailing the last
+  // character -- confirmed by manual testing ("cursor always in front of
+  // the first alphabet"). Approximated via the browser's own rendered width
+  // of the overlay text (real font, real measurement) -- not Typst glyph
+  // metrics, which is out of scope for this spike (M20's job).
+  function trackCaretToCompositionEnd() {
+    const left = overlay.offsetLeft + overlay.offsetWidth;
+    const top = overlay.offsetTop;
+    caret.style.left = left + "px";
+    caret.style.top = top + "px";
+    input.style.left = left + "px";
+    input.style.top = top + "px";
+  }
+
   function renderBuffer() {
     bufferEl.textContent = committedText || "(empty)";
   }
@@ -236,6 +254,7 @@
   input.addEventListener("compositionstart", (e) => {
     composing = true;
     overlay.textContent = "";
+    trackCaretToCompositionEnd();
     log("compositionstart", { data: e.data });
   });
 
@@ -246,13 +265,21 @@
     // jamo-to-syllable composition, where earlier characters in the string
     // change shape (e.g. ㄱ → 가 → 간) rather than only growing.
     overlay.textContent = e.data;
+    trackCaretToCompositionEnd();
     log("compositionupdate", { data: e.data });
   });
 
   input.addEventListener("compositionend", (e) => {
     composing = false;
+    // Measured before clearing: advances the base caret position by
+    // whatever the just-confirmed composition rendered as, so the next
+    // composition doesn't start back at the same spot and overlap it. Stays
+    // 0 for a composition cancelled down to "" (overlay is already empty by
+    // the time compositionend fires in that case).
+    const committedWidthPx = overlay.offsetWidth;
     overlay.textContent = "";
     committedText += e.data;
+    caretXPt += pxToPt(committedWidthPx);
     input.value = "";
     renderBuffer();
     renderCaret();
