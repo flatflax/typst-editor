@@ -1,4 +1,4 @@
-# Phase 3 — Single-View WYSIWYG (active, M13–M17)
+# Phase 3 — Single-View WYSIWYG (active, M13–M23)
 
 Architecture reference: [architecture.md](architecture.md). Design rules: [design-principles.md](design-principles.md).
 
@@ -24,11 +24,24 @@ without visible lag (M14),
 to return rendered geometry for a source *range*, not just a point (M14A),
 (c) a block-level focus-swap UI on PM node views using both.
 
-Architecture is governed by [design-principles.md](design-principles.md) rule 2 (the
-role split and the geometry visibility rule) — see M15 below for how that splits into
-direct content (this milestone's swap mechanism) vs. indirectly produced content
-(a source/semantic inspection interaction, deliberately undesigned until the prototype
-exposes real cases).
+Architecture was governed by [design-principles.md](design-principles.md) rule 2's
+original role split (ProseMirror owns cursor/selection/IME, Typst owns rendering) —
+see M15 below for how that splits into direct content (the swap mechanism) vs.
+indirectly produced content (a source/semantic inspection interaction, deliberately
+undesigned until a prototype exposes real cases). **M15 falsified the role split
+itself, not just its first implementation** — see M15's entry below and
+[design-principles.md](design-principles.md)'s revised rule 2.
+
+**Revised framing (after M15).** Per-block focus swapping requires the swapped-in
+editable view and the swapped-out rendered view to agree closely enough on
+size/shape that neither the swap itself nor the seam between active and inactive
+regions is visible — true for Typora (both views are CSS-laid-out) but not
+achievable here, where the two views come from two independently-laid-out engines
+(PM/CSS vs. Typst) rendering the same content differently. The corrected mechanism
+(M18–M23 below) does not swap between two renderings of a block. It keeps one
+rendering — Typst's, for the whole document, at all times — and adds a cursor/
+selection layer drawn directly against that rendering's own geometry (M14A). See
+each milestone below for detail.
 
 ## Milestones
 
@@ -208,108 +221,176 @@ gives real line-level boxes with baselines and correctly locates content rendere
 away from its source position (footnotes) or across a page break. M15 can build
 directly on this rather than redesigning around a coarser data source.
 
-**M15 — Direct-content render/edit swap (in progress — unblocked, M14/M14A both
-done; their findings above, session-held `World` and glyph-span-based geometry, are
-design inputs to build on).** Extend PM node views
-so each top-level block that is both geometry-producing and directly authored
-(paragraph, heading, list item, table, image, ...) presents as either an inline
-Typst-rendered SVG fragment (inactive) or today's editable node view (active),
-toggling on focus/blur/click — not on every keystroke of a different block. The
-preview pane goes away; its role is absorbed into per-block rendered fragments.
-- Scope: applies only to content authored in place (one PM block, one contiguous
-  rendered region). `#set`/`#let`/imports are excluded by construction (no geometry).
-- Indirectly produced content (a `typst_call`'s rendered output, auto-numbering,
-  footnotes rendered elsewhere) is a separate case — needs source/semantic inspection,
-  not a direct swap. The addressing scheme for it (hierarchical tuple-path keys, e.g.
-  `("footnote", 3)`, akin to `pytorch/tensordict`'s `NestedKey`) is deferred until the
-  prototype exposes concrete cases.
-- **First slice landed: session-held `World`.** `compile_typst` (`compile.rs`) now
-  holds one `TauriWorld` per app session (`Mutex`, managed in lib.rs) instead of
-  constructing one per call, applying each incoming full-document string as a
-  diffed `Source::edit` (`compute_edit`: longest-common-prefix/suffix, snapped to
-  UTF-8 char boundaries) rather than reparsing from scratch. The frontend's IPC
-  shape is unchanged — it still sends the whole current document every call; only
-  the backend's handling of repeated calls changed. `geometry_for_range` (M14A) is
-  not yet wired to a command; the PM node-view swap UI itself hasn't started.
+**M15 — Direct-content render/edit swap — done, negative result.** Original goal:
+extend PM node views so each top-level block that is both geometry-producing and
+directly authored (paragraph, heading, list item, table, image, ...) presents as
+either an inline Typst-rendered SVG fragment (inactive) or an editable node view
+(active), toggling on focus/blur/click. Three mechanisms were built and discarded,
+in order, each fixing the previous one's failure but exposing a new one:
 
-**M16 — Reflow and pagination handling.** An edited block's height change shifts
-every later block's position (real Typst pagination, not CSS reflow) — the document
-container must reposition subsequent fragments after each incremental compile.
-Requires an explicit answer for a block straddling a page break (new UX territory;
-the old split-pane preview never had to solve it). Implementation is blocked on M15
-(needs the swap mechanism to reposition around); the scope question and interim
-direction below are not — M15's swap-trigger scope depends on them, not the other
-way around.
-- **Open scope question (raised 2026-09-04).** M15/M16 assume a block is one
-  contiguous, independently swappable unit whose neighbors only need
-  *repositioning*, not re-rendering. That holds for Markdown/Typora but not fully
-  for Typst: auto-numbering (heading/list numbers), `#set` rules (effective for
-  everything after them), and footnotes (render at page bottom, not source position)
-  mean editing one block can change *displayed content* of later untouched blocks,
-  not just position — a correctness bug ("sibling shows a wrong number"), sharper
-  than the general layout-dependency risk below. ~~Two candidate directions: (a)
-  recompile-and-reposition a bounded window (edited block + everything after it in
-  the same numbering scope/page) — more correct, more expensive; (b) accept
-  staleness with a visible affordance (a "recompute" trigger, or full settle on
-  blur).~~ Outdated: the perf-baseline edit-position follow-up (above) shows a
-  bounded window costs the same as a full recompile, so (a) has no cost advantage
-  now that whole-document recompile is the default (interim direction below); (b) is
-  adopted below for page-break visual continuity only — this correctness bug is
-  still undecided.
-- **Interim direction (decided 2026-09-07), pending M16's own data below**: don't
-  design invalidation yet — build on the whole-document recompile M14 already
-  validated, and measure before choosing between whole-document / page-range /
-  dependency-aware invalidation.
-  1. Correctness baseline: keystroke → PM updates the active block immediately →
-     debounce → whole-document compile + render → geometry settle. No bounded-window
-     or dependency-aware invalidation until the data below shows it's needed. Debounce
-     starts at 100–150ms as an experimental value, not fixed — M14 measured
-     ~8–10ms/page for whole-doc recompile, so this window may need to widen once the
-     settle-latency data (point 3) comes in.
-  2. Cross-page active block: while editing, let the PM editing region expand
-     continuously across the page break — the source stays paginated by Typst, only
-     the editing surface ignores it — and restore real pagination on blur. This is
-     the accept-staleness direction from the open scope question above, applied
-     specifically to page-break visual continuity: it resolves only that half of the
-     question, not the numbering/`#set`/footnote correctness problem (a sibling
-     block showing wrong *content*, not just wrong position) above, which stays
-     unresolved and needs its own decision.
-  3. M16 records two datasets before deciding on invalidation strategy: (i) which
-     pages/blocks actually show geometry/render changes after an edit at a given
-     position; (ii) whole-document settle latency at 10/20/40 pages. Reuse M14's
-     benchmark fixtures/tooling (`compile.rs`) rather than building new measurement
-     infra. Note the perf-baseline edit-position follow-up (above) already answers part
-     of (ii): settle latency is position-independent, a function of document length
-     alone — so a compile-layer bounded window (recompute less by starting from the
-     edit point) isn't a viable invalidation strategy; (i) remains open and targets a
-     different lever (shrinking *render/swap* surface at the frontend layer after a
-     whole-document compile, not shrinking the compile itself).
+1. **NodeView-based swap.** Wrapped `paragraph`/`heading` content in a custom
+   `NodeView` that swapped between a rendered SVG fragment and PM's own
+   `contentDOM`. Result: corrupted document content. `EditorView.nodeDOM`'s own
+   doc comment warns against mutating a node's DOM this way ("will be immediately
+   overriden by the editor as it redraws the node") — confirmed directly: PM's own
+   reconciliation overwrote the manual swap on the next redraw, and a `NodeView`
+   whose DOM shape diverges from the schema's own `toDOM` output confused PM's
+   native-event handling.
+2. **Absolute-positioned overlay.** Positioned the rendered SVG fragment via
+   `position: fixed` + `getBoundingClientRect` over the live PM block instead of
+   replacing its DOM. Fixed the corruption, but reintroduced two problems
+   computed-pixel overlays have inherently: the CSS-rendered box's aspect ratio
+   doesn't match the Typst-rendered crop's native aspect ratio (visible
+   stretching), and viewport-relative positioning needs recomputing on every
+   scroll.
+3. **Before/after crop.** Rendered exactly two crops — everything before the
+   active block, everything after it — as plain flow siblings around the live PM
+   block (its other top-level siblings hidden via a decoration), so all three
+   pieces share one native scroll container and no pixel-position tracking is
+   needed (`activeBlockPlugin.ts`, `blockSwapGeometry.ts`, `sharedSvgHost.ts`).
+   Furthest-landed of the three, but exposed two problems that don't reduce to
+   more engineering:
+   - **Single-page only, and not fixable by more work**: a "before crop" that
+     spans a page break isn't a single rectangle — `svg_merged`'s page stacking
+     has no representation this crop shape can union into one box. M14A's own
+     single-page scope carried through as a limitation to lift later; here it's
+     the crop shape itself breaking down for multi-page documents.
+   - **The seam lands exactly where the user is looking.** The active block is
+     PM/CSS-rendered; its neighbors are Typst-rendered. Different layout engines
+     give materially the same content different line breaks, spacing, and font
+     metrics — the visual mismatch is worst at the one block currently focused,
+     the opposite of what "single view, always real Typst rendering" was meant
+     to deliver.
 
-**M17 — Cursor/selection continuity across swaps (blocked on M15).** Generalize
-`jump_from_click`/`jump_from_cursor` so clicking a rendered (inactive) block activates
-its editable node view at the corresponding character offset, and blurring re-renders
-it — promoting the M5 position-mapping from an optional preview-sync nicety to
-load-bearing infrastructure firing on every click.
+**Root cause: a design-principle failure, not an implementation defect.**
+[design-principles.md](design-principles.md) rule 2 (pre-revision) split ownership
+as "ProseMirror owns the editing engine (cursor/selection/IME); Typst owns layout."
+That split cannot be implemented for a single visual region: cursor and selection
+are pixels that must land between specific rendered glyphs, so whichever system
+lays out the glyphs must also own the cursor drawn into them. Any split of that
+ownership across two independently-laid-out systems guarantees a seam at the
+focused block, regardless of how the swap is engineered. Rule 2 is revised
+accordingly — see [design-principles.md](design-principles.md).
+
+**M14's perf standard was also the wrong standard.** M14 benchmarked whole-document
+recompile against a "recompile every keystroke in under 16–50ms" bar, modeled on
+synchronous swap-on-keystroke. The standard every mainstream rich-text/DTP editor
+actually uses is optimistic local echo plus a debounced settle (Word, Google Docs),
+not synchronous per-keystroke recompile. Under that standard, M14's own numbers
+(tens of ms for short/medium documents) are workable — M14's result stands, but its
+framing as a tight per-keystroke ceiling does not.
+
+**Disposition of the milestones this cancels:**
+- **M15b** (extend the swap to table/image/list) is moot — there is no swap
+  mechanism left to extend.
+- **M17** (cursor continuity across swaps) is moot — there is no swap to be
+  continuous across. Click-to-position becomes part of the primary cursor
+  mechanism itself (M20 below), not a generalization of activating a node view.
+- **M16** (reflow/pagination) is not cancelled, but its hardest sub-problem
+  dissolves: the "sibling shows stale numbering/`#set`/footnote content" bug (its
+  open scope question, previously undecided) cannot occur once the display is
+  always a whole-document recompile-and-redraw with no cached or cropped
+  fragment to go stale. Only a latency/visual-continuity question remains — see
+  M22.
+- The `TauriWorld` session-holding work first landed under M15 (`compile.rs`) is
+  kept — it is load-bearing for M21, independent of the swap mechanism's fate.
+
+**Revised mechanism (M18–M23 below).** Typst renders the whole document, at all
+times, as one multi-page SVG — no per-block swap, no cropping. Cursor and
+selection are drawn by the editing system directly from that rendering's own
+geometry (M14A's `geometry_for_range`/`jump_from_click`), not by a second,
+independently-laid-out engine. A hidden input element captures keystrokes and IME
+composition; structural edits (tables, lists, inserting a figure) go through a
+parse → transform → serialize round trip rather than a persistent PM DOM tree. See
+[design-principles.md](design-principles.md)'s revised rule 2 for the corrected
+role split.
+
+**M18 — CJK IME composition spike (not started).** The one risk M14/M14A didn't
+cover, and the one open question that decides whether M20–M23 are worth building:
+can a self-drawn cursor/selection layer over a static Typst-rendered SVG host CJK
+IME composition acceptably? Standalone harness — a hardcoded SVG, a hidden input
+element, no compile/backend integration — isolating input handling from every
+other variable. Must cover, not just Chinese:
+- **Chinese** (Pinyin, Wubi, ...): one composition string, shown underlined,
+  replaced wholesale on candidate selection.
+- **Japanese**: multi-segment conversion (bunsetsu) — a composition can hold both
+  confirmed and unconfirmed segments simultaneously, needing distinct highlight
+  states, and segment boundaries are user-adjustable mid-composition.
+  Compositions run longer than Chinese's.
+- **Korean**: jamo-to-syllable composition — typing ㄱ→ㅏ→ㄴ replaces the
+  displayed character in place (가 → 간), not appending to it. An overlay that
+  assumes a composition only grows will misrender Korean specifically.
+
+Also covers candidate-window positioning (the window itself is native OS UI; only
+the anchor point — derived from `compositionupdate` timing against current
+geometry — needs to be correct) and backspace/cancel mid-composition. Blocking:
+the entire M20–M23 direction's viability rests on this holding for all three.
+
+**M20 — Static cursor, selection, and hit-testing on live Typst rendering (not
+started).** Click-to-position, arrow-key navigation, and drag-to-select directly
+against the full-document Typst SVG, using M14A's `geometry_for_range`/
+`jump_from_click` — no text editing yet, no IME. Independent of M18 (pure
+geometry/hit-testing) — can run in parallel rather than after it. First milestone
+since M12 with a directly visible, positive result.
+
+**M21 — Edit loop: keystroke to whole-document recompile-and-redraw (not
+started, depends on M18+M20).** Keystroke → edit the session `World`'s source →
+whole-document recompile (the existing single session `World`, M14's
+already-validated numbers — e.g. ~60ms for a 14-page document) → replace the
+rendered SVG → redraw cursor from fresh geometry. No block-scoped or
+second-`World` compilation for v1 — a bounded-window/block-level compile is
+deferred and built only if long-document latency proves unacceptable in practice,
+not designed up front. Also measures two costs the M14/M14A benchmarks don't
+cover: replacing/repainting the SVG DOM itself on every keystroke (distinct from
+Typst's own compile time, and potentially significant for a large multi-page SVG),
+and preserving scroll position across a full-SVG swap.
+
+**M22 — Settle-window UX and live reflow (not started; supersedes M16).** What
+the document shows during the recompile-latency window between a keystroke and
+the next redraw, and the accepted UX of later content visibly shifting position
+as the user types (real re-pagination, not CSS reflow — precedented by Word/
+Google Docs' own live reflow). M16's hard correctness question (a sibling block
+showing stale content) is resolved by construction under M21 (see M15's
+disposition notes above); only the latency/visual-continuity question remains
+open here.
+
+**M23 — Port Phase 2 editing affordances (not started).** Table editing, the
+slash-command menu, the floating toolbar, and list operations — currently built
+on PM's persistent DOM tree — reimplemented against the parse → transform →
+serialize model (M15's finding: PM, where still used, becomes an on-demand
+structural transformer, not a persistent editing surface). Largest-effort
+milestone here; lowest technical risk.
 
 ## Risks
 
-- **Cross-block layout dependencies**: a block's compiled size/appearance isn't purely
-  a function of its own content (earlier `#set` rules, auto-numbering, widow/orphan
-  control) — full accuracy may need re-rendering a window of neighbors. Scope the
-  first version to accept some inaccuracy rather than solving this upfront.
-- **Page-boundary UX was genuinely undefined; now partly decided.** M16's interim
-  direction (above) resolves the editing-surface half (the active block's editing
-  region spans page breaks while focused; real pagination restores on blur) — the
-  numbering/`#set`/footnote correctness half (Open scope question, above) is still an
-  open product decision, needed before M15's swap-trigger scope is finalized.
+- **Cross-block layout dependencies (resolved by the revised mechanism).**
+  A block's compiled size/appearance isn't purely a function of its own content
+  (earlier `#set` rules, auto-numbering, widow/orphan control) — this was a real
+  risk for a per-block swap, which needed neighbors to stay correct without being
+  re-rendered. Under M21's whole-document recompile-and-redraw, every visible
+  block is always freshly rendered, so this risk no longer applies.
+- **Page-boundary UX (resolved by the revised mechanism).** The old open scope
+  question — an edited block's numbering/`#set`/footnote effects could leave a
+  stale-content sibling under a per-block swap — no longer applies once nothing is
+  cached or cropped independently (see M15's disposition notes). Only the settle-
+  window/live-reflow UX question remains, tracked as M22.
 - **M14A's line-box reconstruction is a heuristic (baseline clustering), not an API
   guarantee** — two visually distinct lines sharing an exact baseline (e.g. a
   multi-column layout) would currently merge into one box. Untested; would need an
-  x-discontinuity check added before M15 relies on it for that case.
-- **M14's measured linear-in-pages recompile cost** (above) means whole-doc
-  recompile-and-swap will feel laggy on long documents even though it's fine for
-  short/medium ones — M15/M16 need to design for this explicitly (session-held
-  `World`, and/or reducing recompile frequency/scope at the UI layer — the
-  perf-baseline edit-position follow-up above rules out a bounded-window recompile at
-  the *compile* layer as a fix) rather than assume recompilation is free at any
-  document length.
+  x-discontinuity check added before M20 relies on it for that case. This risk
+  gained weight after M15: line boxes now drive the primary cursor (M20), not just
+  an optional preview-sync overlay, so a wrong merge is now a visible editing bug,
+  not a cosmetic one.
+- **M14's measured linear-in-pages recompile cost** means whole-document
+  recompile-and-redraw will feel laggy on long documents even though it's fine for
+  short/medium ones. M21 accepts this for v1 (optimistic local echo + debounced
+  settle, not synchronous per-keystroke recompile — see M15's perf-standard
+  correction) rather than solving it upfront; a bounded-window/block-level compile
+  is deferred until real usage shows it's needed (the perf-baseline edit-position
+  follow-up already rules out a compile-layer bounded window as a fix, so any such
+  future work would need a different lever).
+- **CJK IME composition (new, M18) is the mechanism's one unvalidated risk.**
+  Every other piece (geometry, hit-testing, recompile cost) traces to a measured
+  spike; self-drawn cursor/selection hosting IME composition does not yet. If M18
+  fails for any of Chinese/Japanese/Korean, the revised mechanism needs rework
+  before M20+ is worth building on top of it.

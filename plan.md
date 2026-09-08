@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG | M13–M17 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A done (M14: partial-negative — see below); M15 in progress |
+| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15 done (M14: partial-negative, M15: negative — see below); M18 next |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
@@ -37,8 +37,10 @@ Two standing rules govern all future work, not just one phase — see
 1. **Primitives over nodes** — a small, fixed set of editing primitives should cover
    more node types over time, not bespoke parse/serialize/schema plumbing per node.
 2. **Typst decides visibility; the editing system decides interaction** — a construct
-   gets a permanent ProseMirror node only if it produces layout geometry *and* is
+   is directly editable in place only if it produces layout geometry *and* is
    directly authored; otherwise it stays inspector-only, addressed by source range.
+   Revised after M15 (below): cursor/selection for on-surface content is owned by
+   Typst's own rendering, not split off into a separately-laid-out editing widget.
 
 ## Current focus: Phase 3
 
@@ -69,12 +71,30 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
   content pulled out of flow (footnotes) fall out for free. No coarse-bounding-box
   fallback needed. Prototype and limitations in
   [doc/phase3-single-view.md](doc/phase3-single-view.md) (`geometry.rs`).
-- **M15 — in progress.** Per-block render/edit swap. First slice landed:
-  `compile_typst` now holds one `TauriWorld` per app session instead of
-  reconstructing one per call, applying each incoming full-document string as a
-  diffed `Source::edit` (M14's follow-up (a)) — IPC shape unchanged, only the
-  backend's handling of repeated calls. Swap UI and wiring `geometry_for_range`
-  (M14A) to a real command haven't started. Detail in
-  [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M16–M17 — blocked on M15.** Reflow/pagination handling, cursor continuity
-  across swaps.
+- **M15 — done, negative result.** Per-block render/edit swap (PM node view
+  showing either a rendered fragment or an editable view, toggled on
+  focus/blur) was built three times — NodeView-based, absolute-positioned
+  overlay, before/after crop — each fixing the previous attempt's failure but
+  landing on a new one, down to a design-principle failure: cursor/selection
+  can't be split across two independently-laid-out systems (PM/CSS and Typst)
+  rendering the same region. Cancels M15b (extend the swap to table/image/list
+  — no swap mechanism left to extend) and M17 (cursor continuity across swaps
+  — nothing to be continuous across). Session-held `World` (`compile.rs`) is
+  kept — load-bearing for M21, independent of the swap's fate. Full account,
+  including the revised mechanism and design-principles.md rule 2's
+  correction, in [doc/phase3-single-view.md](doc/phase3-single-view.md).
+- **M18 — not started.** CJK IME composition spike (Chinese/Japanese/Korean) on
+  a self-drawn cursor over a static Typst-rendered SVG — standalone harness, no
+  backend integration. The one unvalidated risk the revised mechanism depends
+  on; blocks M20–M23.
+- **M20 — not started, parallel with M18.** Static cursor/selection/hit-testing
+  directly on live Typst rendering, using M14A's geometry — no editing, no IME.
+  First visible positive milestone since M12.
+- **M21 — not started, depends on M18+M20.** Edit loop: keystroke → whole-
+  document recompile (session `World`) → redraw SVG → redraw cursor from fresh
+  geometry. No block-scoped/second-`World` compilation for v1.
+- **M22 — not started (supersedes M16).** Settle-window UX and live reflow.
+  M16's correctness question (stale sibling content) is resolved by
+  construction under M21; only latency/visual-continuity UX remains.
+- **M23 — not started.** Port Phase 2 editing affordances (tables, slash menu,
+  toolbar, lists) onto a parse → transform → serialize model.
