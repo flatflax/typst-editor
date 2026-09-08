@@ -426,6 +426,33 @@ since M12 with a directly visible result, once confirmed working.
   session-held `World` `block_geometry` uses, and an uncoalesced fast drag
   could both lag and resolve out of order.
 
+**First round of manual testing (this session) found two real bugs, both
+fixed**:
+- **Caret drawn visibly too low.** `geometry.rs`'s glyph-box approximation
+  (M14A, `ascent = full font size`, `descent = ascent × 0.25`) deliberately
+  overshoots on both ends for generous *hit-testing* — real ascent is well
+  under a full em, and the 25%-below-baseline descent exists for glyphs that
+  don't actually have one. Fine for click matching; visibly wrong once drawn
+  as a caret bar, which read as hanging into the next line's space.
+  `CaretRect` now carries both `heightPt` (the full box, kept for the
+  vertical-move line-height estimate) and `visualHeightPt` (trimmed to end at
+  `baseline_from_top_pt` — falls back to the full height for a box with no
+  baseline, e.g. an image) — only the latter is drawn.
+- **Up/Down silently failing intermittently.** The handler used `caretRect`
+  React state as the "current position" to move from, but that state is
+  populated by an async effect one round-trip behind `cursorOffset` —
+  pressing Up/Down again before that effect resolved computed the next
+  target from a stale (sometimes wrong-line) box, occasionally landing back
+  where it started and looking like the keypress did nothing. Fixed by
+  fetching geometry fresh, for the actual current offset (`cursorOffsetRef`,
+  a ref mirror, since a rapid key-repeat sequence's later presses also arrive
+  before React re-renders with the updated `cursorOffset` state), at the
+  moment each Up/Down is processed — not by trusting cached display state.
+  Rapid repeats are queued (a real FIFO, not "coalesce to latest" like
+  drag) so a burst of presses moves multiple lines rather than collapsing to
+  one — a discrete keypress must not be dropped, unlike a continuous mouse
+  position where only the latest sample matters.
+
 **M21 — Edit loop: keystroke to whole-document recompile-and-redraw (not
 started, depends on M18+M20).** Keystroke → edit the session `World`'s source →
 whole-document recompile (the existing single session `World`, M14's

@@ -43,14 +43,14 @@ describe("caretRectFromBoxes", () => {
     const pageOffsetsPt = [0];
     const after = [box({ x_pt: 50, y_top_pt: 20, width_pt: 8 })];
     const rect = caretRectFromBoxes(pageOffsetsPt, [], after);
-    expect(rect).toEqual({ xPt: 50, yTopPt: 20, heightPt: 12 });
+    expect(rect).toEqual({ xPt: 50, yTopPt: 20, heightPt: 12, visualHeightPt: 9 });
   });
 
   it("falls back to the trailing edge of the character before the cursor at end of document", () => {
     const pageOffsetsPt = [0];
     const before = [box({ x_pt: 50, y_top_pt: 20, width_pt: 8 })];
     const rect = caretRectFromBoxes(pageOffsetsPt, before, []);
-    expect(rect).toEqual({ xPt: 58, yTopPt: 20, heightPt: 12 });
+    expect(rect).toEqual({ xPt: 58, yTopPt: 20, heightPt: 12, visualHeightPt: 9 });
   });
 
   it("prefers the after-box even when a before-box is also available", () => {
@@ -65,7 +65,7 @@ describe("caretRectFromBoxes", () => {
     const pageOffsetsPt = [0];
     const before = [box({ x_pt: 10, y_top_pt: 0 }), box({ x_pt: 20, y_top_pt: 20, width_pt: 8 })];
     const rect = caretRectFromBoxes(pageOffsetsPt, before, []);
-    expect(rect).toEqual({ xPt: 28, yTopPt: 20, heightPt: 12 });
+    expect(rect).toEqual({ xPt: 28, yTopPt: 20, heightPt: 12, visualHeightPt: 9 });
   });
 
   it("resolves through the correct page offset for content on page 2+", () => {
@@ -77,6 +77,21 @@ describe("caretRectFromBoxes", () => {
 
   it("returns null when neither side has any geometry (e.g. an empty document)", () => {
     expect(caretRectFromBoxes([0], [], [])).toBeNull();
+  });
+
+  it("trims the visual height to the baseline, not the full ascent+descent box", () => {
+    const pageOffsetsPt = [0];
+    const after = [box({ height_pt: 12, baseline_from_top_pt: 9 })];
+    const rect = caretRectFromBoxes(pageOffsetsPt, [], after);
+    expect(rect?.heightPt).toBe(12); // full box, for vertical-move estimation
+    expect(rect?.visualHeightPt).toBe(9); // trimmed, for drawing
+  });
+
+  it("falls back to the full height for a box with no baseline (an image)", () => {
+    const pageOffsetsPt = [0];
+    const after = [box({ height_pt: 40, baseline_from_top_pt: null })];
+    const rect = caretRectFromBoxes(pageOffsetsPt, [], after);
+    expect(rect?.visualHeightPt).toBe(40);
   });
 });
 
@@ -107,12 +122,12 @@ describe("stepByteOffset", () => {
 
 describe("verticalMoveTargetY", () => {
   it("moves up by approximately one line height from the caret's vertical center", () => {
-    const caret = { xPt: 0, yTopPt: 100, heightPt: 12 };
+    const caret = { xPt: 0, yTopPt: 100, heightPt: 12, visualHeightPt: 9 };
     expect(verticalMoveTargetY(caret, "up")).toBe(100 + 6 - 12);
   });
 
   it("moves down by approximately one line height from the caret's vertical center", () => {
-    const caret = { xPt: 0, yTopPt: 100, heightPt: 12 };
+    const caret = { xPt: 0, yTopPt: 100, heightPt: 12, visualHeightPt: 9 };
     expect(verticalMoveTargetY(caret, "down")).toBe(100 + 6 + 12);
   });
 });

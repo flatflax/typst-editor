@@ -45,7 +45,20 @@ export type AbsoluteRect = {
 export type CaretRect = {
   xPt: number;
   yTopPt: number;
+  // The full box height (ascent + descent, per `geometry.rs`'s glyph-size
+  // approximation) — used as the line-height estimate for vertical
+  // navigation (`verticalMoveTargetY`), not for drawing the caret itself.
   heightPt: number;
+  // Trimmed to end at the glyph's baseline instead of `heightPt`'s full
+  // ascent+descent box — `geometry.rs`'s approximation deliberately
+  // overshoots on both ends for generous hit-testing (real ascent is
+  // usually well under the full font size it uses, and descent extends a
+  // further 25% below the baseline for glyphs that don't actually have
+  // one), which reads as "the caret hangs too low, into the next line's
+  // space" once drawn as a visible bar rather than just used for click
+  // matching. Falls back to `heightPt` for a box with no baseline (an
+  // image) — there's no baseline concept to trim to.
+  visualHeightPt: number;
 };
 
 function toAbsolute(pageOffsetsPt: number[], box: RawRangeBox): AbsoluteRect {
@@ -55,9 +68,21 @@ function toAbsolute(pageOffsetsPt: number[], box: RawRangeBox): AbsoluteRect {
 
 // One rect per box, for rendering a selection highlight — `block_geometry`
 // already returns one box per visual line/shape (M14A), including correctly
-// across a page break, so this needs no clustering of its own.
+// across a page break, so this needs no clustering of its own. Uses the full
+// box (unlike the caret) since a selection highlight conventionally spans
+// the whole line, not just ascent-to-baseline.
 export function selectionRectsFromBoxes(pageOffsetsPt: number[], boxes: RawRangeBox[]): AbsoluteRect[] {
   return boxes.map((box) => toAbsolute(pageOffsetsPt, box));
+}
+
+function caretFromBox(pageOffsetsPt: number[], box: RawRangeBox, xPt: number): CaretRect {
+  const abs = toAbsolute(pageOffsetsPt, box);
+  return {
+    xPt,
+    yTopPt: abs.yTopPt,
+    heightPt: abs.heightPt,
+    visualHeightPt: box.baseline_from_top_pt ?? abs.heightPt,
+  };
 }
 
 // Caret placement: prefer the LEADING edge of the character immediately
@@ -76,24 +101,25 @@ export function caretRectFromBoxes(
   afterBoxes: RawRangeBox[],
 ): CaretRect | null {
   if (afterBoxes.length > 0) {
-    const abs = toAbsolute(pageOffsetsPt, afterBoxes[0]);
-    return { xPt: abs.xPt, yTopPt: abs.yTopPt, heightPt: abs.heightPt };
+    const box = afterBoxes[0];
+    return caretFromBox(pageOffsetsPt, box, toAbsolute(pageOffsetsPt, box).xPt);
   }
   if (beforeBoxes.length > 0) {
-    const abs = toAbsolute(pageOffsetsPt, beforeBoxes[beforeBoxes.length - 1]);
-    return { xPt: abs.xPt + abs.widthPt, yTopPt: abs.yTopPt, heightPt: abs.heightPt };
+    const box = beforeBoxes[beforeBoxes.length - 1];
+    const abs = toAbsolute(pageOffsetsPt, box);
+    return caretFromBox(pageOffsetsPt, box, abs.xPt + abs.widthPt);
   }
   return null;
 }
 
 // Where a synthesized click should land (in the merged coordinate space) to
-// move the caret up/down by approximately one line — `caret.heightPt` is
-// used as the line-height estimate (a real box's own height, not a document-
-// wide constant), so it degrades gracefully across differently-sized text
-// but isn't exact for varying line heights within a paragraph. `jump_from_click`
-// (jump.rs, fixed for M20) resolves whichever page this Y actually falls on
-// and clamps to the document's start/end, so overshooting slightly at the
-// first/last line is fine.
+// move the caret up/down by approximately one line — `caret.heightPt` (the
+// full ascent+descent box, not the trimmed `visualHeightPt`) is used as the
+// line-height estimate, so it degrades gracefully across differently-sized
+// text but isn't exact for varying line heights within a paragraph.
+// `jump_from_click` (jump.rs, fixed for M20) resolves whichever page this Y
+// actually falls on and clamps to the document's start/end, so overshooting
+// slightly at the first/last line is fine.
 export function verticalMoveTargetY(caret: CaretRect, direction: "up" | "down"): number {
   const midY = caret.yTopPt + caret.heightPt / 2;
   return direction === "up" ? midY - caret.heightPt : midY + caret.heightPt;

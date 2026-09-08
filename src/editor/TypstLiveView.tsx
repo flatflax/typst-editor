@@ -66,52 +66,67 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
   const [caretRect, setCaretRect] = useState<CaretRect | null>(null);
   const [selectionRects, setSelectionRects] = useState<AbsoluteRect[]>([]);
 
+  // `cursorOffset` state lags one render behind a rapid sequence of updates
+  // (e.g. holding an arrow key, which repeats faster than React re-renders
+  // land) — Up/Down navigation reads this ref instead of the state directly
+  // so each keypress starts from the *actual* current position, not
+  // whatever `cursorOffset` was as of this closure's last render.
+  const cursorOffsetRef = useRef(cursorOffset);
+  cursorOffsetRef.current = cursorOffset;
+
   const viewBox = parseViewBox(svg);
 
-  // Re-derive geometry whenever the cursor/selection or the compiled
-  // document changes. Byte-range query construction (`stepByteOffset`) lives
-  // here rather than in `typstCursor.ts` because it needs `source` (a
-  // component input) — `typstCursor.ts` stays pure geometry math.
+  // The caret geometry (before/after a given offset) — shared by the
+  // reactive display effect below and by vertical navigation
+  // (`drainVerticalMoveQueue`), which needs a *fresh* fetch for the offset
+  // it's actually moving from rather than whatever `caretRect` state last
+  // settled to (that state can be one async round-trip stale, which was
+  // silently swallowing rapid Up/Down presses).
+  async function fetchCaretRect(offset: number): Promise<CaretRect | null> {
+    const beforeStart = stepByteOffset(source, offset, "left");
+    const afterEnd = stepByteOffset(source, offset, "right");
+    const beforeRange: [number, number] | null = beforeStart < offset ? [beforeStart, offset] : null;
+    const afterRange: [number, number] | null = offset < afterEnd ? [offset, afterEnd] : null;
+    const ranges = [beforeRange, afterRange].filter((r): r is [number, number] => r != null);
+    if (ranges.length === 0) return null;
+    try {
+      const results = await invoke<RawRangeBox[][]>("block_geometry", { source, baseDir: documentDir, ranges });
+      let i = 0;
+      const beforeBoxes = beforeRange ? results[i++] : [];
+      const afterBoxes = afterRange ? results[i++] : [];
+      return caretRectFromBoxes(pageOffsetsPt, beforeBoxes, afterBoxes);
+    } catch {
+      return null;
+    }
+  }
+
+  // Re-derive displayed geometry whenever the cursor/selection or the
+  // compiled document changes. Only responsible for what's drawn on
+  // screen — vertical navigation fetches its own fresh copy (see above).
   useEffect(() => {
     if (!source) {
       setCaretRect(null);
       setSelectionRects([]);
       return;
     }
+    let cancelled = false;
+    fetchCaretRect(cursorOffset).then((rect) => {
+      if (!cancelled) setCaretRect(rect);
+    });
+
     const selStart = Math.min(anchorOffset, cursorOffset);
     const selEnd = Math.max(anchorOffset, cursorOffset);
-    const beforeStart = stepByteOffset(source, cursorOffset, "left");
-    const afterEnd = stepByteOffset(source, cursorOffset, "right");
-
-    const ranges: [number, number][] = [];
-    const beforeRange: [number, number] | null = beforeStart < cursorOffset ? [beforeStart, cursorOffset] : null;
-    const afterRange: [number, number] | null = cursorOffset < afterEnd ? [cursorOffset, afterEnd] : null;
-    const selectionRange: [number, number] | null = selStart < selEnd ? [selStart, selEnd] : null;
-    if (beforeRange) ranges.push(beforeRange);
-    if (afterRange) ranges.push(afterRange);
-    if (selectionRange) ranges.push(selectionRange);
-    if (ranges.length === 0) {
-      setCaretRect(null);
+    if (selStart >= selEnd) {
       setSelectionRects([]);
-      return;
+    } else {
+      invoke<RawRangeBox[][]>("block_geometry", { source, baseDir: documentDir, ranges: [[selStart, selEnd]] })
+        .then((results) => {
+          if (!cancelled) setSelectionRects(selectionRectsFromBoxes(pageOffsetsPt, results[0]));
+        })
+        .catch(() => {
+          if (!cancelled) setSelectionRects([]);
+        });
     }
-
-    let cancelled = false;
-    invoke<RawRangeBox[][]>("block_geometry", { source, baseDir: documentDir, ranges })
-      .then((results) => {
-        if (cancelled) return;
-        let i = 0;
-        const beforeBoxes = beforeRange ? results[i++] : [];
-        const afterBoxes = afterRange ? results[i++] : [];
-        const selectionBoxes = selectionRange ? results[i++] : [];
-        setCaretRect(caretRectFromBoxes(pageOffsetsPt, beforeBoxes, afterBoxes));
-        setSelectionRects(selectionRange ? selectionRectsFromBoxes(pageOffsetsPt, selectionBoxes) : []);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setCaretRect(null);
-        setSelectionRects([]);
-      });
     return () => {
       cancelled = true;
     };
@@ -169,6 +184,42 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
     if (!extendSelection) setAnchorOffset(offset);
   }
 
+  // Only one vertical-move chain in flight at a time (each is two sequential
+  // `invoke` calls), but unlike drag's "jump to latest position" coalescing,
+  // a discrete keypress must not be dropped — holding Down should move down
+  // one line per repeat, not collapse a burst of repeats into a single move.
+  // A real FIFO queue, not a single "pending" slot: every press is
+  // processed in order, each starting from wherever the previous one in the
+  // queue landed.
+  const verticalMoveQueueRef = useRef<{ direction: "up" | "down"; extend: boolean }[]>([]);
+  const verticalMoveInFlightRef = useRef(false);
+
+  async function drainVerticalMoveQueue() {
+    const next = verticalMoveQueueRef.current.shift();
+    if (!next) {
+      verticalMoveInFlightRef.current = false;
+      return;
+    }
+    // Fetched fresh for the *current* offset rather than reusing `caretRect`
+    // state, which can still reflect the position from before this press
+    // (one async round-trip behind) — using it directly here silently
+    // dropped rapid Up/Down presses.
+    const fromRect = await fetchCaretRect(cursorOffsetRef.current);
+    if (fromRect) {
+      const xPt = preferredXPtRef.current ?? fromRect.xPt;
+      preferredXPtRef.current = xPt;
+      const targetY = verticalMoveTargetY(fromRect, next.direction);
+      const offset = await invoke<number | null>("jump_from_click", {
+        source,
+        xPt,
+        yPt: targetY,
+        baseDir: documentDir,
+      }).catch(() => null);
+      if (offset != null) moveTo(offset, next.extend);
+    }
+    drainVerticalMoveQueue();
+  }
+
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
@@ -179,15 +230,10 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
     }
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
-      if (!caretRect) return;
-      const xPt = preferredXPtRef.current ?? caretRect.xPt;
-      preferredXPtRef.current = xPt;
-      const targetY = verticalMoveTargetY(caretRect, event.key === "ArrowUp" ? "up" : "down");
-      invoke<number | null>("jump_from_click", { source, xPt, yPt: targetY, baseDir: documentDir })
-        .then((offset) => {
-          if (offset != null) moveTo(offset, event.shiftKey);
-        })
-        .catch(() => {});
+      verticalMoveQueueRef.current.push({ direction: event.key === "ArrowUp" ? "up" : "down", extend: event.shiftKey });
+      if (verticalMoveInFlightRef.current) return;
+      verticalMoveInFlightRef.current = true;
+      drainVerticalMoveQueue();
     }
   }
 
@@ -224,7 +270,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
                 x={caretRect.xPt - 0.4}
                 y={caretRect.yTopPt}
                 width={0.8}
-                height={caretRect.heightPt}
+                height={caretRect.visualHeightPt}
                 className="caret-bar"
               />
             )}
