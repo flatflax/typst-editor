@@ -21,13 +21,22 @@
 // a known limitation, not solved here: it needs the same live-overlay
 // technique M18 validated, wired to the real compiled document instead of a
 // static sample.
+//
+// M22: a "pending" badge fills the settle window between a keystroke and
+// the next real redraw — there is no second rendering engine to draw from
+// (M15's whole finding), so this deliberately does *not* try to blend into
+// the document's own text flow, which would need reimplementing Typst's
+// line-wrapping. It's an obviously-distinct floating tooltip near the
+// caret showing the current paragraph's raw source text, not a fake
+// rendering of it — gone the instant the real compile lands.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { EditorDiagnostic } from "./SourceEditor";
-import { svgPointFromClient } from "../util/svgGeometry";
+import { clientPointFromPt, svgPointFromClient } from "../util/svgGeometry";
 import {
   caretRectFromBoxes,
   clampXToLine,
+  currentParagraphText,
   lineContainingY,
   nearestAdjacentLine,
   RECOMPILE_DEBOUNCE_MS,
@@ -133,6 +142,22 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   cursorOffsetRef.current = cursorOffset;
 
   const viewBox = parseViewBox(svg);
+
+  // M22: whether the currently-typed `source` is reflected by the
+  // currently-*displayed* `svg` yet. Two explicit effects, not one derived
+  // from a ref: mutating a ref alone doesn't trigger a re-render, so
+  // clearing "pending" that way would only take visible effect once
+  // *something else* (e.g. the geometry-refetch effect below) happened to
+  // also re-render around the same time — true in practice since both
+  // debounces share a timing constant, but incidental, not guaranteed.
+  // Explicit `setIsPending` calls make hiding the badge not depend on that.
+  const [isPending, setIsPending] = useState(false);
+  useEffect(() => {
+    setIsPending(true);
+  }, [source]);
+  useEffect(() => {
+    setIsPending(false);
+  }, [svg]);
 
   // The caret geometry (before/after a given offset) — shared by the
   // reactive display effect below and by vertical navigation
@@ -519,6 +544,18 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     }
   }
 
+  // M22: the pending badge's position and text — `null` when there's
+  // nothing to show (not pending, or no caret geometry yet to anchor to).
+  // Computed inline during render, same as `viewBox` above — a plain read
+  // (`getBoundingClientRect()`), not a mutation, so safe here the same way.
+  const pendingBadge = (() => {
+    if (!isPending || !caretRect) return null;
+    const base = baseSvgEl();
+    if (!base) return null;
+    const { clientX, clientY } = clientPointFromPt(base, caretRect.xPt, caretRect.yTopPt);
+    return { clientX, clientY, text: currentParagraphText(source, cursorOffset) };
+  })();
+
   return (
     <div className="typst-live-view" ref={scrollContainerRef} onScroll={handleContainerScroll}>
       <p className="scope-note">
@@ -570,6 +607,14 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
           </svg>
         )}
       </div>
+      {pendingBadge && (
+        <div
+          className="typst-live-pending-badge"
+          style={{ left: pendingBadge.clientX, top: pendingBadge.clientY }}
+        >
+          {pendingBadge.text}
+        </div>
+      )}
     </div>
   );
 };

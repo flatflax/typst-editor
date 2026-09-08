@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   caretRectFromBoxes,
   clampXToLine,
+  currentParagraphText,
   lineContainingY,
   nearestAdjacentLine,
   selectionRectsFromBoxes,
@@ -255,5 +256,34 @@ describe("spliceSource", () => {
   it("inserting a multi-byte character advances the cursor by its byte length, not char count", () => {
     const result = spliceSource("ab", 1, 1, "苹"); // 3 UTF-8 bytes
     expect(result).toEqual({ source: "a苹b", cursorOffset: 4 });
+  });
+});
+
+describe("currentParagraphText", () => {
+  it("returns the whole source when there is only one paragraph", () => {
+    const source = "Hello world.";
+    expect(currentParagraphText(source, 5)).toBe("Hello world.");
+  });
+
+  it("finds the paragraph between two blank-line boundaries", () => {
+    const source = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
+    const offset = source.indexOf("Second") + 3;
+    expect(currentParagraphText(source, offset)).toBe("Second paragraph.");
+  });
+
+  it("returns the first paragraph when the offset is in it", () => {
+    const source = "First paragraph.\n\nSecond paragraph.";
+    expect(currentParagraphText(source, 3)).toBe("First paragraph.");
+  });
+
+  it("returns the last paragraph when the offset is at the end of the document", () => {
+    const source = "First paragraph.\n\nLast paragraph.";
+    expect(currentParagraphText(source, source.length)).toBe("Last paragraph.");
+  });
+
+  it("handles a multi-byte CJK character before the offset correctly", () => {
+    const source = "苹果段落。\n\n第二段。";
+    const offset = new TextEncoder().encode("苹果段落。\n\n第").length; // partway into the second paragraph
+    expect(currentParagraphText(source, offset)).toBe("第二段。");
   });
 });

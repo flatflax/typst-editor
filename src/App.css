@@ -453,6 +453,30 @@
   }
 }
 
+/* M22: the "pending" badge shown while a real recompile is in flight —
+   deliberately styled as an obviously-temporary floating tooltip (not
+   blended into the document's own text/typography), since it's raw source
+   text, not a real Typst rendering of it. Positioned via inline
+   `left`/`top` (client px, from `clientPointFromPt`) in `TypstLiveView.tsx`. */
+.typst-live-pending-badge {
+  position: fixed;
+  transform: translateY(-100%);
+  max-width: 24rem;
+  margin-top: -0.35rem;
+  padding: 0.3rem 0.5rem;
+  background: #2f2f2f;
+  color: #f6f6f6;
+  border-radius: 4px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  pointer-events: none;
+  opacity: 0.92;
+  z-index: 10;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;

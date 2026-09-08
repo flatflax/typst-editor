@@ -25,6 +25,24 @@ import { byteToUtf16Offset, nextCodePointOffset, prevCodePointOffset, utf16ToByt
 // for the underlying "nothing visible until the debounce settles" gap.
 export const RECOMPILE_DEBOUNCE_MS = 150;
 
+// M22: the raw Typst source text of the paragraph containing `byteOffset` —
+// Typst paragraphs are separated by a blank line ("\n\n"), so this just
+// finds the nearest one on each side. Used for the optimistic "pending"
+// preview shown while a real recompile is in flight (`TypstLiveView.tsx`):
+// deliberately the *raw* source (any `*`/`_`/`#` markup included verbatim),
+// not a real Typst rendering — parsing/stripping it would need a real
+// parser (`parse_typst_ast`, async/backend), out of scope for a lightweight,
+// best-effort typing indicator that disappears the moment the real render
+// lands.
+export function currentParagraphText(source: string, byteOffset: number): string {
+  const utf16Offset = byteToUtf16Offset(source, byteOffset);
+  const beforeBreak = source.lastIndexOf("\n\n", Math.max(0, utf16Offset - 1));
+  const start = beforeBreak === -1 ? 0 : beforeBreak + 2;
+  const afterBreak = source.indexOf("\n\n", utf16Offset);
+  const end = afterBreak === -1 ? source.length : afterBreak;
+  return source.slice(start, end);
+}
+
 // The Typst byte offset one code point left/right of `byteOffset` — used
 // both for arrow-key navigation and for constructing the before/after
 // geometry query ranges the caret is positioned from. Round-trips through
