@@ -47,14 +47,22 @@ Reorganized 2026-09-04 into five folders mirroring the architecture:
 - `model/` — the Editor Model schema (`schema.ts`), the hub.
 - `spokes/` — the two conversion spokes: `markdown.ts`, `typstAst.ts`.
 - `editor/` — WYSIWYG and source-mode editing surfaces: `WysiwygEditor.tsx`,
-  `wysiwygCommands.ts`, `SourceEditor.tsx`.
+  `wysiwygCommands.ts`, `SourceEditor.tsx`. Also, since M20 (Phase 3's
+  revised mechanism — see below): `TypstLiveView.tsx` (the "Live cursor"
+  view, no PM involved) and `typstCursor.ts` (its pure geometry/offset
+  math, tested independently of React/Tauri).
 - `shell/` — app-level, non-editing concerns: `fileIO.ts`, `recentFiles.ts`,
   `appMenu.ts`.
-- `util/` — small pure helpers: `offsets.ts`, `diagnosticPosition.ts`.
+- `util/` — small pure helpers: `offsets.ts`, `diagnosticPosition.ts`,
+  `svgGeometry.ts` (screen-pixel ⇄ SVG-viewBox-pt conversion, shared by the
+  split preview pane and `TypstLiveView.tsx`).
 
 `App.tsx`/`main.tsx`/`App.css`/`loop.test.ts` (the cross-spoke round-trip suite,
 spanning `model` + `spokes`) stay at `src/` root. `src-tauri/src` is deliberately flat
-— each file is one Tauri command or the `World` impl, already single-purpose.
+— each file is one Tauri command or the `World` impl, already single-purpose; `geometry.rs`
+(M14A/M20 — per-source-range rendered geometry, `geometry_for_range`/`page_offsets_pt`,
+backing the `block_geometry` command) is the one exception with meaningful internal
+structure of its own.
 
 ## Key technical decisions
 
@@ -85,6 +93,17 @@ spanning `model` + `spokes`) stay at `src/` root. `src-tauri/src` is deliberatel
     for both lookup directions. Still approximate *inside* a marked-up run — Typst's
     `*`/`_`/`` ` `` wrapper chars and text escaping make a run's Typst byte length
     diverge from its PM character length. Accepted as an MVP limitation.
+  - **Scope, since Phase 3's M15 (see [phase3-single-view.md](phase3-single-view.md)
+    and [design-principles.md](design-principles.md)'s revised rule 2)**: this PM-position
+    mapping stays load-bearing for Phase 1/2's split-pane WYSIWYG ⇄ preview click/cursor
+    sync (`App.tsx`'s `handlePreviewClick`/`highlightFromCursor`), but is *not* what the
+    Phase 3 "Live cursor" view (M20, `TypstLiveView.tsx`) uses. M15 found that
+    cursor/selection can't be split across two independently-laid-out systems rendering
+    the same region (PM/CSS vs. Typst) — M20's cursor is addressed purely in Typst byte
+    offsets, positioned from real rendered geometry (`geometry_for_range`/
+    `block_geometry`, M14A), with no PM position map in the loop at all. Two coexisting
+    position-mapping mechanisms, serving two different views, not one being upgraded into
+    the other.
 
 - **No WASM.** Tauri gives a native Rust backend; embed Typst natively (same pattern as
   `typst-cli`/`tinymist`), not compiled to WASM (that's for browser-only apps).
