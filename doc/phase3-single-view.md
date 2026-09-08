@@ -308,12 +308,22 @@ parse → transform → serialize round trip rather than a persistent PM DOM tre
 [design-principles.md](design-principles.md)'s revised rule 2 for the corrected
 role split.
 
-**M18 — CJK IME composition spike (not started).** The one risk M14/M14A didn't
-cover, and the one open question that decides whether M20–M23 are worth building:
-can a self-drawn cursor/selection layer over a static Typst-rendered SVG host CJK
-IME composition acceptably? Standalone harness — a hardcoded SVG, a hidden input
-element, no compile/backend integration — isolating input handling from every
-other variable. Must cover, not just Chinese:
+**M18 — CJK IME composition spike (in progress — harness built, awaiting manual
+test results).** The one risk M14/M14A didn't cover, and the one open question
+that decides whether M20–M23 are worth building: can a self-drawn cursor/
+selection layer over a static Typst-rendered SVG host CJK IME composition
+acceptably? Standalone harness at `spike/m18-ime/index.html` — a static page,
+no build step, no compile/backend integration at runtime (its background SVG
+was compiled once from the real `compile_typst` pipeline and hardcoded in, so
+its glyphs are real Typst output, not a CSS mockup) — isolating input handling
+from every other variable. A hidden `<input>` captures keystrokes/composition;
+a self-drawn caret and composition overlay render from `compositionupdate`'s
+`data` field as a full replace every time, never a diff/append (the harness's
+own inline comment explains why: an append-only assumption would misrender
+Korean). An event log records every `keydown`/`beforeinput`/`input`/
+`composition*` event for inspection. Composition can't be exercised
+meaningfully by synthetic events — needs a real IME — so this milestone's
+result depends on manual testing. Must cover, not just Chinese:
 - **Chinese** (Pinyin, Wubi, ...): one composition string, shown underlined,
   replaced wholesale on candidate selection.
 - **Japanese**: multi-segment conversion (bunsetsu) — a composition can hold both
