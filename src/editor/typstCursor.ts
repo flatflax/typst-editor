@@ -112,21 +112,6 @@ export function caretRectFromBoxes(
   return null;
 }
 
-// A line/shape box reduced to just what vertical navigation needs — real
-// geometry to search through, not a distance to guess. `AbsoluteRect` (used
-// for selection highlights) keeps x/width too, which this doesn't need.
-export type LineBox = {
-  yTopPt: number;
-  heightPt: number;
-};
-
-export function lineBoxesFromRaw(pageOffsetsPt: number[], boxes: RawRangeBox[]): LineBox[] {
-  return boxes.map((box) => {
-    const abs = toAbsolute(pageOffsetsPt, box);
-    return { yTopPt: abs.yTopPt, heightPt: abs.heightPt };
-  });
-}
-
 // Line spacing genuinely differs across block types in the same document —
 // a heading's line height, a paragraph's, and a list item's are all
 // different, and Typst's own block spacing (space after a heading, spacing
@@ -148,7 +133,18 @@ export function lineBoxesFromRaw(pageOffsetsPt: number[], boxes: RawRangeBox[]):
 // glyph-run hits) without needing exact equality.
 const SAME_LINE_EPSILON_PT = 0.5;
 
-export function nearestAdjacentLine(lines: LineBox[], currentYPt: number, direction: "up" | "down"): LineBox | null {
+// `AbsoluteRect` (also used for selection highlights) rather than a
+// yTopPt/heightPt-only shape — the caller needs the target line's own x/
+// width too, to clamp the sticky-column X into it (see `clampXToLine`):
+// without that, moving onto a *shorter* line than the current one aimed a
+// synthesized click past where that line's content actually ends, which
+// `jump_from_click` couldn't resolve to anything, so the caret appeared
+// frozen.
+export function nearestAdjacentLine(
+  lines: AbsoluteRect[],
+  currentYPt: number,
+  direction: "up" | "down",
+): AbsoluteRect | null {
   const candidates = lines.filter((line) =>
     direction === "down" ? line.yTopPt > currentYPt + SAME_LINE_EPSILON_PT : line.yTopPt < currentYPt - SAME_LINE_EPSILON_PT,
   );
@@ -157,4 +153,11 @@ export function nearestAdjacentLine(lines: LineBox[], currentYPt: number, direct
     const isCloser = direction === "down" ? line.yTopPt < closest.yTopPt : line.yTopPt > closest.yTopPt;
     return isCloser ? line : closest;
   });
+}
+
+// Sticky-column X, clamped into whatever the target line's own content
+// actually spans — moving onto a shorter line should land at its end, not
+// aim past it and fail to resolve to anything.
+export function clampXToLine(xPt: number, line: AbsoluteRect): number {
+  return Math.max(line.xPt, Math.min(line.xPt + line.widthPt, xPt));
 }

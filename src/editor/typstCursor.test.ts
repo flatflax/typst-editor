@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   caretRectFromBoxes,
-  lineBoxesFromRaw,
+  clampXToLine,
   nearestAdjacentLine,
   selectionRectsFromBoxes,
   stepByteOffset,
   type RawRangeBox,
 } from "./typstCursor";
+
+function rect(overrides: Partial<{ xPt: number; yTopPt: number; widthPt: number; heightPt: number }> = {}) {
+  return { xPt: 0, yTopPt: 0, widthPt: 100, heightPt: 12, ...overrides };
+}
 
 function box(overrides: Partial<RawRangeBox> = {}): RawRangeBox {
   return {
@@ -121,14 +125,6 @@ describe("stepByteOffset", () => {
   });
 });
 
-describe("lineBoxesFromRaw", () => {
-  it("reduces raw boxes to just yTopPt/heightPt in the merged coordinate space", () => {
-    const pageOffsetsPt = [0, 300];
-    const lines = lineBoxesFromRaw(pageOffsetsPt, [box({ page: 2, y_top_pt: 20, height_pt: 12 })]);
-    expect(lines).toEqual([{ yTopPt: 320, heightPt: 12 }]);
-  });
-});
-
 describe("nearestAdjacentLine", () => {
   // The three real failure modes found testing a document mixing a heading,
   // a wrapped paragraph, and a bullet list -- a single guessed multiplier of
@@ -136,39 +132,60 @@ describe("nearestAdjacentLine", () => {
   // (see this function's own doc comment).
   it("does not skip past a paragraph's first wrapped line when moving down from a heading", () => {
     // A heading's own line is much taller than the body text below it.
-    const headingLine = { yTopPt: 0, heightPt: 30 };
-    const paragraphLine1 = { yTopPt: 40, heightPt: 12 };
-    const paragraphLine2 = { yTopPt: 55, heightPt: 12 };
+    const headingLine = rect({ yTopPt: 0, heightPt: 30 });
+    const paragraphLine1 = rect({ yTopPt: 40, heightPt: 12 });
+    const paragraphLine2 = rect({ yTopPt: 55, heightPt: 12 });
     const lines = [headingLine, paragraphLine1, paragraphLine2];
     expect(nearestAdjacentLine(lines, headingLine.yTopPt, "down")).toEqual(paragraphLine1);
   });
 
   it("moves to the very next list item even when list-item spacing exceeds plain line height", () => {
-    const item1 = { yTopPt: 0, heightPt: 12 };
-    const item2 = { yTopPt: 25, heightPt: 12 }; // gap wider than heightPt alone
+    const item1 = rect({ yTopPt: 0, heightPt: 12 });
+    const item2 = rect({ yTopPt: 25, heightPt: 12 }); // gap wider than heightPt alone
     const lines = [item1, item2];
     expect(nearestAdjacentLine(lines, item1.yTopPt, "down")).toEqual(item2);
   });
 
   it("does not skip a list's last item when moving up from the paragraph after it", () => {
-    const item1 = { yTopPt: 0, heightPt: 12 };
-    const item2 = { yTopPt: 20, heightPt: 12 };
-    const paragraph = { yTopPt: 45, heightPt: 12 };
+    const item1 = rect({ yTopPt: 0, heightPt: 12 });
+    const item2 = rect({ yTopPt: 20, heightPt: 12 });
+    const paragraph = rect({ yTopPt: 45, heightPt: 12 });
     const lines = [item1, item2, paragraph];
     expect(nearestAdjacentLine(lines, paragraph.yTopPt, "up")).toEqual(item2);
   });
 
   it("ignores other boxes belonging to the same visual line (within the epsilon)", () => {
-    const currentLine = { yTopPt: 20, heightPt: 12 };
-    const sameLineOtherHit = { yTopPt: 20.2, heightPt: 12 }; // within SAME_LINE_EPSILON_PT
-    const nextLine = { yTopPt: 35, heightPt: 12 };
+    const currentLine = rect({ yTopPt: 20, heightPt: 12 });
+    const sameLineOtherHit = rect({ yTopPt: 20.2, heightPt: 12 }); // within SAME_LINE_EPSILON_PT
+    const nextLine = rect({ yTopPt: 35, heightPt: 12 });
     const lines = [currentLine, sameLineOtherHit, nextLine];
     expect(nearestAdjacentLine(lines, currentLine.yTopPt, "down")).toEqual(nextLine);
   });
 
   it("returns null when there is nothing further in that direction (document start/end)", () => {
-    const onlyLine = { yTopPt: 20, heightPt: 12 };
+    const onlyLine = rect({ yTopPt: 20, heightPt: 12 });
     expect(nearestAdjacentLine([onlyLine], onlyLine.yTopPt, "up")).toBeNull();
     expect(nearestAdjacentLine([onlyLine], onlyLine.yTopPt, "down")).toBeNull();
+  });
+});
+
+describe("clampXToLine", () => {
+  // The real bug this fixes: moving onto a *shorter* line than the current
+  // one aimed a synthesized click past where that line's content actually
+  // ends, which jump_from_click couldn't resolve to anything -- the caret
+  // appeared frozen instead of landing at the short line's end.
+  it("clamps to the line's right edge when the sticky column is past it", () => {
+    const shortLine = rect({ xPt: 10, widthPt: 20 }); // spans 10..30
+    expect(clampXToLine(100, shortLine)).toBe(30);
+  });
+
+  it("clamps to the line's left edge when the sticky column is before it", () => {
+    const line = rect({ xPt: 10, widthPt: 20 });
+    expect(clampXToLine(0, line)).toBe(10);
+  });
+
+  it("leaves the column unchanged when it already falls within the line", () => {
+    const line = rect({ xPt: 10, widthPt: 20 });
+    expect(clampXToLine(15, line)).toBe(15);
   });
 });

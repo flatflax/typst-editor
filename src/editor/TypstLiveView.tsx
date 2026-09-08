@@ -19,13 +19,12 @@ import type { EditorDiagnostic } from "./SourceEditor";
 import { svgPointFromClient } from "../util/svgGeometry";
 import {
   caretRectFromBoxes,
-  lineBoxesFromRaw,
+  clampXToLine,
   nearestAdjacentLine,
   selectionRectsFromBoxes,
   stepByteOffset,
   type AbsoluteRect,
   type CaretRect,
-  type LineBox,
   type RawRangeBox,
 } from "./typstCursor";
 
@@ -110,8 +109,8 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
   // doesn't re-fetch the whole document's geometry on every keypress; the
   // cache is naturally invalidated once the document actually changes
   // (M21) since `source` itself will differ then.
-  const documentLinesCacheRef = useRef<{ source: string; lines: Promise<LineBox[]> } | null>(null);
-  function fetchDocumentLines(): Promise<LineBox[]> {
+  const documentLinesCacheRef = useRef<{ source: string; lines: Promise<AbsoluteRect[]> } | null>(null);
+  function fetchDocumentLines(): Promise<AbsoluteRect[]> {
     if (documentLinesCacheRef.current?.source === source) {
       return documentLinesCacheRef.current.lines;
     }
@@ -124,7 +123,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
           baseDir: documentDir,
           ranges: [[0, byteLen]],
         });
-        return lineBoxesFromRaw(pageOffsetsPt, results[0]);
+        return selectionRectsFromBoxes(pageOffsetsPt, results[0]);
       } catch {
         return [];
       }
@@ -242,12 +241,18 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
       const lines = await fetchDocumentLines();
       const target = nearestAdjacentLine(lines, fromRect.yTopPt, next.direction);
       if (target) {
-        const xPt = preferredXPtRef.current ?? fromRect.xPt;
-        preferredXPtRef.current = xPt;
+        // The *sticky* column remembers the original, unclamped X (so
+        // returning to a longer line later snaps back to it, standard
+        // editor UX) — but the actual click must be clamped into the
+        // target line's own extent, or aiming past a *shorter* line's end
+        // gives `jump_from_click` nothing to resolve to, and the caret
+        // appears frozen.
+        const preferredXPt = preferredXPtRef.current ?? fromRect.xPt;
+        preferredXPtRef.current = preferredXPt;
         const targetY = target.yTopPt + target.heightPt / 2;
         const offset = await invoke<number | null>("jump_from_click", {
           source,
-          xPt,
+          xPt: clampXToLine(preferredXPt, target),
           yPt: targetY,
           baseDir: documentDir,
         }).catch(() => null);
