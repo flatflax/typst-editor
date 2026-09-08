@@ -497,20 +497,59 @@ same numbers were used to *draw* something or navigate by real distance:
    mouse movement then extended a selection. Fixed by setting the flag
    synchronously at the top of `handleMouseDown`.
 
-**M21 — Edit loop: keystroke to whole-document recompile-and-redraw (not started
-— M18 and M20, its two dependencies, are both done).** Keystroke → edit the
-session `World`'s source → whole-document recompile (the existing single
-session `World`, M14's already-validated numbers — e.g. ~60ms for a 14-page
-document) → replace the rendered SVG → redraw cursor from fresh geometry. No
+**M21 — Edit loop: keystroke to whole-document recompile-and-redraw (built,
+awaiting manual verification).** Keystroke → edit the session `World`'s
+source → whole-document recompile (the existing single session `World`,
+M14's already-validated numbers — e.g. ~60ms for a 14-page document) →
+replace the rendered SVG → redraw cursor from fresh geometry. No
 block-scoped or second-`World` compilation for v1 — that architecture was
 planned as its own milestone (M19, hence the gap in the numbering) but folded
 in here instead, since M14's own numbers already make it unnecessary for v1;
 it's deferred and built only if long-document latency proves unacceptable in
-practice, not designed up front. Also measures two costs the M14/M14A
-benchmarks don't cover: replacing/repainting the SVG DOM itself on every
-keystroke (distinct from Typst's own compile time, and potentially significant
-for a large multi-page SVG), and preserving scroll position across a full-SVG
-swap.
+practice, not designed up front.
+
+- **Mechanism**: a hidden `<textarea>` inside `TypstLiveView.tsx`'s stage
+  captures keystrokes/IME composition via `input`/`compositionend` events —
+  not `keydown`, matching M18's validated harness exactly, since IME
+  composition only works correctly through the browser's own composition
+  machinery. `source` is edited directly (`spliceSource`, `typstCursor.ts`)
+  and never routed through ProseMirror, per M15's finding — PM is, at most,
+  an on-demand structural transformer for tables/lists/figures, not a
+  persistent editing surface for plain text. `App.tsx` gains its own
+  `liveTypstText` buffer for the Live cursor view, following the same
+  lazy-refresh convention as `typstText`/`markdownText` (only pushed a fresh
+  value on switching into the view or loading a file).
+- **A real, non-obvious cost found before shipping, not after**:
+  `block_geometry` (compile.rs) runs its own full `typst::compile` call
+  internally — it walks a *compiled* document's Frame tree, and doesn't reuse
+  whatever `compile_typst`'s own debounced call already produced. Refetching
+  caret/selection geometry on every keystroke without a matching debounce
+  would have silently forced a *second* full recompile per keystroke,
+  defeating the entire point of debouncing `compile_typst` in the first
+  place. Fixed by sharing one `RECOMPILE_DEBOUNCE_MS` constant
+  (`typstCursor.ts`) between `App.tsx`'s compile debounce and
+  `TypstLiveView.tsx`'s geometry refetch — but only when `source` itself just
+  changed (typing); a pure cursor/selection move with `source` unchanged
+  (navigation) skips the delay entirely, since `block_geometry`'s compile
+  call is then a comemo cache hit (near-free, M14) and navigation stays
+  instant. Two different triggers needing two different treatments, not a
+  single blanket debounce.
+- **No live IME composition overlay yet** — a composing IME (typing Chinese/
+  Japanese/Korean) shows nothing on screen until `compositionend` commits it,
+  unlike M18's own harness, which drew the in-progress composition string
+  live. The commit-only path *works* (M18's `compositionend`-commits pattern
+  carries over directly, including its backspace-cancellation fix via a
+  `composingRef` rather than trusting `isComposing` alone), but the missing
+  live preview is a real UX gap for CJK input specifically, given this
+  project's CJK orientation — deferred as a known follow-up, not solved here.
+- **What M21 deliberately doesn't attempt**: any local/optimistic rendering
+  during the settle window between a keystroke and the next redraw (there is
+  no rendering layer available except Typst itself — showing *something*
+  progressively would need its own approximation, which is explicitly M22's
+  scope, not this one's); undo/redo for this view (browser-native undo on
+  the hidden textarea wouldn't do anything useful, since its value is
+  cleared after every event; a real fix needs its own history stack, not
+  attempted yet).
 
 **M22 — Settle-window UX and live reflow (not started; supersedes M16).** What
 the document shows during the recompile-latency window between a keystroke and

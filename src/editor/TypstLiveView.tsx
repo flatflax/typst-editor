@@ -1,11 +1,10 @@
-// M20 (plan.md): static cursor/selection/hit-testing directly on live Typst
-// rendering. Click-to-position, arrow-key navigation, drag-to-select — no
-// text editing, no IME (that's M21). The first milestone of the revised
-// single-view mechanism (see doc/phase3-single-view.md's M15 entry) with a
-// directly visible result: the whole compiled document is always shown,
-// full multi-page, with a caret/selection drawn from the same geometry data
-// (`block_geometry`/`geometry_for_range`, M14A) that M18 already proved can
-// host CJK IME composition.
+// M20/M21 (plan.md): static cursor/selection/hit-testing, plus (M21) a real
+// edit loop, directly on live Typst rendering. The first milestone of the
+// revised single-view mechanism (see doc/phase3-single-view.md's M15 entry)
+// with a directly visible result: the whole compiled document is always
+// shown, full multi-page, with a caret/selection drawn from the same
+// geometry data (`block_geometry`/`geometry_for_range`, M14A) that M18
+// already proved can host CJK IME composition.
 //
 // Renders the compiled SVG once (unmodified) and overlays a second `<svg>`
 // with the identical `viewBox`, positioned exactly on top via CSS — the
@@ -13,6 +12,15 @@
 // coordinate space as the base SVG, so no px conversion or resize listener
 // is needed for *drawing* them (only for *hit-testing* a click, which still
 // needs `getBoundingClientRect()` — see `util/svgGeometry.ts`).
+//
+// M21 typing model: a hidden `<textarea>` captures keystrokes and IME
+// composition (matching M18's validated harness — `input`/`compositionend`
+// events, not `keydown`, so IME composition machinery works correctly). No
+// live composition overlay yet — a composing IME shows nothing on screen
+// until `compositionend` commits it, unlike M18's own harness. Deferred as
+// a known limitation, not solved here: it needs the same live-overlay
+// technique M18 validated, wired to the real compiled document instead of a
+// static sample.
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { EditorDiagnostic } from "./SourceEditor";
@@ -22,7 +30,9 @@ import {
   clampXToLine,
   lineContainingY,
   nearestAdjacentLine,
+  RECOMPILE_DEBOUNCE_MS,
   selectionRectsFromBoxes,
+  spliceSource,
   stepByteOffset,
   type AbsoluteRect,
   type CaretRect,
@@ -35,7 +45,20 @@ type Props = {
   pageOffsetsPt: number[];
   documentDir: string | null;
   diagnostics: EditorDiagnostic[];
+  onChange: (source: string) => void;
 };
+
+// `block_geometry` (compile.rs) runs its own full `typst::compile` call
+// internally — it walks a *compiled* document's Frame tree, and doesn't
+// reuse whatever `compile_typst`'s own debounced call already produced.
+// Refetching caret/selection geometry on every keystroke without a matching
+// debounce would silently force a full recompile per keystroke, defeating
+// the entire point of debouncing `compile_typst` in the first place. Shares
+// `RECOMPILE_DEBOUNCE_MS` with `App.tsx`'s own compile debounce so both
+// settle at roughly the same moment; cursor/selection-only changes (pure
+// navigation, `source` unchanged) skip this delay entirely —
+// `block_geometry`'s compile call is then a comemo cache hit (near-free,
+// M14), and navigation stays instant.
 
 function parseViewBox(svg: string | null): string | null {
   if (!svg) return null;
@@ -46,8 +69,17 @@ function parseViewBox(svg: string | null): string | null {
   return match ? match[1] : null;
 }
 
-const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }: Props) => {
+const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, onChange }: Props) => {
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const hiddenInputRef = useRef<HTMLTextAreaElement | null>(null);
+  // Tracks composition state ourselves rather than trusting a single
+  // `InputEvent.isComposing` check — Chromium fires the terminal `input`
+  // event for a composition emptied via backspace with `isComposing:false`,
+  // ~0.3ms *before* `compositionend` actually fires (found live-testing
+  // M18's harness). Trusting that one event's flag there deletes a
+  // character from already-committed content instead of letting the
+  // cancelled composition vanish harmlessly.
+  const composingRef = useRef(false);
   const draggingRef = useRef(false);
   // `jump_from_click` isn't on the session-held `World` (unlike
   // `block_geometry`) and a fast drag can fire far more mousemove events per
@@ -136,30 +168,51 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
   // Re-derive displayed geometry whenever the cursor/selection or the
   // compiled document changes. Only responsible for what's drawn on
   // screen — vertical navigation fetches its own fresh copy (see above).
+  // Debounced (`RECOMPILE_DEBOUNCE_MS`) specifically when `source` itself
+  // just changed (typing); immediate for a pure cursor/selection move with
+  // the same `source` (navigation) — see the import's own comment above for why
+  // the two cases need different treatment.
+  const lastGeometrySourceRef = useRef(source);
   useEffect(() => {
     if (!source) {
       setCaretRect(null);
       setSelectionRects([]);
+      lastGeometrySourceRef.current = source;
       return;
     }
-    let cancelled = false;
-    fetchCaretRect(cursorOffset).then((rect) => {
-      if (!cancelled) setCaretRect(rect);
-    });
 
-    const selStart = Math.min(anchorOffset, cursorOffset);
-    const selEnd = Math.max(anchorOffset, cursorOffset);
-    if (selStart >= selEnd) {
-      setSelectionRects([]);
-    } else {
-      invoke<RawRangeBox[][]>("block_geometry", { source, baseDir: documentDir, ranges: [[selStart, selEnd]] })
-        .then((results) => {
-          if (!cancelled) setSelectionRects(selectionRectsFromBoxes(pageOffsetsPt, results[0]));
-        })
-        .catch(() => {
-          if (!cancelled) setSelectionRects([]);
-        });
+    let cancelled = false;
+    function runFetch() {
+      fetchCaretRect(cursorOffset).then((rect) => {
+        if (!cancelled) setCaretRect(rect);
+      });
+
+      const selStart = Math.min(anchorOffset, cursorOffset);
+      const selEnd = Math.max(anchorOffset, cursorOffset);
+      if (selStart >= selEnd) {
+        setSelectionRects([]);
+      } else {
+        invoke<RawRangeBox[][]>("block_geometry", { source, baseDir: documentDir, ranges: [[selStart, selEnd]] })
+          .then((results) => {
+            if (!cancelled) setSelectionRects(selectionRectsFromBoxes(pageOffsetsPt, results[0]));
+          })
+          .catch(() => {
+            if (!cancelled) setSelectionRects([]);
+          });
+      }
     }
+
+    const sourceChanged = lastGeometrySourceRef.current !== source;
+    lastGeometrySourceRef.current = source;
+
+    if (sourceChanged) {
+      const timer = setTimeout(runFetch, RECOMPILE_DEBOUNCE_MS);
+      return () => {
+        cancelled = true;
+        clearTimeout(timer);
+      };
+    }
+    runFetch();
     return () => {
       cancelled = true;
     };
@@ -193,7 +246,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
   }
 
   function handleMouseDown(event: React.MouseEvent<HTMLDivElement>) {
-    stageRef.current?.focus();
+    hiddenInputRef.current?.focus();
     // Set synchronously, not inside the `.then()` below — `offsetAtClient`
     // is async (an `invoke` round-trip, doubled when it falls back to the
     // blank-space snap), so a fast click's `mouseup` can fire and clear
@@ -239,6 +292,85 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
   function moveTo(offset: number, extendSelection: boolean) {
     setCursorOffset(offset);
     if (!extendSelection) setAnchorOffset(offset);
+  }
+
+  // M21: text editing. `source` is the raw Typst source buffer — edited
+  // directly here, never through ProseMirror (M15's finding: PM is, at
+  // most, an on-demand structural transformer for tables/lists/figures, not
+  // a persistent editing surface for plain text).
+  function selectionRange(): [number, number] {
+    return [Math.min(anchorOffset, cursorOffset), Math.max(anchorOffset, cursorOffset)];
+  }
+
+  // The one primitive every edit reduces to: replace `[start, end)` with
+  // `insertText`, then collapse the cursor to just after it. Every other
+  // handler below only has to compute the right range.
+  function commitEdit(start: number, end: number, insertText: string) {
+    const result = spliceSource(source, start, end, insertText);
+    onChange(result.source);
+    setCursorOffset(result.cursorOffset);
+    setAnchorOffset(result.cursorOffset);
+  }
+
+  function handleInsert(text: string) {
+    const [start, end] = selectionRange();
+    commitEdit(start, end, text);
+  }
+
+  function handleDeleteBackward() {
+    const [start, end] = selectionRange();
+    if (start !== end) {
+      commitEdit(start, end, "");
+    } else {
+      commitEdit(stepByteOffset(source, cursorOffset, "left"), cursorOffset, "");
+    }
+  }
+
+  function handleDeleteForward() {
+    const [start, end] = selectionRange();
+    if (start !== end) {
+      commitEdit(start, end, "");
+    } else {
+      commitEdit(cursorOffset, stepByteOffset(source, cursorOffset, "right"), "");
+    }
+  }
+
+  // `input`/`compositionend`, not `keydown` — matches M18's validated
+  // harness exactly, since IME composition only works correctly through the
+  // browser's own composition machinery, not synthesized from individual
+  // keydowns. The hidden `<textarea>`'s own value is cleared after every
+  // commit (see both handlers below) so it never needs diffing — each event
+  // already carries exactly the piece of text that changed.
+  function handleHiddenInputChange(event: React.FormEvent<HTMLTextAreaElement>) {
+    const native = event.nativeEvent as InputEvent;
+    const el = event.currentTarget;
+    // Not just `native.isComposing` — see `composingRef`'s own comment.
+    if (native.isComposing || composingRef.current) return;
+
+    if (native.inputType === "deleteContentBackward") {
+      handleDeleteBackward();
+    } else if (native.inputType === "deleteContentForward") {
+      handleDeleteForward();
+    } else if (native.inputType === "insertLineBreak") {
+      handleInsert("\n");
+    } else if (native.data) {
+      handleInsert(native.data);
+    } else if (el.value) {
+      // Fallback for a path that doesn't populate `data` (e.g. some paste
+      // flows) — insert whatever ended up in the textarea's own value.
+      handleInsert(el.value);
+    }
+    el.value = "";
+  }
+
+  function handleCompositionStart() {
+    composingRef.current = true;
+  }
+
+  function handleCompositionEnd(event: React.CompositionEvent<HTMLTextAreaElement>) {
+    composingRef.current = false;
+    if (event.data) handleInsert(event.data);
+    event.currentTarget.value = "";
   }
 
   // Only one vertical-move chain in flight at a time (each is two sequential
@@ -287,7 +419,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
     drainVerticalMoveQueue();
   }
 
-  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+  function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
       preferredXPtRef.current = null;
@@ -307,8 +439,10 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
   return (
     <div className="typst-live-view">
       <p className="scope-note">
-        Experimental (M20): cursor, selection, and hit-testing directly on the live Typst render — click to
-        position, drag to select, arrow keys (with Shift to extend) to navigate. No typing yet — that's M21.
+        Experimental (M20/M21): a real caret/selection and typing directly on the live Typst render — click to
+        position, drag to select, arrow keys (with Shift to extend) to navigate, type to edit. IME composition
+        commits correctly but shows no live preview yet (that's a follow-up — see M18). The document redraws on a
+        short debounce after each edit, not instantly per keystroke.
       </p>
       {diagnostics.map((d, i) => (
         <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
@@ -319,13 +453,22 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
       <div
         ref={stageRef}
         className="typst-live-stage"
-        tabIndex={0}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
-        onKeyDown={handleKeyDown}
       >
+        <textarea
+          ref={hiddenInputRef}
+          className="typst-live-hidden-input"
+          autoComplete="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          onKeyDown={handleKeyDown}
+          onInput={handleHiddenInputChange}
+          onCompositionStart={handleCompositionStart}
+          onCompositionEnd={handleCompositionEnd}
+        />
         <div className="typst-live-svg" dangerouslySetInnerHTML={{ __html: svg ?? "" }} />
         {viewBox && (
           <svg className="typst-live-overlay" viewBox={viewBox}>

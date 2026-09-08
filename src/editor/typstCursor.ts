@@ -7,6 +7,14 @@
 
 import { byteToUtf16Offset, nextCodePointOffset, prevCodePointOffset, utf16ToByteOffset } from "../util/offsets";
 
+// How long to wait, after an edit, before recompiling — shared by
+// `App.tsx` (the actual `compile_typst` debounce) and `TypstLiveView.tsx`
+// (its own caret/selection geometry refetch needs to settle on the same
+// cadence, or it forces an independent full recompile via `block_geometry`
+// on every keystroke — see that file's own comment). Defined once here so
+// the two can't silently drift apart into two different magic numbers.
+export const RECOMPILE_DEBOUNCE_MS = 250;
+
 // The Typst byte offset one code point left/right of `byteOffset` — used
 // both for arrow-key navigation and for constructing the before/after
 // geometry query ranges the caret is positioned from. Round-trips through
@@ -19,6 +27,26 @@ export function stepByteOffset(source: string, byteOffset: number, direction: "l
   const steppedUtf16 =
     direction === "left" ? prevCodePointOffset(source, utf16Offset) : nextCodePointOffset(source, utf16Offset);
   return utf16ToByteOffset(source, steppedUtf16);
+}
+
+// M21: replaces the Typst byte range `[start, end)` with `insertText`,
+// returning the new source and the byte offset the cursor should land at
+// (immediately after the inserted text). `start`/`end` are Typst byte
+// offsets, not JS string indices — `source.slice` needs UTF-16 offsets, so
+// this converts at the boundary (`util/offsets.ts`) rather than assuming
+// they're interchangeable, which silently corrupts anything after a
+// multi-byte (CJK) character earlier in the document.
+export function spliceSource(
+  source: string,
+  start: number,
+  end: number,
+  insertText: string,
+): { source: string; cursorOffset: number } {
+  const utf16Start = byteToUtf16Offset(source, start);
+  const utf16End = byteToUtf16Offset(source, end);
+  const newSource = source.slice(0, utf16Start) + insertText + source.slice(utf16End);
+  const cursorOffset = start + new TextEncoder().encode(insertText).length;
+  return { source: newSource, cursorOffset };
 }
 
 // The raw shape `block_geometry` returns per range — one entry per M14A

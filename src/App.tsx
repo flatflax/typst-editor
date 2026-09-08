@@ -6,6 +6,7 @@ import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./editor/SourceEditor";
 import WysiwygEditor, { type WysiwygEditorHandle } from "./editor/WysiwygEditor";
 import TypstLiveView from "./editor/TypstLiveView";
+import { RECOMPILE_DEBOUNCE_MS as COMPILE_DEBOUNCE_MS } from "./editor/typstCursor";
 import { byteToUtf16Offset, utf16ToByteOffset } from "./util/offsets";
 import { svgPointFromClient, clientPointFromPt } from "./util/svgGeometry";
 import {
@@ -84,7 +85,6 @@ const INITIAL_AST: AstDocument = {
 };
 const INITIAL_DOC = typstAstToDoc(INITIAL_AST);
 
-const COMPILE_DEBOUNCE_MS = 250;
 
 type ViewMode = "wysiwyg" | "typst" | "markdown" | "typst-live";
 
@@ -107,6 +107,12 @@ function App() {
   const [doc, setDoc] = useState<PMDoc>(INITIAL_DOC);
   const [typstText, setTypstText] = useState(() => pmDocToTypst(INITIAL_DOC));
   const [markdownText, setMarkdownText] = useState(() => docToMarkdown(INITIAL_DOC));
+  // M21: the "Live cursor" view's own Typst source buffer, edited directly
+  // (never through ProseMirror) — same lazy-refresh convention as
+  // `typstText`/`markdownText`: only pushed a fresh value when switching
+  // into this view or loading a file, not kept live-synced to `doc` while
+  // some other view is active.
+  const [liveTypstText, setLiveTypstText] = useState(() => pmDocToTypst(INITIAL_DOC));
   const [result, setResult] = useState<CompileResult | null>(null);
   const [invokeError, setInvokeError] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<{ clientX: number; clientY: number } | null>(null);
@@ -141,11 +147,12 @@ function App() {
   // from before the last debounce fired (plan.md M5).
   const derived = useMemo((): { source: string; positions: PositionMapEntry[] | null } => {
     if (viewMode === "typst") return { source: typstText, positions: null };
+    if (viewMode === "typst-live") return { source: liveTypstText, positions: null };
     if (viewMode === "markdown") {
       return { source: pmDocToTypst(markdownToDoc(markdownText)), positions: null };
     }
     return pmDocToTypstWithPositions(doc);
-  }, [viewMode, doc, typstText, markdownText]);
+  }, [viewMode, doc, typstText, markdownText, liveTypstText]);
 
   const viewModeRef = useRef(viewMode);
   const typstTextRef = useRef(typstText);
@@ -219,6 +226,7 @@ function App() {
     setDoc(nextDoc);
     setTypstText(nextTypstText);
     setMarkdownText(nextMarkdownText);
+    setLiveTypstText(nextTypstText);
     wysiwygRef.current?.setDoc(nextDoc);
     typstEditorRef.current?.setValue(nextTypstText);
     markdownEditorRef.current?.setValue(nextMarkdownText);
@@ -362,14 +370,13 @@ function App() {
 
   // Reads whichever view is currently active and returns the canonical
   // PMDoc it represents — parsing via the real Typst compiler (async, Rust)
-  // when leaving Typst source, or the pure-JS mappers otherwise.
+  // when leaving a raw-Typst-source view (M21: "typst-live" is one, same as
+  // "typst"), or the pure-JS mappers otherwise.
   async function commitCurrentView(): Promise<PMDoc> {
     if (viewMode === "wysiwyg") return wysiwygRef.current?.getDoc() ?? doc;
-    // Read-only (M20): never mutates `doc`, so leaving it just keeps
-    // whatever was last committed, same as staying on it.
-    if (viewMode === "typst-live") return doc;
     if (viewMode === "markdown") return markdownToDoc(markdownText);
-    const ast = await invoke<AstDocument>("parse_typst_ast", { source: typstText });
+    const source = viewMode === "typst-live" ? liveTypstText : typstText;
+    const ast = await invoke<AstDocument>("parse_typst_ast", { source });
     return typstAstToDoc(ast);
   }
 
@@ -381,9 +388,7 @@ function App() {
       if (nextMode === "wysiwyg") wysiwygRef.current?.setDoc(nextDoc);
       else if (nextMode === "markdown") markdownEditorRef.current?.setValue(docToMarkdown(nextDoc));
       else if (nextMode === "typst") typstEditorRef.current?.setValue(pmDocToTypst(nextDoc));
-      // "typst-live": nothing to push into — it derives everything from
-      // `doc`/`result` props reactively, unlike the other views' own
-      // internal editor state.
+      else setLiveTypstText(pmDocToTypst(nextDoc));
       setViewMode(nextMode);
     } catch (err) {
       setInvokeError(String(err));
@@ -501,6 +506,7 @@ function App() {
               pageOffsetsPt={result?.page_offsets_pt ?? []}
               documentDir={documentDir}
               diagnostics={result?.diagnostics ?? []}
+              onChange={setLiveTypstText}
             />
           </div>
         </div>

@@ -5,6 +5,7 @@ import {
   lineContainingY,
   nearestAdjacentLine,
   selectionRectsFromBoxes,
+  spliceSource,
   stepByteOffset,
   type RawRangeBox,
 } from "./typstCursor";
@@ -224,5 +225,35 @@ describe("lineContainingY", () => {
 
   it("returns null for an empty document", () => {
     expect(lineContainingY([], 10)).toBeNull();
+  });
+});
+
+describe("spliceSource", () => {
+  it("inserts text at a collapsed cursor position (empty range)", () => {
+    const result = spliceSource("ac", 1, 1, "b");
+    expect(result).toEqual({ source: "abc", cursorOffset: 2 });
+  });
+
+  it("replaces a non-empty range with the given text", () => {
+    const result = spliceSource("axxxc", 1, 4, "b");
+    expect(result).toEqual({ source: "abc", cursorOffset: 2 });
+  });
+
+  it("deletes a range when insertText is empty", () => {
+    const result = spliceSource("abc", 1, 2, "");
+    expect(result).toEqual({ source: "ac", cursorOffset: 1 });
+  });
+
+  it("correctly splices around a multi-byte CJK character earlier in the source", () => {
+    // "苹" is 3 UTF-8 bytes but 1 UTF-16 unit -- byte offsets after it must
+    // not be treated as JS string indices directly.
+    const source = "苹b"; // byte layout: 苹(0..3) b(3..4)
+    const result = spliceSource(source, 4, 4, "c");
+    expect(result).toEqual({ source: "苹bc", cursorOffset: 5 });
+  });
+
+  it("inserting a multi-byte character advances the cursor by its byte length, not char count", () => {
+    const result = spliceSource("ab", 1, 1, "苹"); // 3 UTF-8 bytes
+    expect(result).toEqual({ source: "a苹b", cursorOffset: 4 });
   });
 });
