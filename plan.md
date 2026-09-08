@@ -112,9 +112,10 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
   that stuck fast clicks in drag mode). First visible positive milestone
   since M12. Full account in
   [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M21 — not started, next.** Edit loop: keystroke → whole-
-  document recompile (session `World`) → redraw SVG → redraw cursor from fresh
-  geometry. No block-scoped/second-`World` compilation for v1.
+- **M21 — not started, next.** Edit loop: keystroke → whole-document recompile
+  (session `World`) → redraw SVG → redraw cursor from fresh geometry. No
+  block-scoped/second-`World` compilation for v1 — planned as its own
+  milestone (M19, hence the gap in the numbering) but folded in here instead.
 - **M22 — not started (supersedes M16).** Settle-window UX and live reflow.
   M16's correctness question (stale sibling content) is resolved by
   construction under M21; only latency/visual-continuity UX remains.

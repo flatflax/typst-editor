@@ -386,7 +386,7 @@ IME (M21). Independent of M18 (pure geometry/hit-testing) — ran in parallel
 rather than after it. New "Live cursor (M20)" view mode in `App.tsx`,
 alongside (not replacing) WYSIWYG/Typst/Markdown — the first milestone since
 M12 with a directly visible, positive result: a real caret blinking on real
-Typst-rendered text, clickable and navigable, confirmed working after six
+Typst-rendered text, clickable and navigable, confirmed working after seven
 rounds of manual testing.
 
 - **Fixed a real, pre-existing gap this milestone's own premise depends on**:
@@ -497,17 +497,20 @@ same numbers were used to *draw* something or navigate by real distance:
    mouse movement then extended a selection. Fixed by setting the flag
    synchronously at the top of `handleMouseDown`.
 
-**M21 — Edit loop: keystroke to whole-document recompile-and-redraw (not
-started — M18 and M20, its two dependencies, are both done).** Keystroke → edit the session `World`'s source →
-whole-document recompile (the existing single session `World`, M14's
-already-validated numbers — e.g. ~60ms for a 14-page document) → replace the
-rendered SVG → redraw cursor from fresh geometry. No block-scoped or
-second-`World` compilation for v1 — a bounded-window/block-level compile is
-deferred and built only if long-document latency proves unacceptable in practice,
-not designed up front. Also measures two costs the M14/M14A benchmarks don't
-cover: replacing/repainting the SVG DOM itself on every keystroke (distinct from
-Typst's own compile time, and potentially significant for a large multi-page SVG),
-and preserving scroll position across a full-SVG swap.
+**M21 — Edit loop: keystroke to whole-document recompile-and-redraw (not started
+— M18 and M20, its two dependencies, are both done).** Keystroke → edit the
+session `World`'s source → whole-document recompile (the existing single
+session `World`, M14's already-validated numbers — e.g. ~60ms for a 14-page
+document) → replace the rendered SVG → redraw cursor from fresh geometry. No
+block-scoped or second-`World` compilation for v1 — that architecture was
+planned as its own milestone (M19, hence the gap in the numbering) but folded
+in here instead, since M14's own numbers already make it unnecessary for v1;
+it's deferred and built only if long-document latency proves unacceptable in
+practice, not designed up front. Also measures two costs the M14/M14A
+benchmarks don't cover: replacing/repainting the SVG DOM itself on every
+keystroke (distinct from Typst's own compile time, and potentially significant
+for a large multi-page SVG), and preserving scroll position across a full-SVG
+swap.
 
 **M22 — Settle-window UX and live reflow (not started; supersedes M16).** What
 the document shows during the recompile-latency window between a keystroke and
