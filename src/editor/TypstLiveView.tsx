@@ -31,6 +31,7 @@
 // rendering of it — gone the instant the real compile lands.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { Command } from "prosemirror-state";
 import type { EditorDiagnostic } from "./SourceEditor";
 import { clientPointFromPt, svgPointFromClient } from "../util/svgGeometry";
 import {
@@ -47,6 +48,30 @@ import {
   type CaretRect,
   type RawRangeBox,
 } from "./typstCursor";
+import { runStructuralCommand, type StructuralEditResult } from "./structuralCommand";
+import { liftList, setHeading, setParagraph, toggleBulletList, toggleOrderedList } from "./wysiwygCommands";
+
+// M23: the toolbar buttons ported from the WYSIWYG view's own toolbar
+// (wysiwygCommands.ts) — table/mark/slash-menu support comes in later
+// slices of this milestone, once this first slice (block-type toggles) is
+// confirmed working end to end.
+//
+// Each item names a `run` step chain rather than a single PM `Command`: most
+// buttons are exactly one command, but "P" needs two run in sequence
+// (`liftList` then `setParagraph`) to actually escape a list — the original
+// WYSIWYG editor only ever exposed that lift via Shift-Tab, never a button,
+// so `setParagraph` alone (a no-op on a list item, which is already type
+// `paragraph`) was never *reachable* as a "stuck in a list" toolbar bug
+// there. Live cursor's toolbar is button-only (no keymap yet), so it has to
+// stand on its own.
+const TOOLBAR_ITEMS: { label: string; steps: Command[] }[] = [
+  { label: "P", steps: [liftList, setParagraph] },
+  { label: "H1", steps: [setHeading(1)] },
+  { label: "H2", steps: [setHeading(2)] },
+  { label: "H3", steps: [setHeading(3)] },
+  { label: "• List", steps: [toggleBulletList] },
+  { label: "1. List", steps: [toggleOrderedList] },
+];
 
 type Props = {
   source: string;
@@ -394,6 +419,36 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     commitEdit(start, end, text);
   }
 
+  // M23: a structural edit (toggle heading/list, and — later slices — marks/
+  // tables) runs a *whole-document* parse -> PM command -> serialize round
+  // trip (structuralCommand.ts), unlike `commitEdit`'s direct byte splice
+  // above. `null` means the command didn't apply (e.g. toggleBulletList
+  // already inside a bullet list, wysiwygCommands.ts's own no-op) — nothing
+  // to do, not an error, so the source/cursor are simply left alone.
+  //
+  // `steps` runs in sequence, each against the *previous* step's result —
+  // needed for "P" (`liftList` then `setParagraph`, see TOOLBAR_ITEMS) since
+  // there's no live PM state here to compose multiple commands into one
+  // transaction the way `chainCommands` would. A step that doesn't apply
+  // (returns null) just leaves the source/cursor as the previous step left
+  // them, rather than aborting the whole chain — e.g. `liftList` no-ops
+  // outside a list, so "P" still falls through to plain `setParagraph`.
+  async function runToolbarCommand(steps: Command[]) {
+    let current: StructuralEditResult = { source, cursorOffset, anchorOffset };
+    let ranAny = false;
+    for (const step of steps) {
+      const result = await runStructuralCommand(current.source, current.cursorOffset, current.anchorOffset, step);
+      if (result) {
+        current = result;
+        ranAny = true;
+      }
+    }
+    if (!ranAny) return;
+    onChange(current.source);
+    setCursorOffset(current.cursorOffset);
+    setAnchorOffset(current.anchorOffset);
+  }
+
   function handleDeleteBackward() {
     const [start, end] = selectionRange();
     if (start !== end) {
@@ -570,6 +625,22 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
           {d.line != null ? ` at ${d.line}:${d.column}` : ""}: {d.message}
         </p>
       ))}
+      <div className="typst-live-toolbar">
+        {TOOLBAR_ITEMS.map((item) => (
+          <button
+            key={item.label}
+            type="button"
+            // Clicking a button naturally steals DOM focus from the hidden
+            // textarea; without this, the *next* keystroke after using the
+            // toolbar would land nowhere (same class of bug as M21's
+            // mousedown-focus fix on the stage itself).
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => void runToolbarCommand(item.steps)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
       <div
         ref={stageRef}
         className="typst-live-stage"

@@ -425,10 +425,16 @@ function serializeTableCell(cell: PMNode, pos: number): Serialized {
 
 function serializeList(node: PMNode, pos: number, depth: number): Serialized {
   const isOrdered = node.type.name === "ordered_list";
-  let counter = isOrdered ? (node.attrs.order as number) : 0;
+  const start = isOrdered ? (node.attrs.order as number) : 0;
+  // Typst's "+" marker auto-numbers from 1 with no way to name a different
+  // start — so it only stands in for the default case (start === 1); a
+  // custom start (order.rs's own `#enum(start: n)`-equivalent) still needs
+  // explicit "N." markers, the only Typst syntax that can express one.
+  const useAutoNumber = isOrdered && start === 1;
+  let counter = start;
   const items: Serialized[] = [];
   node.forEach((item, offset) => {
-    const marker = isOrdered ? `${counter}.` : "-";
+    const marker = !isOrdered ? "-" : useAutoNumber ? "+" : `${counter}.`;
     items.push(serializeListItem(item, pos + 1 + offset, marker, depth));
     counter += 1;
   });

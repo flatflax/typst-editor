@@ -139,7 +139,10 @@ export const orderedListDefault: TypstAstFixture = {
       },
     ],
   },
-  expected: "1. First\n2. Second",
+  // Round-trips to the same "+" auto-number shorthand it parsed from
+  // (M23): explicit "N." markers are only needed when `start !== 1`, which
+  // Typst's "+" can't express (see orderedListWithStart below).
+  expected: "+ First\n+ Second",
 };
 
 // See ast::tests::ordered_list_with_explicit_start_number
@@ -493,7 +496,7 @@ $ x^2 $
   // the Rust side) still compiles the same document either way.
   expected:
     "#set text(size: 11pt)\n\n= Report\n\nSome *bold* and _italic_ and `code` text." +
-    "\n\n- Apple\n- Banana \n  - Nested one\n  - Nested two\n\n1. Step one\n2. Step two" +
+    "\n\n- Apple\n- Banana \n  - Nested one\n  - Nested two\n\n+ Step one\n+ Step two" +
     "\n\n#line(length: 100%)\n\nInline call: #emph[hi] here.\n\n$ x^2 $\n",
 };
 

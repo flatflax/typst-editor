@@ -319,7 +319,7 @@ describe("list toggling", () => {
     expect(doc.childCount).toBe(1);
     expect(doc.child(0).type).toBe(schema.nodes.ordered_list);
     expect(doc.child(0).childCount).toBe(3);
-    expect(pmDocToTypst(doc)).toBe("1. node1\n2. node2\n3. node3");
+    expect(pmDocToTypst(doc)).toBe("+ node1\n+ node2\n+ node3");
   });
 
   it("toggling one list kind doesn't touch an unrelated list elsewhere in the doc", () => {
@@ -438,10 +438,11 @@ describe("Enter inside a list item (regression: schema.ts's list_item content or
     expect(list.childCount).toBe(3);
     list.forEach((item) => expect(item.child(0).type).toBe(schema.nodes.paragraph));
 
-    // The exact symptom from the report: sequential numbering, no blank
-    // lines between items (which is what three *separate* one-item lists,
-    // each defaulting to order 1, would have produced).
-    expect(pmDocToTypst(doc)).toBe("1. node1\n2. node2\n3. node3");
+    // The exact symptom from the report: one continuous list, no blank
+    // lines between items (which is what three *separate* one-item lists
+    // would have produced instead — each its own top-level block, joined
+    // by "\n\n" like any other pair of blocks).
+    expect(pmDocToTypst(doc)).toBe("+ node1\n+ node2\n+ node3");
   });
 });
 

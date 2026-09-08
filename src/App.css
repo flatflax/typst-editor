@@ -124,7 +124,8 @@
   min-height: 0;
 }
 
-.wysiwyg-toolbar {
+.wysiwyg-toolbar,
+.typst-live-toolbar {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem;
@@ -132,7 +133,8 @@
   border-bottom: 1px solid #ddd;
 }
 
-.wysiwyg-toolbar button {
+.wysiwyg-toolbar button,
+.typst-live-toolbar button {
   min-width: 2em;
   padding: 0.3em 0.5em;
   border: 1px solid #ccc;

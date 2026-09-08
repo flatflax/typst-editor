@@ -313,7 +313,7 @@ describe("markdown round trip", () => {
     // ast::tests::mixed_document_compiles_successfully already compiles.
     expect(pmDocToTypst(doc)).toBe(
       "#set text(size: 11pt)\n\n= Report\n\nSome *bold* and _italic_ and `code` text." +
-        "\n\n- Apple\n- Banana\n  - Nested one\n  - Nested two\n\n1. Step one\n2. Step two" +
+        "\n\n- Apple\n- Banana\n  - Nested one\n  - Nested two\n\n+ Step one\n+ Step two" +
         "\n\n#line(length: 100%)\n\nInline call: #emph[hi] here." +
         "\n\n> A blockquote, outside the MVP subset.",
     );
