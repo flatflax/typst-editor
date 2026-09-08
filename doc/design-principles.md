@@ -46,10 +46,23 @@ must land between specific rendered glyphs, so whichever system renders the glyp
 must also own the cursor. Splitting them guarantees a visual seam exactly where the
 user is looking (the focused region).
 
-Corrected split: **Typst owns rendering and cursor/selection for on-surface content.**
-The editing system supplies input capture (keystrokes, IME composition) and, for
-structural edits (tables, lists, inserting a figure), a document-tree transform
-applied via parse → transform → serialize — not a persistent on-screen editing
-widget. The bridge is still `editor position ⇄ source range ⇄ Typst layout geometry`
-(`jump_from_click`/`jump_from_cursor`, M1/M5; `geometry_for_range`, M14A), but the
-geometry now drives the primary cursor, not just a click/selection sync nicety.
+Corrected split — Typst has no concept of a cursor or selection; it only produces
+geometry:
+
+- **Typst owns visual geometry**: layout, typography, positioned ink in the
+  compiled `Frame`.
+- **The editing system owns input, cursor/selection state, and navigation** —
+  keystroke/IME capture, what's selected, arrow-key/click/drag logic (M20:
+  `cursorOffset`/`anchorOffset` as component state, addressed in Typst byte
+  offsets, not PM positions). Structural edits (tables, lists, inserting a
+  figure) go through a document-tree transform via parse → transform →
+  serialize, not a persistent on-screen editing widget.
+- **Cursor/selection render against Typst's geometry, never a second
+  independently-laid-out system.** `geometry_for_range`/`block_geometry`
+  (M14A/M20) turn a Typst byte range into real positions the editing system's
+  own state is drawn against — confirmed working by M20's implementation.
+
+The bridge is still `editor position ⇄ source range ⇄ Typst layout geometry`
+(`jump_from_click`/`jump_from_cursor`, M1/M5; `geometry_for_range`/`block_geometry`,
+M14A/M20) — the editing system holds and moves the position; geometry only answers
+where it currently renders.

@@ -39,8 +39,9 @@ Two standing rules govern all future work, not just one phase — see
 2. **Typst decides visibility; the editing system decides interaction** — a construct
    is directly editable in place only if it produces layout geometry *and* is
    directly authored; otherwise it stays inspector-only, addressed by source range.
-   Revised after M15 (below): cursor/selection for on-surface content is owned by
-   Typst's own rendering, not split off into a separately-laid-out editing widget.
+   Revised after M15 (below): Typst owns visual geometry only; the editing system
+   owns cursor/selection state and navigation, rendered against that geometry —
+   never a second, independently-laid-out system.
 
 ## Current focus: Phase 3
 
