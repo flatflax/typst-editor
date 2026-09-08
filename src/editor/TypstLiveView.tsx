@@ -116,9 +116,29 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // it's actually moving from rather than whatever `caretRect` state last
   // settled to (that state can be one async round-trip stale, which was
   // silently swallowing rapid Up/Down presses).
+  //
+  // A 1-character window either side of `offset` first (cheap, the common
+  // case). Typst renders no ink for bare whitespace, so that narrow window
+  // finds nothing when the cursor sits on a blank line/empty paragraph —
+  // not a rare case, since Enter creates exactly that (a blank line) — and
+  // without a fallback the caret would just vanish there entirely, even
+  // though the position itself is perfectly real. Widens to a few hundred
+  // bytes either side in that case so the caret still lands near the
+  // nearest actual content — an approximation (there's nothing at the
+  // blank line itself to measure), but far better than no caret at all.
   async function fetchCaretRect(offset: number): Promise<CaretRect | null> {
-    const beforeStart = stepByteOffset(source, offset, "left");
-    const afterEnd = stepByteOffset(source, offset, "right");
+    const narrow = await fetchCaretRectInWindow(offset, 1);
+    if (narrow) return narrow;
+    return fetchCaretRectInWindow(offset, 256);
+  }
+
+  async function fetchCaretRectInWindow(offset: number, windowBytes: number): Promise<CaretRect | null> {
+    const beforeStart =
+      windowBytes === 1 ? stepByteOffset(source, offset, "left") : Math.max(0, offset - windowBytes);
+    const afterEnd =
+      windowBytes === 1
+        ? stepByteOffset(source, offset, "right")
+        : Math.min(new TextEncoder().encode(source).length, offset + windowBytes);
     const beforeRange: [number, number] | null = beforeStart < offset ? [beforeStart, offset] : null;
     const afterRange: [number, number] | null = offset < afterEnd ? [offset, afterEnd] : null;
     const ranges = [beforeRange, afterRange].filter((r): r is [number, number] => r != null);
@@ -360,7 +380,17 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     } else if (native.inputType === "deleteContentForward") {
       handleDeleteForward();
     } else if (native.inputType === "insertLineBreak") {
-      handleInsert("\n");
+      // A *single* newline is a soft break in Typst source (just
+      // whitespace — swallowed into the same paragraph, same as
+      // Markdown), not a new paragraph. Inserting one `\n` per Enter press
+      // faithfully matches what typing that raw text into the Typst
+      // source view would do, but reads as "Enter does nothing" for a
+      // WYSIWYG-style editing surface, where one Enter is expected to
+      // start a visibly new paragraph immediately. A blank line (`\n\n`)
+      // is what actually does that in Typst, so that's what Enter inserts
+      // here instead — a deliberate WYSIWYG-affordance choice, not a
+      // literal transcription of the keystroke.
+      handleInsert("\n\n");
     } else if (native.data) {
       handleInsert(native.data);
     } else if (el.value) {
