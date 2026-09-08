@@ -291,6 +291,65 @@ export function typstOffsetToPmPos(positions: PositionMapEntry[], typstOffset: n
   return Math.round(entry.pmFrom + ratio * (entry.pmTo - entry.pmFrom));
 }
 
+// M15a (plan.md): the Typst byte range `[start, end)` a top-level PM node
+// occupies.
+//
+// Deliberately NOT built from `pmPosToTypstOffset` at the node's two outer
+// boundaries (`pos`, `pos + nodeSize`) — an earlier version did exactly
+// that and had a real bug: `pmPosToTypstOffset` finds the entry with the
+// *largest* `pmFrom <= target` (a "floor" search), which only lands
+// correctly on `pos` itself for node types that have their own marker entry
+// starting exactly there (e.g. a heading's `"= "` prefix). A plain
+// `paragraph` has no such marker — its first entry starts at `pos + 1` (one
+// past the node's own opening slot, the same `+1` `handleContentMouseMove`
+// in WysiwygEditor.tsx already uses for this exact reason) — so querying at
+// `pos` instead fell through to whatever entry precedes it, which is the
+// *previous* block's own content. In practice this meant editing one block
+// could make block_geometry return another block's geometry for it.
+//
+// The fix: don't query boundary points at all. Take every entry whose PM
+// span lies *within* `[pos, pos + nodeSize)` and use the min/max of their
+// Typst offsets — this is correct regardless of whether the node type has
+// its own boundary-position marker, and as a side benefit no longer
+// overshoots into an adjacent block's territory the way the old two-point
+// version could (a `"\n\n"` block separator has no entry of its own, so it's
+// simply excluded, not swept in from either side).
+export function pmNodeTypstRange(
+  positions: PositionMapEntry[],
+  pos: number,
+  nodeSize: number,
+): [number, number] | null {
+  const end = pos + nodeSize;
+  const within = positions.filter((e) => e.pmFrom >= pos && e.pmTo <= end);
+  if (within.length === 0) return null;
+  const start = Math.min(...within.map((e) => e.typstFrom));
+  const finish = Math.max(...within.map((e) => e.typstTo));
+  return [start, finish];
+}
+
+// Like `pmNodeTypstRange`, but degrades to a zero-width insertion point
+// instead of `null` when the node has no Typst range of its own — the case
+// that matters is a block that's empty *right now* (e.g. the new paragraph
+// Enter-split just created, before anything's typed into it):
+// `pmDocToTypstWithPositions` omits empty blocks from the source entirely
+// (there's nothing to serialize), so it has no position-map entries and
+// `pmNodeTypstRange` correctly can't find a range for it. But for M15a's
+// before/after crop split, "no range" and "empty range right here" need
+// different handling — the former means give up, the latter still has a
+// well-defined split point (`pmPosToTypstOffset`'s floor-search naturally
+// lands on the end of whatever precedes this position), so the crops for
+// everything around it can still be shown instead of both vanishing.
+export function pmNodeTypstAnchor(
+  positions: PositionMapEntry[],
+  pos: number,
+  nodeSize: number,
+): [number, number] | null {
+  const exact = pmNodeTypstRange(positions, pos, nodeSize);
+  if (exact) return exact;
+  const offset = pmPosToTypstOffset(positions, pos);
+  return offset != null ? [offset, offset] : null;
+}
+
 // How far `target` sits into [from, to) as a 0-1 fraction — clamped, so a
 // target past the entry's end (e.g. landing in the "\n\n" gap between two
 // blocks, which isn't covered by any entry) still resolves to that entry's

@@ -4,6 +4,8 @@ import {
   pmDocToTypst,
   pmDocToTypstWithPositions,
   pmPosToTypstOffset,
+  pmNodeTypstRange,
+  pmNodeTypstAnchor,
   typstOffsetToPmPos,
 } from "./typstAst";
 import { fixtures } from "./typstAst.fixtures";
@@ -207,5 +209,102 @@ describe("pmDocToTypstWithPositions (plan.md M5)", () => {
     // click 2/5 into "plain" should land near pos 3, not snap to pos 1.
     expect(pmPos).toBe(3);
     expect(source.slice(0, 5)).toBe("plain");
+  });
+});
+
+describe("pmNodeTypstRange (plan.md M15a)", () => {
+  it("recovers the last top-level block's range exactly", () => {
+    const doc = typstAstToDoc(fixtures.headings.ast);
+    const { source, positions } = pmDocToTypstWithPositions(doc);
+    const heading3Pos = doc.child(0).nodeSize + doc.child(1).nodeSize;
+    const range = pmNodeTypstRange(positions, heading3Pos, doc.child(2).nodeSize);
+    expect(range).toEqual([15, 24]);
+    expect(source.slice(...range!)).toBe("=== Three");
+  });
+
+  it("recovers a non-last block's range exactly too, with no overshoot into the blank-line separator", () => {
+    // Contained-entries approach (not two boundary-point lookups) — a
+    // "\n\n" block separator has no position-map entry of its own, so it's
+    // simply excluded rather than swept in from either side.
+    const doc = typstAstToDoc(fixtures.headings.ast);
+    const { source, positions } = pmDocToTypstWithPositions(doc);
+    const range = pmNodeTypstRange(positions, 0, doc.child(0).nodeSize);
+    expect(range).toEqual([0, 5]);
+    expect(source.slice(...range!)).toBe("= One");
+  });
+
+  // Regression guard for a real bug hit during M15a development: editing
+  // the heading made the *paragraph's* rendered fragment show the heading's
+  // content instead. Root cause was the old two-boundary-point
+  // implementation querying `pmPosToTypstOffset` at a paragraph's own outer
+  // position — a plain paragraph has no marker entry starting there (unlike
+  // a heading's "= " prefix), so the "floor" search fell through to the
+  // *previous* block's entry instead. This fixture reproduces the exact
+  // shape (heading immediately followed by a plain paragraph).
+  it("does not leak an adjacent block's range for a node type with no boundary-position marker", () => {
+    const doc = typstAstToDoc({
+      settings: [],
+      content: [
+        { type: "heading", level: 1, children: [{ type: "text", text: "Title", marks: [] }] },
+        { type: "paragraph", children: [{ type: "text", text: "Body text.", marks: [] }] },
+      ],
+    });
+    const { source, positions } = pmDocToTypstWithPositions(doc);
+    const heading = doc.child(0);
+    const paragraph = doc.child(1);
+
+    const headingRange = pmNodeTypstRange(positions, 0, heading.nodeSize);
+    const paragraphRange = pmNodeTypstRange(positions, heading.nodeSize, paragraph.nodeSize);
+
+    expect(source.slice(...headingRange!)).toBe("= Title");
+    expect(source.slice(...paragraphRange!)).toBe("Body text.");
+  });
+
+  it("returns null when there's nothing in the position map to resolve against", () => {
+    expect(pmNodeTypstRange([], 0, 5)).toBeNull();
+  });
+});
+
+describe("pmNodeTypstAnchor (plan.md M15a)", () => {
+  // Regression guard for a real bug hit during M15a manual testing:
+  // pressing Enter to split a paragraph left the WYSIWYG surface looking
+  // entirely blank until something was typed. Root cause:
+  // `pmDocToTypstWithPositions` omits empty blocks from the source
+  // (`part.text.length > 0`, typstAst.ts), so a freshly-split empty
+  // paragraph has zero position-map entries -> `pmNodeTypstRange` returns
+  // `null` for it -> App.tsx's `fetchSwapGeometry` gave up on *both*
+  // before/after crops, hiding everything except the (empty, invisible)
+  // active paragraph. `pmNodeTypstAnchor` must instead resolve to the
+  // insertion point right after the preceding block, so the crops around
+  // the empty block still render.
+  it("resolves an empty block to the insertion point right after the preceding block's content", () => {
+    const doc = schema.node("doc", { settings: [] }, [
+      schema.node("paragraph", null, [schema.text("one")]),
+      schema.node("paragraph", null, []),
+      schema.node("paragraph", null, [schema.text("two")]),
+    ]);
+    const { source, positions } = pmDocToTypstWithPositions(doc as unknown as PMDoc);
+    expect(source).toBe("one\n\ntwo");
+
+    const emptyParagraph = doc.child(1);
+    const emptyPos = doc.child(0).nodeSize;
+    expect(pmNodeTypstRange(positions, emptyPos, emptyParagraph.nodeSize)).toBeNull();
+
+    const anchor = pmNodeTypstAnchor(positions, emptyPos, emptyParagraph.nodeSize);
+    expect(anchor).toEqual([3, 3]);
+    expect(source.slice(0, anchor![0])).toBe("one");
+    expect(source.slice(anchor![1])).toBe("\n\ntwo");
+  });
+
+  it("still returns the exact range for a non-empty block (falls through unchanged)", () => {
+    const doc = typstAstToDoc(fixtures.headings.ast);
+    const { positions } = pmDocToTypstWithPositions(doc);
+    const exact = pmNodeTypstRange(positions, 0, doc.child(0).nodeSize);
+    const anchor = pmNodeTypstAnchor(positions, 0, doc.child(0).nodeSize);
+    expect(anchor).toEqual(exact);
+  });
+
+  it("returns null when there's truly nothing to resolve against", () => {
+    expect(pmNodeTypstAnchor([], 0, 5)).toBeNull();
   });
 });

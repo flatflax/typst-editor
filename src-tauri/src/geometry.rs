@@ -12,14 +12,12 @@
 //! a byte offset. See phase3-single-view.md for the recorded findings and
 //! their consequence for M15.
 //!
-//! Not yet wired to a Tauri command or consumed outside its own tests — M15
-//! is what will call this for real (positioning the render/edit swap); until
-//! then everything here is only reachable from `#[cfg(test)]`, hence the
-//! blanket allow rather than one per item.
-#![allow(dead_code)]
+//! Wired to the `block_geometry` Tauri command (compile.rs) as of M15a, which
+//! positions the render/edit swap's rendered fragments.
 
 use std::ops::Range;
 
+use serde::Serialize;
 use typst::WorldExt;
 use typst::layout::{Frame, FrameItem, Point};
 use typst::syntax::Span;
@@ -29,8 +27,8 @@ use typst_layout::PagedDocument;
 /// One reconstructed visual line (for text) or one whole shape/image box,
 /// in page-absolute point coordinates, `y_top_pt` measured from the page's
 /// top-left as Typst frames do.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct RangeBox {
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RangeBox {
     pub page: usize,
     pub x_pt: f64,
     pub y_top_pt: f64,
@@ -59,7 +57,7 @@ struct Hit {
 /// "this range wraps onto a second line" vs. "this range is a footnote body
 /// rendered elsewhere on the page" vs. "this range crosses a page break":
 /// each is just another non-adjacent hit.
-pub(crate) fn geometry_for_range(
+pub fn geometry_for_range(
     world: &dyn typst::World,
     document: &PagedDocument,
     range: Range<usize>,

@@ -153,22 +153,47 @@
   white-space: pre-wrap;
 }
 
+/* M15a (plan.md): `.wysiwyg-swap-crop` before/after the live `.wysiwyg-content`
+   block are plain flow siblings here, not absolutely positioned — this
+   wrapper is the *one* scroll container for all three pieces together, so
+   they always scroll as one unit with no separate position tracking needed. */
 .wysiwyg-content-wrapper {
   position: relative;
-  display: flex;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: auto;
 }
 
 .wysiwyg-content {
-  flex: 1 1 auto;
-  overflow: auto;
   padding: 1rem;
 }
 
 .wysiwyg-content .ProseMirror {
   outline: none;
-  min-height: 100%;
+}
+
+/* M15a (plan.md): per-block render/edit swap. */
+.swap-scope-note {
+  margin: 0 0 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 4px;
+  background: #fffbe6;
+  border: 1px solid #f0e0a0;
+  color: #6b5a1e;
+  font-size: 0.8em;
+}
+
+/* At most two of these: everything before the active block, everything
+   after it. Plain flow siblings of `.wysiwyg-content` (see
+   `.wysiwyg-content-wrapper`'s comment) at their own natural size (`width`/
+   `height` set in pt, matching `viewBox` 1:1 — no `preserveAspectRatio`
+   stretching needed since they're never resized to fit an external box).
+   Clicking one jumps the cursor there via the same `jump_from_click` path
+   the split preview pane's click-to-jump already uses (App.tsx). */
+.wysiwyg-swap-crop {
+  display: block;
+  max-width: 100%;
+  cursor: text;
 }
 
 .block-insert-button {

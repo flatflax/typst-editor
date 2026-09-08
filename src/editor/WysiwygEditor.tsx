@@ -17,6 +17,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { schema, type PMDoc, type TypstSet } from "../model/schema";
 import { relativePath } from "../shell/fileIO";
+import { activeBlockPlugin } from "./activeBlockPlugin";
+import type { BlockRect } from "./blockSwapGeometry";
+import { page1GroupHref } from "./sharedSvgHost";
 import {
   addTableColumn,
   addTableRow,
@@ -50,12 +53,32 @@ export type WysiwygEditorHandle = {
 type Props = {
   doc: PMDoc;
   onChange: (doc: PMDoc) => void;
-  onSelectionChange?: (pos: number) => void;
+  /** `doc` here is the just-committed document from the same transaction —
+   * NOT the same as the `doc` prop, which only updates on `App.tsx`'s next
+   * render. M15a's active-block detection needs the doc a `pos` actually
+   * belongs to *right now*; resolving a fresh post-edit position against a
+   * one-render-stale doc tree was a real bug hit during development
+   * (typing into a block made a wrong later block look "active"). */
+  onSelectionChange?: (pos: number, doc: PMDoc) => void;
   /** The open file's directory (plan.md M11) — `image.attrs.src` resolves
    * against this. `null` before any file has been opened/saved, in which
    * case images can't be previewed or inserted (there's nothing to resolve
    * a relative path against yet). */
   documentDir: string | null;
+  /** M15a (plan.md): rendered geometry for everything before / after the
+   * top-level block currently containing the selection — `null` when there's
+   * nothing there (e.g. the active block is the very first/last one) or
+   * geometry hasn't caught up with the latest edit yet. Owned by `App.tsx`,
+   * recomputed after every compile and after the active block changes.
+   * Plain props (not a ref) — unlike the discarded NodeView-based versions
+   * of this feature, nothing here needs to survive outside React's own
+   * render cycle. */
+  beforeCropRect: BlockRect | null;
+  afterCropRect: BlockRect | null;
+  /** Called when the user clicks one of the crops — `App.tsx` maps the click
+   * to a Typst byte offset (`jump_from_click`) and moves the selection there,
+   * the same path the split preview pane's click-to-jump already uses. */
+  onSwapCropClick: (svg: SVGSVGElement, clientX: number, clientY: number) => void;
 };
 
 // Live-updated by the component on every render (see `documentDirRef`
@@ -124,8 +147,33 @@ function editorStateFor(doc: PMDoc): EditorState {
   return EditorState.create({
     doc: withTrailingParagraph(doc),
     schema,
-    plugins: [buildKeymapPlugin(), tableEditing(), ensureTrailingParagraphPlugin()],
+    plugins: [buildKeymapPlugin(), tableEditing(), ensureTrailingParagraphPlugin(), activeBlockPlugin],
   });
+}
+
+// Plain flow sibling of `.wysiwyg-content` (see `.wysiwyg-content-wrapper`'s
+// CSS comment for why normal flow, not absolute/fixed positioning). `width`/
+// `height` are set in pt 1:1 with `viewBox`'s own dimensions, so the crop
+// always renders at its natural size — nothing here stretches to fit an
+// external box the way the discarded overlay version did.
+function renderSwapCrop(
+  rect: BlockRect | null,
+  key: string,
+  onClick: (svg: SVGSVGElement, clientX: number, clientY: number) => void,
+) {
+  if (!rect) return null;
+  return (
+    <svg
+      key={key}
+      className="wysiwyg-swap-crop"
+      width={`${rect.widthPt}pt`}
+      height={`${rect.heightPt}pt`}
+      viewBox={`${rect.xPt} ${rect.yTopPt} ${rect.widthPt} ${rect.heightPt}`}
+      onClick={(e) => onClick(e.currentTarget, e.clientX, e.clientY)}
+    >
+      <use href={page1GroupHref()} />
+    </svg>
+  );
 }
 
 // ProseMirror EditorView for the WYSIWYG surface (plan.md M5). Mirrors
@@ -135,7 +183,7 @@ function editorStateFor(doc: PMDoc): EditorState {
 // a reactive prop watch, so the view's own live selection/state isn't reset
 // on every render while the user is actively editing here.
 const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEditor(
-  { doc, onChange, onSelectionChange, documentDir },
+  { doc, onChange, onSelectionChange, documentDir, beforeCropRect, afterCropRect, onSwapCropClick },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -230,7 +278,7 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
         const nextState = view.state.apply(tr);
         view.updateState(nextState);
         if (tr.docChanged) onChangeRef.current(nextState.doc);
-        if (tr.selectionSet) onSelectionChangeRef.current?.(nextState.selection.from);
+        if (tr.selectionSet) onSelectionChangeRef.current?.(nextState.selection.from, nextState.doc);
         updateOverlays(view);
       },
     });
@@ -248,7 +296,10 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
       return viewRef.current?.state.doc ?? doc;
     },
     setDoc(newDoc: PMDoc) {
-      viewRef.current?.updateState(editorStateFor(newDoc));
+      const view = viewRef.current;
+      if (view) {
+        view.updateState(editorStateFor(newDoc));
+      }
       setSettings((newDoc.attrs.settings ?? []) as TypstSet[]);
     },
     setSelection(pos: number) {
@@ -365,7 +416,9 @@ const WysiwygEditor = forwardRef<WysiwygEditorHandle, Props>(function WysiwygEdi
         onMouseMove={handleContentMouseMove}
         onMouseLeave={handleContentMouseLeave}
       >
+        {renderSwapCrop(beforeCropRect, "before", onSwapCropClick)}
         <div ref={containerRef} className="wysiwyg-content" />
+        {renderSwapCrop(afterCropRect, "after", onSwapCropClick)}
         {hoverInsert && (
           <button
             type="button"

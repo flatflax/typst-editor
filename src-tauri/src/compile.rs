@@ -26,6 +26,7 @@ use typst::{World, WorldExt};
 use typst_layout::PagedDocument;
 use typst_svg::SvgOptions;
 
+use crate::geometry;
 use crate::typst_world::TauriWorld;
 
 #[derive(Serialize)]
@@ -127,7 +128,12 @@ fn common_suffix_len(a: &str, b: &str, max: usize) -> usize {
 /// below purely so tests can call it directly against a `TauriWorld` they
 /// construct themselves, without needing a running Tauri app to obtain a
 /// `State`.
-fn compile_with_world(world: &mut TauriWorld, source: String, base_dir: Option<PathBuf>) -> CompileResult {
+/// Applies `source`/`base_dir` to a session's `TauriWorld` in place, via a
+/// diffed incremental `Source::edit` rather than a reconstruction (see this
+/// module's doc comment) — shared by `compile_with_world` and
+/// `block_geometry_with_world` (M15a) so both commands see the same session
+/// state without duplicating the diff-and-edit logic.
+fn sync_session(world: &mut TauriWorld, source: String, base_dir: Option<PathBuf>) {
     world.set_base_dir(base_dir);
 
     let old_text = world.text();
@@ -135,6 +141,10 @@ fn compile_with_world(world: &mut TauriWorld, source: String, base_dir: Option<P
         let (range, replacement) = compute_edit(old_text, &source);
         world.edit_source(range, replacement);
     }
+}
+
+fn compile_with_world(world: &mut TauriWorld, source: String, base_dir: Option<PathBuf>) -> CompileResult {
+    sync_session(world, source, base_dir);
 
     let warned = typst::compile::<PagedDocument>(&*world);
 
@@ -171,6 +181,45 @@ pub fn compile_typst(
 ) -> CompileResult {
     let mut world = session.lock().unwrap();
     compile_with_world(&mut world, source, base_dir.map(PathBuf::from))
+}
+
+/// M15a (plan.md): rendered geometry for each of `ranges`, reusing the
+/// session's `TauriWorld` exactly like `compile_with_world` does. `compile_typst`
+/// and `block_geometry` are typically called back-to-back for the same
+/// source, so this second `typst::compile` call is effectively free —
+/// `comemo`'s full cache hit on unchanged content, per M14's persistent-`World`
+/// benchmark — not a second real recompile. A failed compile returns one
+/// empty `Vec` per requested range rather than erroring, matching
+/// `geometry_for_range`'s own "no match" behavior for an unmatched range.
+fn block_geometry_with_world(
+    world: &mut TauriWorld,
+    source: String,
+    base_dir: Option<PathBuf>,
+    ranges: Vec<(usize, usize)>,
+) -> Vec<Vec<geometry::RangeBox>> {
+    sync_session(world, source, base_dir);
+
+    match typst::compile::<PagedDocument>(&*world).output {
+        Ok(document) => ranges
+            .into_iter()
+            .map(|(start, end)| geometry::geometry_for_range(&*world, &document, start..end))
+            .collect(),
+        Err(_) => ranges.iter().map(|_| Vec::new()).collect(),
+    }
+}
+
+/// Batched (one round trip covering every swappable block in the document,
+/// not one call per block) so the M15a swap UI can position all of them
+/// after a single compile.
+#[tauri::command]
+pub fn block_geometry(
+    source: String,
+    base_dir: Option<String>,
+    ranges: Vec<(usize, usize)>,
+    session: tauri::State<'_, Mutex<TauriWorld>>,
+) -> Vec<Vec<geometry::RangeBox>> {
+    let mut world = session.lock().unwrap();
+    block_geometry_with_world(&mut world, source, base_dir.map(PathBuf::from), ranges)
 }
 
 #[cfg(test)]
@@ -317,6 +366,58 @@ mod tests {
         assert!(result.svg.is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M15a: `block_geometry`'s underlying logic returns real page-1 boxes
+    /// for a range that actually renders — the same span-matching
+    /// `geometry_for_range` (geometry.rs) already proved, exercised here
+    /// through the session-held `TauriWorld` path the real command uses.
+    #[test]
+    fn block_geometry_returns_boxes_for_a_range_that_renders() {
+        let source = "= A Heading\n\nSome body text.";
+        let mut world = TauriWorld::new(String::new(), None);
+        let heading_start = source.find("A Heading").unwrap();
+        let heading_end = heading_start + "A Heading".len();
+
+        let results =
+            block_geometry_with_world(&mut world, source.into(), None, vec![(heading_start, heading_end)]);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].len(), 1, "{:?}", results[0]);
+        assert_eq!(results[0][0].page, 1);
+    }
+
+    /// A range with nothing rendered at it (out of bounds, or pointing at a
+    /// compiler directive with no visual output) comes back as an empty
+    /// `Vec`, not an error — matching `geometry_for_range`'s own "no match"
+    /// behavior, so the frontend can treat "no geometry yet" uniformly.
+    #[test]
+    fn block_geometry_returns_an_empty_vec_for_a_range_with_no_rendered_content() {
+        let source = "Hello world.";
+        let mut world = TauriWorld::new(String::new(), None);
+
+        let results = block_geometry_with_world(
+            &mut world,
+            source.into(),
+            None,
+            vec![(1000, 1010), (0, 0)],
+        );
+
+        assert_eq!(results, vec![Vec::new(), Vec::new()]);
+    }
+
+    /// A source that fails to compile must degrade to empty `Vec`s (one per
+    /// requested range) rather than panicking — mirrors
+    /// `reports_diagnostics_instead_of_crashing_on_invalid_source` for
+    /// `compile_typst`.
+    #[test]
+    fn block_geometry_degrades_to_empty_vecs_on_a_compile_failure() {
+        let source = "#unknown_function()";
+        let mut world = TauriWorld::new(String::new(), None);
+
+        let results = block_geometry_with_world(&mut world, source.into(), None, vec![(0, source.len())]);
+
+        assert_eq!(results, vec![Vec::new()]);
     }
 
     #[test]

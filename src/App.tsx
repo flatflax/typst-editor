@@ -5,12 +5,15 @@ import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./editor/SourceEditor";
 import WysiwygEditor, { type WysiwygEditorHandle } from "./editor/WysiwygEditor";
+import { mountCompiledSvg } from "./editor/sharedSvgHost";
+import { unionRangeBoxes, type BlockRect, type RawRangeBox } from "./editor/blockSwapGeometry";
 import { byteToUtf16Offset, utf16ToByteOffset } from "./util/offsets";
 import {
   typstAstToDoc,
   pmDocToTypst,
   pmDocToTypstWithPositions,
   pmPosToTypstOffset,
+  pmNodeTypstAnchor,
   typstOffsetToPmPos,
   type AstDocument,
   type PositionMapEntry,
@@ -97,12 +100,17 @@ type CursorTarget = {
   y_pt: number;
 };
 
+// `viewBox.x`/`viewBox.y` matter here since M15a: the main preview's SVG
+// always has a `0 0 ...` viewBox (so omitting them was harmless before), but
+// a WYSIWYG swap crop's viewBox starts wherever its region begins on the
+// page — omitting the offset would put every click a fixed amount short of
+// where it should land.
 function svgPointFromClient(svg: SVGSVGElement, clientX: number, clientY: number) {
   const rect = svg.getBoundingClientRect();
   const viewBox = svg.viewBox.baseVal;
   return {
-    xPt: ((clientX - rect.left) / rect.width) * viewBox.width,
-    yPt: ((clientY - rect.top) / rect.height) * viewBox.height,
+    xPt: viewBox.x + ((clientX - rect.left) / rect.width) * viewBox.width,
+    yPt: viewBox.y + ((clientY - rect.top) / rect.height) * viewBox.height,
   };
 }
 
@@ -147,6 +155,20 @@ function App() {
   const markdownEditorRef = useRef<SourceEditorHandle | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
 
+  // M15a (plan.md): rendered geometry for everything before/after the
+  // top-level block currently containing the WYSIWYG selection — plain
+  // props into `WysiwygEditor` (see its Props doc comment for why this
+  // doesn't need the ref-based workaround the discarded NodeView/overlay
+  // versions of this feature needed).
+  const [beforeCropRect, setBeforeCropRect] = useState<BlockRect | null>(null);
+  const [afterCropRect, setAfterCropRect] = useState<BlockRect | null>(null);
+  // The active block's own top-level position — stable across edits *within*
+  // that block (only changes when the selection actually moves to a
+  // different top-level block), so `fetchSwapGeometry` always re-derives the
+  // block's *current* size fresh via `doc.nodeAt(pos)` rather than trusting
+  // a cached size that could go stale mid-edit.
+  const activePosRef = useRef<number>(0);
+
   // The Typst source actually compiled + (WYSIWYG-only) its PM<->Typst
   // position map, recomputed synchronously every render regardless of the
   // debounced compile below — mirrors M1's sourceRef pattern, so click/
@@ -163,20 +185,98 @@ function App() {
   const viewModeRef = useRef(viewMode);
   const typstTextRef = useRef(typstText);
   const derivedRef = useRef(derived);
+  const docRef = useRef(doc);
   viewModeRef.current = viewMode;
   typstTextRef.current = typstText;
   derivedRef.current = derived;
+  docRef.current = doc;
+
+  // M15a (plan.md): fetches geometry for everything before/after the active
+  // top-level block (`activePosRef`) and updates the two crop rects.
+  // Re-derives the active block's *current* node/size fresh every call (via
+  // `nodeAt`) rather than caching it — `activePosRef` only tracks the
+  // block's stable top-level *position*, which doesn't shift from edits
+  // happening within that same block.
+  //
+  // `fresh`, when passed, must be used in place of `docRef`/`derivedRef` —
+  // those refs only update on `App.tsx`'s *next* render, but this can be
+  // called synchronously inside the same ProseMirror transaction that just
+  // produced a newer doc than what the refs currently hold. Resolving a
+  // fresh position against a stale doc/position-map was a real bug hit
+  // during development (typing into one block made a different, wrong
+  // block's range get used). The debounced content-change caller (below)
+  // has no such mismatch — refs are always consistent with each other by
+  // the time its timer fires — so it omits `fresh` and uses the refs.
+  function fetchSwapGeometry(fresh?: { doc: PMDoc; source: string; positions: PositionMapEntry[] }) {
+    const doc = fresh?.doc ?? docRef.current;
+    const source = fresh?.source ?? derivedRef.current.source;
+    const positions = fresh?.positions ?? derivedRef.current.positions;
+    if (viewModeRef.current !== "wysiwyg" || !positions) {
+      setBeforeCropRect(null);
+      setAfterCropRect(null);
+      return;
+    }
+    const activeNode = doc.nodeAt(activePosRef.current);
+    const activeRange = activeNode ? pmNodeTypstAnchor(positions, activePosRef.current, activeNode.nodeSize) : null;
+    if (!activeRange) {
+      setBeforeCropRect(null);
+      setAfterCropRect(null);
+      return;
+    }
+
+    const beforeRange: [number, number] | null = activeRange[0] > 0 ? [0, activeRange[0]] : null;
+    const afterRange: [number, number] | null =
+      activeRange[1] < source.length ? [activeRange[1], source.length] : null;
+    const ranges = [beforeRange, afterRange].filter((r): r is [number, number] => r != null);
+    if (ranges.length === 0) {
+      setBeforeCropRect(null);
+      setAfterCropRect(null);
+      return;
+    }
+
+    invoke<RawRangeBox[][]>("block_geometry", { source, baseDir: documentDirRef.current, ranges })
+      .then((results) => {
+        let i = 0;
+        setBeforeCropRect(beforeRange ? unionRangeBoxes(results[i++]) : null);
+        setAfterCropRect(afterRange ? unionRangeBoxes(results[i++]) : null);
+      })
+      .catch(() => {
+        setBeforeCropRect(null);
+        setAfterCropRect(null);
+      });
+  }
 
   // Debounced derived-Typst-source -> compile_typst -> SVG preview loop,
   // active regardless of which view is being edited (plan.md M5).
   useEffect(() => {
     const timer = setTimeout(() => {
       invoke<CompileResult>("compile_typst", { source: derived.source, baseDir: documentDirRef.current })
-        .then(setResult)
+        .then((res) => {
+          setResult(res);
+          // M15a: refreshes the crops for whatever's currently active, after
+          // the compile above rather than as an independent sibling call —
+          // the two are separate `invoke`s with no inherent ordering, and
+          // firing them together let `block_geometry`'s response (new crop
+          // rects) land before `compile_typst`'s (which is what
+          // `sharedSvgHost` re-mounts from), pairing new coordinates with
+          // stale rendered content for a frame. Sequencing after removes
+          // that window; reuses the session `TauriWorld` compile_typst just
+          // synced, so this second `typst::compile` call is effectively free
+          // (M14's persistent-`World` finding: an unmodified repeat-compile
+          // is a full `comemo` cache hit), not a doubled recompile cost.
+          fetchSwapGeometry();
+        })
         .catch((err) => setInvokeError(String(err)));
     }, COMPILE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [derived.source]);
+
+  // M15a: the one shared copy every inactive paragraph/heading's rendered
+  // fragment references (`sharedSvgHost.ts`) — kept in sync with whatever
+  // the preview pane itself shows.
+  useEffect(() => {
+    mountCompiledSvg(result?.svg ?? "");
+  }, [result?.svg]);
 
   // Both branches compare against the Typst serialization: `derived.source`
   // already holds it for both the "typst" (raw typstText) and "wysiwyg"
@@ -388,7 +488,13 @@ function App() {
     try {
       const nextDoc = await commitCurrentView();
       setDoc(nextDoc);
-      if (nextMode === "wysiwyg") wysiwygRef.current?.setDoc(nextDoc);
+      if (nextMode === "wysiwyg") {
+        wysiwygRef.current?.setDoc(nextDoc);
+        // M15a: `setDoc` resets the WYSIWYG selection to the start of the
+        // doc (no explicit selection is passed to `editorStateFor`), so the
+        // active block resets to the first one too.
+        activePosRef.current = 0;
+      }
       else if (nextMode === "markdown") markdownEditorRef.current?.setValue(docToMarkdown(nextDoc));
       else typstEditorRef.current?.setValue(pmDocToTypst(nextDoc));
       setViewMode(nextMode);
@@ -397,10 +503,11 @@ function App() {
     }
   }
 
-  function handlePreviewClick(event: React.MouseEvent<HTMLDivElement>) {
-    const svg = previewRef.current?.querySelector("svg");
-    if (!svg) return;
-    const { xPt, yPt } = svgPointFromClient(svg, event.clientX, event.clientY);
+  // Shared by the split preview pane's click-to-jump (M5) and M15a's WYSIWYG
+  // swap crops — both are just "a click landed at this point on a rendered
+  // Typst SVG," regardless of which SVG it was.
+  function jumpFromSvgClick(svg: SVGSVGElement, clientX: number, clientY: number) {
+    const { xPt, yPt } = svgPointFromClient(svg, clientX, clientY);
     invoke<number | null>("jump_from_click", {
       source: derivedRef.current.source,
       xPt,
@@ -419,6 +526,19 @@ function App() {
         // extension to WYSIWYG specifically, alongside M1's Typst source).
       })
       .catch((err) => setInvokeError(String(err)));
+  }
+
+  function handlePreviewClick(event: React.MouseEvent<HTMLDivElement>) {
+    const svg = previewRef.current?.querySelector("svg");
+    if (!svg) return;
+    jumpFromSvgClick(svg, event.clientX, event.clientY);
+  }
+
+  // M15a: clicking a before/after crop moves the WYSIWYG selection there,
+  // which (via `handleWysiwygSelectionChange` below) makes that click's
+  // target block the new active one.
+  function handleSwapCropClick(svg: SVGSVGElement, clientX: number, clientY: number) {
+    jumpFromSvgClick(svg, clientX, clientY);
   }
 
   function highlightFromCursor(cursor: number) {
@@ -440,10 +560,22 @@ function App() {
     highlightFromCursor(utf16ToByteOffset(typstTextRef.current, utf16Offset));
   }
 
-  function handleWysiwygSelectionChange(pmPos: number) {
-    if (!derivedRef.current.positions) return;
-    const offset = pmPosToTypstOffset(derivedRef.current.positions, pmPos);
+  // `currentDoc` is the just-committed doc from the same transaction — see
+  // its prop doc comment in WysiwygEditor.tsx for why using it (not
+  // `docRef.current`/`derivedRef.current`) here matters.
+  function handleWysiwygSelectionChange(pmPos: number, currentDoc: PMDoc) {
+    const { source, positions } = pmDocToTypstWithPositions(currentDoc);
+    const offset = pmPosToTypstOffset(positions, pmPos);
     if (offset != null) highlightFromCursor(offset);
+
+    // M15a: only refetch the crops when the selection actually moved to a
+    // *different* top-level block — not on every intra-block cursor move.
+    const $pos = currentDoc.resolve(pmPos);
+    const activePos = $pos.depth >= 1 ? $pos.before(1) : 0;
+    if (activePos !== activePosRef.current) {
+      activePosRef.current = activePos;
+      fetchSwapGeometry({ doc: currentDoc, source, positions });
+    }
   }
 
   return (
@@ -475,12 +607,22 @@ function App() {
       <div className="workspace">
         <div className="editor-pane">
           <div hidden={viewMode !== "wysiwyg"} className="view-panel">
+            {/* M15a (plan.md) acceptance criteria: the swap's known limits
+                must be visible in the product, not just in docs. */}
+            <p className="swap-scope-note">
+              Live inline rendering: paragraphs &amp; headings only, single page.
+              Lists, images, tables, and multi-page documents still use the
+              preview pane below (M15b).
+            </p>
             <WysiwygEditor
               ref={wysiwygRef}
               doc={doc}
               onChange={setDoc}
               onSelectionChange={handleWysiwygSelectionChange}
               documentDir={documentDir}
+              beforeCropRect={beforeCropRect}
+              afterCropRect={afterCropRect}
+              onSwapCropClick={handleSwapCropClick}
             />
           </div>
           <div hidden={viewMode !== "typst"} className="view-panel">
