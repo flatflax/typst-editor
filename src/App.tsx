@@ -468,7 +468,7 @@ function App() {
                   ? "Typst source"
                   : mode === "markdown"
                     ? "Markdown source"
-                    : "Live cursor (M20)"}
+                    : "Live cursor (M20/M21)"}
             </button>
           ))}
         </div>
