@@ -194,12 +194,20 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics }:
 
   function handleMouseDown(event: React.MouseEvent<HTMLDivElement>) {
     stageRef.current?.focus();
+    // Set synchronously, not inside the `.then()` below — `offsetAtClient`
+    // is async (an `invoke` round-trip, doubled when it falls back to the
+    // blank-space snap), so a fast click's `mouseup` can fire and clear
+    // this *before* that promise resolves; the resolution then set it back
+    // to `true` afterward, leaving drag-mode stuck on even though the
+    // button was already released — every following mouse movement (with
+    // no button held) then extended a selection, which read as a bogus
+    // "long press."
+    draggingRef.current = true;
     offsetAtClient(event.clientX, event.clientY).then((offset) => {
       if (offset == null) return;
       preferredXPtRef.current = null;
       setAnchorOffset(offset);
       setCursorOffset(offset);
-      draggingRef.current = true;
     });
   }
 
