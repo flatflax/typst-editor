@@ -378,14 +378,16 @@ carry forward.
 **Consequence for M20+**: the one existential risk blocking this direction is
 cleared. M20 can start.
 
-**M20 — Static cursor, selection, and hit-testing on live Typst rendering
-(built, awaiting manual verification).** Click-to-position, arrow-key
-navigation (with Shift to extend), and drag-to-select directly against the
-full-document Typst SVG, using M14A's `geometry_for_range`/`jump_from_click`
-— no text editing yet, no IME. Independent of M18 (pure geometry/hit-testing)
-— ran in parallel rather than after it. New "Live cursor (M20)" view mode in
-`App.tsx`, alongside (not replacing) WYSIWYG/Typst/Markdown — first milestone
-since M12 with a directly visible result, once confirmed working.
+**M20 — Static cursor, selection, and hit-testing on live Typst rendering —
+done, positive result.** Click-to-position, arrow-key navigation (with Shift
+to extend), and drag-to-select directly against the full-document Typst SVG,
+using M14A's `geometry_for_range`/`jump_from_click` — no text editing yet, no
+IME (M21). Independent of M18 (pure geometry/hit-testing) — ran in parallel
+rather than after it. New "Live cursor (M20)" view mode in `App.tsx`,
+alongside (not replacing) WYSIWYG/Typst/Markdown — the first milestone since
+M12 with a directly visible, positive result: a real caret blinking on real
+Typst-rendered text, clickable and navigable, confirmed working after six
+rounds of manual testing.
 
 - **Fixed a real, pre-existing gap this milestone's own premise depends on**:
   `jump_from_click` (jump.rs, M1-era) hardcoded `document.pages().first()` —
@@ -410,51 +412,93 @@ since M12 with a directly visible result, once confirmed working.
   cursor, falling back to the trailing edge of the character before it (end
   of document, or an empty "after" query) — doesn't attempt to resolve
   line-wrap-boundary affinity, a known heuristic limit inherited from
-  M14A's line-box clustering.
-- Up/Down navigation reuses `jump_from_click` itself: computes a target Y
-  approximately one line above/below (the caret's own box height as the
-  line-height estimate) at a sticky "preferred X" column, and synthesizes a
-  click there — rather than reconstructing line-by-line character positions
-  independently. `jump_from_click`'s clamp-to-document-bounds behavior means
-  overshooting slightly at the first/last line is harmless.
+  M14A's line-box clustering. Drawn height is trimmed to the glyph's own
+  baseline (`visualHeightPt`), not `geometry.rs`'s full ascent+descent hit-
+  testing box (see bugs below).
+- **Up/Down navigation searches real line geometry, not a guessed
+  distance.** `nearestAdjacentLine` (`editor/typstCursor.ts`) fetches every
+  line box in the document (cached per `source` string) and finds whichever
+  one sits strictly above/below the caret's current line — a synthesized
+  click then lands at that real line's vertical center, clamped
+  horizontally (`clampXToLine`) to a sticky "preferred X" column. Line
+  spacing genuinely differs across block types (heading vs. body text vs.
+  list item), which is exactly why an earlier guessed-multiplier version of
+  this (see bugs below) could never fully work.
 - Pure geometry/offset math lives in `editor/typstCursor.ts` (box→absolute-
-  position conversion, caret placement, vertical-move target, UTF-8-byte
-  code-point stepping), tested independently of React/Tauri — the component
+  position conversion, caret placement, line search, UTF-8-byte code-point
+  stepping), tested independently of React/Tauri — the component
   (`editor/TypstLiveView.tsx`) only wires it to `invoke` calls and DOM events.
 - Drag-select coalesces `jump_from_click` calls to the latest mouse position
   rather than queuing every `mousemove` — that command isn't on the
   session-held `World` `block_geometry` uses, and an uncoalesced fast drag
-  could both lag and resolve out of order.
+  could both lag and resolve out of order. Up/Down presses are queued
+  instead (a real FIFO, not "coalesce to latest") since a discrete keypress
+  must not be dropped the way a continuous mouse position can be.
 
-**First round of manual testing (this session) found two real bugs, both
-fixed**:
-- **Caret drawn visibly too low.** `geometry.rs`'s glyph-box approximation
-  (M14A, `ascent = full font size`, `descent = ascent × 0.25`) deliberately
-  overshoots on both ends for generous *hit-testing* — real ascent is well
-  under a full em, and the 25%-below-baseline descent exists for glyphs that
-  don't actually have one. Fine for click matching; visibly wrong once drawn
-  as a caret bar, which read as hanging into the next line's space.
-  `CaretRect` now carries both `heightPt` (the full box, kept for the
-  vertical-move line-height estimate) and `visualHeightPt` (trimmed to end at
-  `baseline_from_top_pt` — falls back to the full height for a box with no
-  baseline, e.g. an image) — only the latter is drawn.
-- **Up/Down silently failing intermittently.** The handler used `caretRect`
-  React state as the "current position" to move from, but that state is
-  populated by an async effect one round-trip behind `cursorOffset` —
-  pressing Up/Down again before that effect resolved computed the next
-  target from a stale (sometimes wrong-line) box, occasionally landing back
-  where it started and looking like the keypress did nothing. Fixed by
-  fetching geometry fresh, for the actual current offset (`cursorOffsetRef`,
-  a ref mirror, since a rapid key-repeat sequence's later presses also arrive
-  before React re-renders with the updated `cursorOffset` state), at the
-  moment each Up/Down is processed — not by trusting cached display state.
-  Rapid repeats are queued (a real FIFO, not "coalesce to latest" like
-  drag) so a burst of presses moves multiple lines rather than collapsing to
-  one — a discrete keypress must not be dropped, unlike a continuous mouse
-  position where only the latest sample matters.
+**Seven rounds of manual testing found seven real bugs, all fixed** — the
+production-code equivalent of M18's IME testing loop, and a useful
+reminder that M14A's/jump.rs's geometry approximations were validated for
+*hit-testing* (generous, forgiving) and needed real correction once the
+same numbers were used to *draw* something or navigate by real distance:
+1. **Caret drawn visibly too low.** `geometry.rs`'s glyph-box approximation
+   (`ascent = full font size`, `descent = ascent × 0.25`) deliberately
+   overshoots on both ends for generous hit-testing — real ascent is well
+   under a full em, and the 25%-below-baseline descent exists for glyphs
+   that don't actually have one. Fine for click matching; visibly wrong once
+   drawn as a caret bar, which read as hanging into the next line's space.
+   Fixed by trimming the drawn height to `baseline_from_top_pt`.
+2. **Up/Down silently failing intermittently.** The handler used `caretRect`
+   React state as the "current position," but that state is populated by an
+   async effect one round-trip behind `cursorOffset` — pressing Up/Down
+   again before that effect resolved computed the next target from a stale
+   box, occasionally landing back where it started. Fixed by fetching
+   geometry fresh (via a `cursorOffsetRef` mirror, since rapid key-repeat
+   also outruns React's render cycle) at the moment each press is processed.
+3. **Caret/selection X-offset appeared only in a maximized window.** Root
+   cause: `.typst-live-view`'s flex column defaulted `.typst-live-stage` to
+   `align-items: stretch`, stretching it to the *container's* full width —
+   wider than the actual rendered SVG whenever the window was wide enough
+   that `max-width: 100%` wasn't the binding constraint (it only ever
+   shrinks, never grows past the SVG's intrinsic size). The overlay `<svg>`
+   (sized to 100% of that too-wide box) then centered its content via its
+   default `preserveAspectRatio` inside slack width the real, left-aligned
+   SVG didn't have — invisible in a narrow window, visibly offset once
+   maximized. Fixed with `align-self: flex-start` on `.typst-live-stage`.
+4. **Up/Down still unreliable after a distance-tuning attempt.** An
+   intermediate fix widened the guessed step distance empirically (measured
+   against a real sample document); still failed differently across block
+   types — skipped a paragraph's first wrapped line moving down from a
+   heading, didn't move at all between short list items, skipped a list's
+   last item moving up into it. No single multiplier of "the current line's
+   own height" can hold across headings/paragraphs/list items, which have
+   genuinely different line spacing — replaced with the real-geometry
+   search (`nearestAdjacentLine`) described above, not a better guess.
+5. **Up/Down froze moving onto a shorter line.** `nearestAdjacentLine`
+   correctly found the target line, but the synthesized click still aimed
+   at the old (sticky) X position — past where a *shorter* line's content
+   actually ends, `jump_from_click` had nothing to resolve to. Fixed with
+   `clampXToLine`, clamping only the click's target, not the stored sticky
+   column (so returning to a longer line later still snaps back to the
+   original one).
+6. **Clicking blank space did nothing** — past a short line's end, below the
+   last line, in the margins, or in the gap between lines, `jump_from_click`
+   had nothing there to resolve to and returned nothing, same underlying
+   problem as bug 5 but for a *direct* click (no "current line" to clamp
+   against, since finding the right line is the point of a click). Fixed
+   with `lineContainingY` (nearest line whose vertical span contains the
+   point, or nearest by center distance otherwise) plus the same
+   `clampXToLine`, shared by both click-to-position and drag-select.
+7. **A fast click sometimes got stuck in drag mode** ("recognized as a long
+   press"). Race condition: `handleMouseDown` set the dragging flag inside
+   `offsetAtClient`'s async `.then()`, not synchronously on mousedown. A
+   fast click's `mouseup` could clear that flag *before* the promise
+   resolved; the resolution then set it back to `true` afterward, leaving
+   drag-mode stuck on with the button already released — every following
+   mouse movement then extended a selection. Fixed by setting the flag
+   synchronously at the top of `handleMouseDown`.
 
 **M21 — Edit loop: keystroke to whole-document recompile-and-redraw (not
-started, depends on M18+M20).** Keystroke → edit the session `World`'s source →
+started — M18 and M20, its two dependencies, are both done).** Keystroke → edit the session `World`'s source →
 whole-document recompile (the existing single session `World`, M14's
 already-validated numbers — e.g. ~60ms for a 14-page document) → replace the
 rendered SVG → redraw cursor from fresh geometry. No block-scoped or

@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15/M18 done (M14: partial-negative, M15: negative, M18: positive — see below); M20 built, awaiting manual verification |
+| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15/M18/M20 done (M14: partial-negative, M15: negative, M18/M20: positive — see below); M21 next |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
@@ -95,15 +95,23 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
   correctness gap. The one unvalidated risk the revised mechanism depended on
   is now cleared. Full account in
   [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M20 — built, awaiting manual verification.** Static cursor/selection/
-  hit-testing directly on live Typst rendering ("Live cursor (M20)" view
-  mode, alongside the existing three), using M14A's geometry — no editing,
-  no IME. Also fixed a pre-existing gap `jump_from_click` had since M1
-  (hardcoded to page 1 only) — a real correctness issue for this milestone's
-  full-document click premise, not just a nice-to-have. First visible
-  positive milestone since M12, once confirmed working. Full account in
+- **M20 — done, positive.** Static cursor/selection/hit-testing directly on
+  live Typst rendering ("Live cursor (M20)" view mode, alongside the
+  existing three), using M14A's geometry — no editing, no IME. Also fixed a
+  pre-existing gap `jump_from_click` had since M1 (hardcoded to page 1 only)
+  — a real correctness issue for this milestone's full-document click
+  premise, not just a nice-to-have. Seven rounds of manual testing found
+  seven real bugs, all fixed — the geometry approximations M14A/jump.rs
+  validated for hit-testing needed real correction once used to draw
+  something or navigate by real distance (a heuristic-height caret drawn
+  too low; two rounds of Up/Down navigation logic, first stale-state then a
+  guessed line-distance, replaced with a real-geometry line search; a
+  flex/SVG scaling bug only visible in a maximized window; two "nothing to
+  click" gaps clamped/snapped onto real content; a mousedown/mouseup race
+  that stuck fast clicks in drag mode). First visible positive milestone
+  since M12. Full account in
   [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M21 — not started, depends on M18+M20.** Edit loop: keystroke → whole-
+- **M21 — not started, next.** Edit loop: keystroke → whole-
   document recompile (session `World`) → redraw SVG → redraw cursor from fresh
   geometry. No block-scoped/second-`World` compilation for v1.
 - **M22 — not started (supersedes M16).** Settle-window UX and live reflow.
