@@ -458,6 +458,27 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Backspace/Delete on the hidden textarea never fire an `input` event at
+    // all, since its value is always cleared back to "" right after every
+    // commit (see `handleHiddenInputChange`/`handleCompositionEnd`) — there's
+    // nothing there for the browser to delete *from*, so it doesn't dispatch
+    // one. Handled directly here instead of waiting for an event that will
+    // never come. Doesn't interfere with backspacing *during* IME
+    // composition (which does need the native `deleteContentBackward`
+    // `input` path below, since the textarea genuinely holds the in-progress
+    // composition string then) — `event.key` reports as `"Process"`, not
+    // `"Backspace"`, while composing (M18's own finding), so this check
+    // naturally only matches the non-composing case.
+    if (event.key === "Backspace") {
+      event.preventDefault();
+      handleDeleteBackward();
+      return;
+    }
+    if (event.key === "Delete") {
+      event.preventDefault();
+      handleDeleteForward();
+      return;
+    }
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
       preferredXPtRef.current = null;

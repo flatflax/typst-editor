@@ -13,7 +13,17 @@ import { byteToUtf16Offset, nextCodePointOffset, prevCodePointOffset, utf16ToByt
 // cadence, or it forces an independent full recompile via `block_geometry`
 // on every keystroke — see that file's own comment). Defined once here so
 // the two can't silently drift apart into two different magic numbers.
-export const RECOMPILE_DEBOUNCE_MS = 250;
+//
+// 150ms, not the 250ms this used to be (a value carried over from the
+// split-pane preview, never re-validated for M21's live typing): live
+// testing found 250ms genuinely uncomfortable — no visible feedback for a
+// real quarter-second after every keystroke. M14 already measured ~60ms for
+// a 14-page document, so 150ms still comfortably clears real compile
+// latency for realistic documents while feeling far more responsive.
+// Progressive/optimistic feedback *during* the window (not just shortening
+// it) is M22's job, not this one's — this is a tuning number, not a fix
+// for the underlying "nothing visible until the debounce settles" gap.
+export const RECOMPILE_DEBOUNCE_MS = 150;
 
 // The Typst byte offset one code point left/right of `byteOffset` — used
 // both for arrow-key navigation and for constructing the before/after
