@@ -497,16 +497,16 @@ same numbers were used to *draw* something or navigate by real distance:
    mouse movement then extended a selection. Fixed by setting the flag
    synchronously at the top of `handleMouseDown`.
 
-**M21 — Edit loop: keystroke to whole-document recompile-and-redraw (built,
-awaiting manual verification).** Keystroke → edit the session `World`'s
-source → whole-document recompile (the existing single session `World`,
-M14's already-validated numbers — e.g. ~60ms for a 14-page document) →
-replace the rendered SVG → redraw cursor from fresh geometry. No
-block-scoped or second-`World` compilation for v1 — that architecture was
-planned as its own milestone (M19, hence the gap in the numbering) but folded
-in here instead, since M14's own numbers already make it unnecessary for v1;
-it's deferred and built only if long-document latency proves unacceptable in
-practice, not designed up front.
+**M21 — Edit loop: keystroke to whole-document recompile-and-redraw — done,
+positive result.** Keystroke → edit the session `World`'s source →
+whole-document recompile (the existing single session `World`, M14's
+already-validated numbers — e.g. ~60ms for a 14-page document) → replace the
+rendered SVG → redraw cursor from fresh geometry. No block-scoped or
+second-`World` compilation for v1 — that architecture was planned as its own
+milestone (M19, hence the gap in the numbering) but folded in here instead,
+since M14's own numbers already make it unnecessary for v1; deferred and
+built only if long-document latency proves unacceptable in practice — see the
+long-document finding below for where that stands now.
 
 - **Mechanism**: a hidden `<textarea>` inside `TypstLiveView.tsx`'s stage
   captures keystrokes/IME composition via `input`/`compositionend` events —
@@ -550,6 +550,75 @@ practice, not designed up front.
   the hidden textarea wouldn't do anything useful, since its value is
   cleared after every event; a real fix needs its own history stack, not
   attempted yet).
+
+**Manual testing found five real bugs, all fixed, plus one confirmed
+architectural limitation the previous milestones already predicted**:
+1. **A fast click sometimes got stuck in drag mode**, and **arrow keys/typing
+   were completely dead** (click/drag alone still worked). Root cause of the
+   dead keyboard input: `handleMouseDown` calls
+   `hiddenInputRef.current?.focus()`, but mousedown on a non-focusable target
+   (the stage `<div>`/its SVG children) has a *default* browser action that
+   shifts/blurs focus, firing *after* that handler returns — without
+   `event.preventDefault()`, that default action immediately undid the
+   explicit focus call, so the hidden textarea never actually kept focus and
+   no keyboard event ever reached it, even though the handler itself ran
+   fine (hence click/drag working while typing/arrows didn't).
+2. **Enter needed two presses to see any visible change, and a blank
+   line/empty paragraph showed no caret at all.** A single `\n` is a soft
+   break in Typst source (swallowed into the same paragraph, like Markdown),
+   not a new paragraph — Enter now inserts `\n\n`, a deliberate WYSIWYG-
+   affordance choice (one Enter reads as "start a new paragraph"), not a
+   literal transcription of the keystroke. Separately, `fetchCaretRect` only
+   ever queried a 1-character window either side of the cursor, and Typst
+   renders no ink for bare whitespace — exactly what a blank line is (and
+   what Enter now reliably creates) — so the caret vanished there. Fixed by
+   widening the query to a few hundred bytes either side when the narrow
+   window finds nothing, landing the caret near the nearest real content
+   instead — an approximation, since there's nothing at the blank line
+   itself to measure, but far better than disappearing.
+3. **Backspace/Delete never worked at all.** The hidden textarea's value is
+   always cleared back to `""` right after every commit — pressing Backspace
+   against an already-empty textarea has nothing to delete *from*, so the
+   browser never dispatches an `input` event for it in the first place; not
+   a matter of the handler being wrong, the event never arrived. Fixed by
+   handling Backspace/Delete directly via `keydown` instead of waiting on an
+   event that will never come in the non-composing case — backspacing
+   *during* active IME composition is unaffected, since `event.key` reports
+   as `"Process"` (not `"Backspace"`) while composing (M18's own finding),
+   so this new check naturally doesn't fire there and the textarea's own
+   (non-empty, mid-composition) value continues to handle it correctly.
+4. **Scrolled several pages into a long document, then typing, reset the
+   view back to the top.** Not root-caused to the exact browser mechanism;
+   fixed defensively by tracking the scroll container's latest
+   `scrollTop`/`scrollLeft` on every native scroll event and restoring it in
+   a layout effect (runs synchronously after the DOM commit but before
+   paint) keyed on `svg`, so any reset during that commit is corrected
+   before it's visible.
+5. Also tightened `RECOMPILE_DEBOUNCE_MS` from 250ms (a value carried over
+   from the split-pane preview, never re-validated here) to 150ms — a
+   real improvement, but a tuning number, not a fix for the deeper gap in
+   finding 6 below.
+6. **Typing on a 20-section (multi-page) document feels laggier than on the
+   short demo document — confirmed, not a surprise.** This is exactly what
+   M14 already measured and predicted: whole-document recompile scales
+   ~linearly with page count, and M14's own risk section said long documents
+   "will feel laggy under a naive recompile-and-swap on every keystroke
+   design." Decided (2026-09-08): accept this for v1 rather than pull the
+   deferred block-scoped/second-`World` compile work (M19, folded into this
+   milestone) forward now — record it as a known, measured limitation and
+   revisit only if it becomes a real blocker, per M21's own original
+   deferral condition. No optimistic/progressive feedback during the
+   (now-shorter) settle window is still M22's job, not solved by the
+   debounce tuning above.
+
+**One pre-existing, cross-cutting gap surfaced during this testing, not part
+of M21 and not fixed here**: a tofu/box placeholder for at least one typed
+CJK character — a font-coverage gap (`typst_world.rs`'s embedded+system font
+merge, M1), not a bug in how M21 splices composed text into the source
+buffer (confirmed: the glyph is genuinely missing from whatever font got
+selected, not a wrong/corrupted character). Would show up identically in any
+view (WYSIWYG, Typst source), not something specific to the Live cursor
+view. Left open — not investigated further this session.
 
 **M22 — Settle-window UX and live reflow (not started; supersedes M16).** What
 the document shows during the recompile-latency window between a keystroke and

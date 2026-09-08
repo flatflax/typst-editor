@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15/M18/M20 done (M14: partial-negative, M15: negative, M18/M20: positive — see below); M21 built, awaiting manual verification |
+| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15/M18/M20/M21 done (M14: partial-negative, M15: negative, M18/M20/M21: positive — see below); M22 next |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
@@ -112,22 +112,29 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
   that stuck fast clicks in drag mode). First visible positive milestone
   since M12. Full account in
   [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M21 — built, awaiting manual verification.** Edit loop: keystroke → edit
-  the raw Typst source directly (never through ProseMirror, per M15) → edit
-  the session `World`'s source → whole-document recompile → redraw SVG →
-  redraw cursor from fresh geometry. A hidden `<textarea>` captures
-  keystrokes/IME composition via `input`/`compositionend` (M18's validated
-  pattern, not `keydown`) — composition commits correctly but has no live
-  preview yet, a known follow-up given this project's CJK orientation. Found
-  and fixed a real cost before shipping: `block_geometry` runs its own full
-  recompile internally, so its caret-geometry refetch now shares one debounce
-  constant with the main compile (only when `source` changed; navigation
-  stays instant). No block-scoped/second-`World` compilation for v1 —
-  planned as its own milestone (M19, hence the gap in the numbering) but
-  folded in here instead. Full account in
+- **M21 — done, positive.** Edit loop: keystroke → edit the raw Typst source
+  directly (never through ProseMirror, per M15) → edit the session `World`'s
+  source → whole-document recompile → redraw SVG → redraw cursor from fresh
+  geometry. A hidden `<textarea>` captures keystrokes/IME composition via
+  `input`/`compositionend` (M18's validated pattern, not `keydown`) —
+  composition commits correctly but has no live preview yet, a known
+  follow-up given this project's CJK orientation. No block-scoped/
+  second-`World` compilation for v1 — planned as its own milestone (M19,
+  hence the gap in the numbering) but folded in here instead. Five real bugs
+  found and fixed by manual testing (dead keyboard input from a focus bug,
+  Enter/blank-line caret, dead Backspace/Delete, scroll resetting on a long
+  document, a too-long debounce) and one confirmed, accepted limitation:
+  typing on a 20-section document feels laggier, exactly matching M14's own
+  prediction for whole-document recompile scaling — decided (2026-09-08) to
+  accept this for v1 rather than pull the deferred block-scoped compile work
+  forward now. One pre-existing, cross-cutting gap surfaced but out of
+  scope: a tofu/missing-glyph font-coverage issue (`typst_world.rs`, M1),
+  confirmed unrelated to M21's own text-splicing logic. Full account in
   [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M22 — not started (supersedes M16).** Settle-window UX and live reflow.
-  M16's correctness question (stale sibling content) is resolved by
-  construction under M21; only latency/visual-continuity UX remains.
+- **M22 — not started, next (supersedes M16).** Settle-window UX and live
+  reflow. M16's correctness question (stale sibling content) is resolved by
+  construction under M21; only latency/visual-continuity UX remains — now
+  with a real, confirmed data point to design against (M21's long-document
+  finding), not just a theoretical concern.
 - **M23 — not started.** Port Phase 2 editing affordances (tables, slash menu,
   toolbar, lists) onto a parse → transform → serialize model.
