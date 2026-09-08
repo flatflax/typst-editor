@@ -226,7 +226,10 @@ extend PM node views so each top-level block that is both geometry-producing and
 directly authored (paragraph, heading, list item, table, image, ...) presents as
 either an inline Typst-rendered SVG fragment (inactive) or an editable node view
 (active), toggling on focus/blur/click. Three mechanisms were built and discarded,
-in order, each fixing the previous one's failure but exposing a new one:
+in order, each fixing the previous one's failure but exposing a new one. The
+furthest-landed (#3 below) survives as a complete, working snapshot on branch
+`spike/m15a-block-swap`, not merged to `main` — only the load-bearing pieces
+(`block_geometry`, `geometry.rs`'s public API) were kept there.
 
 1. **NodeView-based swap.** Wrapped `paragraph`/`heading` content in a custom
    `NodeView` that swapped between a rendered SVG fragment and PM's own
