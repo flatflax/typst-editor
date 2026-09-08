@@ -97,12 +97,17 @@ type CursorTarget = {
   y_pt: number;
 };
 
+// `viewBox.x`/`viewBox.y` matter once a rendered fragment's `viewBox` doesn't
+// start at `0 0` (e.g. a cropped region of a larger page, per M20) — omitting
+// the offset would put every click a fixed amount short of where it should
+// land. The main preview's SVG always has a `0 0 ...` viewBox today, so this
+// has no visible effect yet.
 function svgPointFromClient(svg: SVGSVGElement, clientX: number, clientY: number) {
   const rect = svg.getBoundingClientRect();
   const viewBox = svg.viewBox.baseVal;
   return {
-    xPt: ((clientX - rect.left) / rect.width) * viewBox.width,
-    yPt: ((clientY - rect.top) / rect.height) * viewBox.height,
+    xPt: viewBox.x + ((clientX - rect.left) / rect.width) * viewBox.width,
+    yPt: viewBox.y + ((clientY - rect.top) / rect.height) * viewBox.height,
   };
 }
 

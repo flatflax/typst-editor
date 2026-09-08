@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use ast::parse_typst_ast;
 use asset::read_image_as_data_url;
-use compile::compile_typst;
+use compile::{block_geometry, compile_typst};
 use export::export_pdf;
 use jump::{jump_from_click, jump_from_cursor};
 use typst_world::TauriWorld;
@@ -28,6 +28,7 @@ pub fn run() {
         // see compile.rs's module doc comment.
         .manage(Mutex::new(TauriWorld::new(String::new(), None)))
         .invoke_handler(tauri::generate_handler![
+            block_geometry,
             compile_typst,
             export_pdf,
             jump_from_click,
