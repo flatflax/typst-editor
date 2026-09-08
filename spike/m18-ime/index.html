@@ -261,7 +261,15 @@
 
   input.addEventListener("input", (e) => {
     log("input", { inputType: e.inputType, data: e.data, isComposing: e.isComposing, value: input.value });
-    if (e.isComposing) return; // handled by compositionupdate/compositionend instead
+    // Not just `e.isComposing`: Chromium fires the terminal `input` event for
+    // a composition cancelled by backspacing it to empty with
+    // isComposing:false and inputType:"deleteContentBackward", ~0.3ms
+    // *before* compositionend actually fires -- confirmed in an M18 test
+    // run. Trusting that flag deleted a character from the already-committed
+    // buffer instead of letting the cancelled composition vanish harmlessly.
+    // `composing` (compositionstart..compositionend) is still true at that
+    // instant and catches it correctly.
+    if (e.isComposing || composing) return; // handled by compositionupdate/compositionend instead
 
     if (e.inputType === "deleteContentBackward") {
       committedText = committedText.slice(0, -1);
