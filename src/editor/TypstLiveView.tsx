@@ -246,6 +246,14 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   }
 
   function handleMouseDown(event: React.MouseEvent<HTMLDivElement>) {
+    // Mousedown on a non-focusable target (the stage `<div>`/its SVG
+    // children) has a *default* browser action that shifts/blurs focus,
+    // firing after this handler returns — without preventing it, that
+    // default action immediately undoes the explicit `.focus()` call below,
+    // so the hidden textarea never actually keeps focus and no keyboard
+    // event (typing, arrow keys) ever reaches it, even though this handler
+    // itself runs fine (which is why click-to-position still worked).
+    event.preventDefault();
     hiddenInputRef.current?.focus();
     // Set synchronously, not inside the `.then()` below — `offsetAtClient`
     // is async (an `invoke` round-trip, doubled when it falls back to the
