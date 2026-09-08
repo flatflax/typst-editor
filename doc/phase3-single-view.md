@@ -620,14 +620,41 @@ selected, not a wrong/corrupted character). Would show up identically in any
 view (WYSIWYG, Typst source), not something specific to the Live cursor
 view. Left open — not investigated further this session.
 
-**M22 — Settle-window UX and live reflow (not started; supersedes M16).** What
-the document shows during the recompile-latency window between a keystroke and
-the next redraw, and the accepted UX of later content visibly shifting position
-as the user types (real re-pagination, not CSS reflow — precedented by Word/
-Google Docs' own live reflow). M16's hard correctness question (a sibling block
-showing stale content) is resolved by construction under M21 (see M15's
-disposition notes above); only the latency/visual-continuity question remains
-open here.
+**M22 — Settle-window UX (done, positive; supersedes M16).** What the document
+shows during the recompile-latency window between a keystroke and the next
+redraw. M16's hard correctness question (a sibling block showing stale
+content) is resolved by construction under M21 (see M15's disposition notes
+above); this milestone only had the latency/visual-continuity question left.
+
+Chose an optimistic text overlay: a small floating badge, anchored just above
+the caret, showing the raw source text of the paragraph currently being edited
+(`currentParagraphText`, `typstCursor.ts`) while a real recompile is in
+flight. Tracked by two explicit `useState`/`useEffect` pairs in
+`TypstLiveView.tsx` — `isPending` flips true the instant `source` changes and
+false once the displayed `svg` reflects it — deliberately not a ref-derived
+flag, since mutating a ref alone doesn't force the re-render that hides the
+badge.
+
+Manual testing on both the short demo document and the 20-section
+`m21-multipage-test.typ` fixture confirmed the intended behavior, though the
+visible pattern differs by document size in a way that is correct, not a bug:
+on the short document, real compile time is negligible next to the 150ms
+debounce, so the badge flashes once per keystroke and clears before the next
+one lands unless typing faster than the debounce window. On the long
+document, where real compile time is the dominant cost (M21's "laggier
+typing" finding), the badge stays visible for the whole recompile — exactly
+the gap it was built to cover. One caveat found during testing: right after
+loading a large file, the first badge appearance lagged noticeably (a cold
+first compile against the freshly-loaded `World`) before settling into the
+expected per-edit behavior — not investigated further, and not a regression
+against M21 (M21 already accepted the same document as "laggier").
+
+Live re-pagination — later content visibly shifting position as the user
+types, the way Word/Google Docs redraw — was in this milestone's original
+scope but turned out to be unnecessary: M21's whole-document recompile
+already redraws every page from scratch on each settle, so there is no
+separate "stale layout" state to reconcile. What was missing was purely the
+feedback *during* the settle window, which the badge now covers.
 
 **M23 — Port Phase 2 editing affordances (not started).** Table editing, the
 slash-command menu, the floating toolbar, and list operations — currently built
@@ -647,8 +674,8 @@ milestone here; lowest technical risk.
 - **Page-boundary UX (resolved by the revised mechanism).** The old open scope
   question — an edited block's numbering/`#set`/footnote effects could leave a
   stale-content sibling under a per-block swap — no longer applies once nothing is
-  cached or cropped independently (see M15's disposition notes). Only the settle-
-  window/live-reflow UX question remains, tracked as M22.
+  cached or cropped independently (see M15's disposition notes). The settle-window
+  UX question this left open is resolved by M22's pending badge.
 - **M14A's line-box reconstruction is a heuristic (baseline clustering), not an API
   guarantee** — two visually distinct lines sharing an exact baseline (e.g. a
   multi-column layout) would currently merge into one box. Untested; would need an

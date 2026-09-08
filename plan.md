@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15/M18/M20/M21 done (M14: partial-negative, M15: negative, M18/M20/M21: positive — see below); M22 next |
+| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15/M18/M20/M21/M22 done (M14: partial-negative, M15: negative, M18/M20/M21/M22: positive — see below); M23 next |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
@@ -131,10 +131,19 @@ Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
   scope: a tofu/missing-glyph font-coverage issue (`typst_world.rs`, M1),
   confirmed unrelated to M21's own text-splicing logic. Full account in
   [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M22 — not started, next (supersedes M16).** Settle-window UX and live
-  reflow. M16's correctness question (stale sibling content) is resolved by
-  construction under M21; only latency/visual-continuity UX remains — now
-  with a real, confirmed data point to design against (M21's long-document
-  finding), not just a theoretical concern.
-- **M23 — not started.** Port Phase 2 editing affordances (tables, slash menu,
-  toolbar, lists) onto a parse → transform → serialize model.
+- **M22 — done, positive (supersedes M16).** Settle-window UX: an optimistic
+  floating badge, anchored above the caret, shows the raw source text of the
+  paragraph being edited while a real recompile is in flight, clearing the
+  instant the real redraw lands. M16's correctness question (stale sibling
+  content) was already resolved by construction under M21; this covered the
+  remaining latency/visual-continuity gap. Confirmed by manual testing on
+  both the short demo document (flashes once per keystroke — the debounce,
+  not real compile time, dominates there) and the 20-section long-document
+  fixture (stays visible through the whole recompile, matching M21's
+  "laggier typing" finding). Live re-pagination turned out to be unnecessary
+  scope: M21's whole-document recompile already redraws every page from
+  scratch each settle, so there was no separate stale-layout state to
+  reconcile — only the missing feedback during the wait, which the badge
+  covers. Full account in [doc/phase3-single-view.md](doc/phase3-single-view.md).
+- **M23 — not started, next.** Port Phase 2 editing affordances (tables,
+  slash menu, toolbar, lists) onto a parse → transform → serialize model.
