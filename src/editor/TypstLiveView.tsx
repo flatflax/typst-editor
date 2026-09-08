@@ -21,7 +21,7 @@
 // a known limitation, not solved here: it needs the same live-overlay
 // technique M18 validated, wired to the real compiled document instead of a
 // static sample.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { EditorDiagnostic } from "./SourceEditor";
 import { svgPointFromClient } from "../util/svgGeometry";
@@ -70,6 +70,30 @@ function parseViewBox(svg: string | null): string | null {
 }
 
 const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, onChange }: Props) => {
+  // Replacing `.typst-live-svg`'s `innerHTML` on every recompile (below)
+  // reset this scroll container back to the top on a long, actually-
+  // scrolled document — found live-testing a 20-section multi-page
+  // document. Not investigated down to the exact browser mechanism; fixed
+  // defensively instead, by tracking the latest scroll position on every
+  // native scroll event and restoring it in a *layout* effect (runs
+  // synchronously after the DOM commit but before the browser paints) keyed
+  // on `svg`, so any reset that happens during that commit is corrected
+  // before the user can see it.
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const lastScrollRef = useRef({ top: 0, left: 0 });
+
+  function handleContainerScroll(event: React.UIEvent<HTMLDivElement>) {
+    lastScrollRef.current = { top: event.currentTarget.scrollTop, left: event.currentTarget.scrollLeft };
+  }
+
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (el) {
+      el.scrollTop = lastScrollRef.current.top;
+      el.scrollLeft = lastScrollRef.current.left;
+    }
+  }, [svg]);
+
   const stageRef = useRef<HTMLDivElement | null>(null);
   const hiddenInputRef = useRef<HTMLTextAreaElement | null>(null);
   // Tracks composition state ourselves rather than trusting a single
@@ -496,7 +520,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   }
 
   return (
-    <div className="typst-live-view">
+    <div className="typst-live-view" ref={scrollContainerRef} onScroll={handleContainerScroll}>
       <p className="scope-note">
         Experimental (M20/M21): a real caret/selection and typing directly on the live Typst render — click to
         position, drag to select, arrow keys (with Shift to extend) to navigate, type to edit. IME composition
