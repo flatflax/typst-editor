@@ -6,16 +6,23 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG | M13–M23 | Collapse the editing surface and preview into one — the long-term product target | M13/M14/M14A/M15/M18/M20/M21/M22 done (M14: partial-negative, M15: negative, M18/M20/M21/M22: positive — see below); M23 next |
+| 3 — Single-View WYSIWYG (engineering validation) | M13–M22 | Validate that single-view editing is technically feasible: perf ceiling, rendered geometry, CJK IME, a working edit loop | Closed 2026-09-09 — feasibility validated (M14/M14A/M18/M20/M21/M22 positive, M15 negative but superseded); M23 deprioritized to backlog |
+| 4 — Product Validation | Spikes 1–3 | Validate the "focus-reveals-source" interaction model before further engineering investment | Spike 1 next |
 
-Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
+Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Phase 4 — Product Validation](doc/phase4-product-validation.md) · [Interaction Design](doc/interaction-design.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
 ## Product goal
 
-A desktop Typst editor that edits like Typora or Notion — a single WYSIWYG view, no
-separate preview pane — while every character is still backed by the real Typst
-compiler, not an approximation. See [Phase 3](doc/phase3-single-view.md) for the
-architecture that makes this tractable.
+A desktop Typst editor for writers who already know Typst syntax and want faster
+everyday input — not a syntax-free editor. The core promise is **zero render drift**:
+what's on screen while editing is never an approximation, because it's always the
+real Typst compiler's own output, not a second layout engine's guess, inside a single
+visual surface (no separate preview pane). See
+[doc/interaction-design.md](doc/interaction-design.md) for the current product
+positioning (2026-09-09; supersedes the earlier "edits like Typora/Notion, zero
+syntax" framing — "zero syntax" was dropped as a goal, replaced by
+**focus-reveals-source**, see that document §6) and [Phase 3](doc/phase3-single-view.md)
+for the engineering feasibility work that validated this is achievable.
 
 The MVP (Phase 1) proved a narrower goal first: `Source ⇄ Editor Model → Typst
 Compiler → Layout/Render` forms a stable closed loop, without attempting single-view
@@ -43,107 +50,29 @@ Two standing rules govern all future work, not just one phase — see
    owns cursor/selection state and navigation, rendered against that geometry —
    never a second, independently-laid-out system.
 
-## Current focus: Phase 3
+## Phase 3 — closed (engineering validation)
 
-Full detail in [doc/phase3-single-view.md](doc/phase3-single-view.md).
+Full detail, including the complete M13–M22 milestone record and M23's status at
+closing, is in [doc/phase3-single-view.md](doc/phase3-single-view.md). Summary: M13
+(dispatch refactor), M14/M14A (perf and geometry feasibility spikes), M18 (CJK IME
+spike), and M20/M21/M22 (a working self-drawn-cursor editing loop on live Typst
+rendering — the "Live cursor" view) are all done, with M15's per-block swap mechanism
+built three times, found fundamentally unworkable, and superseded by that same
+self-drawn-cursor mechanism (see M15's entry for the design-principle correction this
+forced — reflected in [design-principles.md](doc/design-principles.md) rule 2). M23
+(porting Phase 2's table/toolbar/slash-menu affordances onto the new mechanism) is
+partially done (slice 1 committed, slice 2 uncommitted) and deprioritized to backlog:
+per [doc/interaction-design.md](doc/interaction-design.md), the project now moves from
+engineering validation to product design, and finishing M23 isn't required to validate
+that direction.
 
-- **M13 — done.** Refactored node-type dispatch (`spokes/markdown.ts`,
-  `spokes/typstAst.ts`) onto a shared table + exhaustiveness checks — a prerequisite
-  for adding more Typst content types cleanly.
-- **Perf baseline (parallel, non-gating) — edit-position follow-up done (negative
-  result); full pipeline instrumentation not started.** Full task: instrument the
-  existing pipeline end-to-end (parse/convert/render/edit/serialize/compile/preview)
-  across a sweep of fixture sizes, not just one file. Not a gate — doesn't block M14A+
-  and can run any time; doubles as a regression guard for M14's linear-in-pages
-  finding, and its tooling is meant to be reused by M14A/M15/M16's own perf checks.
-  Its edit-position follow-up (below) is done: recompile cost tracks total document
-  size, not proximity of the edit to the end — rules out a bounded-window recompile at
-  the compile layer as a perf lever. See [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M14 — done, partial-negative.** Whole-doc recompile-after-edit scales ~linearly
-  with page count, not page-count-independent — fast enough for short/medium
-  documents, too slow for long ones, and `comemo` caching doesn't rescue it (Typst's
-  pagination pass is inherently whole-document-sequential). Doesn't block M15, but
-  M15/M16 must design around this cost. Measurements and consequences in
-  [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M14A — done, positive.** `Frame` data (via `typst-ide`'s own span-matching
-  mechanism, generalized from a point to a range) does cleanly yield page, x/y,
-  width/height, and baseline; line boxes are reconstructed by clustering same-baseline
-  glyph hits (`Frame` doesn't preserve a per-line boundary itself); fragment boxes for
-  content pulled out of flow (footnotes) fall out for free. No coarse-bounding-box
-  fallback needed. Prototype and limitations in
-  [doc/phase3-single-view.md](doc/phase3-single-view.md) (`geometry.rs`).
-- **M15 — done, negative result.** Per-block render/edit swap (PM node view
-  showing either a rendered fragment or an editable view, toggled on
-  focus/blur) was built three times — NodeView-based, absolute-positioned
-  overlay, before/after crop — each fixing the previous attempt's failure but
-  landing on a new one, down to a design-principle failure: cursor/selection
-  can't be split across two independently-laid-out systems (PM/CSS and Typst)
-  rendering the same region. Cancels M15b (extend the swap to table/image/list
-  — no swap mechanism left to extend) and M17 (cursor continuity across swaps
-  — nothing to be continuous across). Session-held `World` (`compile.rs`) is
-  kept — load-bearing for M21, independent of the swap's fate. Full account,
-  including the revised mechanism and design-principles.md rule 2's
-  correction, in [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M18 — done, positive.** CJK IME composition spike. Tested manually against
-  real Chinese/Japanese/Korean IMEs on `spike/m18-ime/index.html`: the
-  full-replace-from-`compositionupdate.data` model holds for all three,
-  including Japanese candidate-cycling and Korean's in-place jamo-to-syllable
-  replacement; candidate-window positioning is correct in all three
-  (confirmed visually); two harness bugs found and fixed (backspace-cancelled
-  composition corrupting committed text, caret not tracking the composition's
-  growing end). One finding to carry forward: Korean commits per-syllable, a
-  real composition-event frequency difference from Chinese/Japanese, not a
-  correctness gap. The one unvalidated risk the revised mechanism depended on
-  is now cleared. Full account in
-  [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M20 — done, positive.** Static cursor/selection/hit-testing directly on
-  live Typst rendering ("Live cursor (M20)" view mode, alongside the
-  existing three), using M14A's geometry — no editing, no IME. Also fixed a
-  pre-existing gap `jump_from_click` had since M1 (hardcoded to page 1 only)
-  — a real correctness issue for this milestone's full-document click
-  premise, not just a nice-to-have. Seven rounds of manual testing found
-  seven real bugs, all fixed — the geometry approximations M14A/jump.rs
-  validated for hit-testing needed real correction once used to draw
-  something or navigate by real distance (a heuristic-height caret drawn
-  too low; two rounds of Up/Down navigation logic, first stale-state then a
-  guessed line-distance, replaced with a real-geometry line search; a
-  flex/SVG scaling bug only visible in a maximized window; two "nothing to
-  click" gaps clamped/snapped onto real content; a mousedown/mouseup race
-  that stuck fast clicks in drag mode). First visible positive milestone
-  since M12. Full account in
-  [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M21 — done, positive.** Edit loop: keystroke → edit the raw Typst source
-  directly (never through ProseMirror, per M15) → edit the session `World`'s
-  source → whole-document recompile → redraw SVG → redraw cursor from fresh
-  geometry. A hidden `<textarea>` captures keystrokes/IME composition via
-  `input`/`compositionend` (M18's validated pattern, not `keydown`) —
-  composition commits correctly but has no live preview yet, a known
-  follow-up given this project's CJK orientation. No block-scoped/
-  second-`World` compilation for v1 — planned as its own milestone (M19,
-  hence the gap in the numbering) but folded in here instead. Five real bugs
-  found and fixed by manual testing (dead keyboard input from a focus bug,
-  Enter/blank-line caret, dead Backspace/Delete, scroll resetting on a long
-  document, a too-long debounce) and one confirmed, accepted limitation:
-  typing on a 20-section document feels laggier, exactly matching M14's own
-  prediction for whole-document recompile scaling — decided (2026-09-08) to
-  accept this for v1 rather than pull the deferred block-scoped compile work
-  forward now. One pre-existing, cross-cutting gap surfaced but out of
-  scope: a tofu/missing-glyph font-coverage issue (`typst_world.rs`, M1),
-  confirmed unrelated to M21's own text-splicing logic. Full account in
-  [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M22 — done, positive (supersedes M16).** Settle-window UX: an optimistic
-  floating badge, anchored above the caret, shows the raw source text of the
-  paragraph being edited while a real recompile is in flight, clearing the
-  instant the real redraw lands. M16's correctness question (stale sibling
-  content) was already resolved by construction under M21; this covered the
-  remaining latency/visual-continuity gap. Confirmed by manual testing on
-  both the short demo document (flashes once per keystroke — the debounce,
-  not real compile time, dominates there) and the 20-section long-document
-  fixture (stays visible through the whole recompile, matching M21's
-  "laggier typing" finding). Live re-pagination turned out to be unnecessary
-  scope: M21's whole-document recompile already redraws every page from
-  scratch each settle, so there was no separate stale-layout state to
-  reconcile — only the missing feedback during the wait, which the badge
-  covers. Full account in [doc/phase3-single-view.md](doc/phase3-single-view.md).
-- **M23 — not started, next.** Port Phase 2 editing affordances (tables,
-  slash menu, toolbar, lists) onto a parse → transform → serialize model.
+## Current focus: Phase 4 — Product Validation
+
+Full detail, including the spike plan and priority order, is in
+[doc/phase4-product-validation.md](doc/phase4-product-validation.md). Summary: Phase 3
+validated the *engineering* feasibility of single-view editing;
+[doc/interaction-design.md](doc/interaction-design.md) (2026-09-09) is the product
+design that follows, proposing **focus-reveals-source** (a focused block becomes a
+native, editable source-text region; every other block stays fully rendered) as a
+refinement of M20–M22's mechanism rather than a restart. Spike 1 (single-paragraph
+focus/blur swap) is next.

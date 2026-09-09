@@ -2,12 +2,26 @@
 
 A desktop [Typst](https://typst.app/) editor built with Tauri + React + TypeScript.
 
-This project aims to make Typst editing feel direct: one visual surface, no source code in sight by default, while every character on the page is still backed by the real Typst compiler rather than an approximation. Today, the editor is partway there: a rich-text WYSIWYG view, a raw Typst source view, and a raw Markdown view all edit the same underlying document and stay in sync, alongside a live preview rendered by the real compiler (see Features below). The end state is to collapse these into a single seamless editing surface, where source and rendered document are no longer separate modes of working — see [plan.md](plan.md) for the detailed roadmap.
+This project targets writers who already know Typst syntax and want faster everyday
+input, not a syntax-free editor. The direction it's working toward is **zero render
+drift** — editing without a gap between what's on screen and what the real Typst
+compiler would actually produce. Today it's a work in progress: the WYSIWYG view is a
+regular rich-text editor (ProseMirror + CSS) kept in sync with a separate live preview
+pane rendered by the real compiler, alongside raw Typst/Markdown source views and an
+experimental "Live cursor" view (a real caret/selection drawn directly on the
+live-compiled document, no separate preview pane — see Features below) that's the
+current step toward closing that gap. The target end state, per the
+**focus-reveals-source** design, collapses these into one surface where every block
+renders normally except the one currently focused, which shows its native editable
+source — see [plan.md](plan.md) and [doc/interaction-design.md](doc/interaction-design.md)
+for the detailed roadmap and rationale.
 
 ## Features
 
-- **WYSIWYG, Typst source, and Markdown views** of the same document — switch freely,
-  content and formatting survive the round trip.
+- **WYSIWYG, Typst source, Markdown, and Live cursor views** of the same document —
+  switch freely, content and formatting survive the round trip. Live cursor is
+  experimental: a self-drawn caret/selection with click-to-position, drag-to-select,
+  and typing (including CJK IME) directly on the live-compiled render.
 - **Rich content**: headings, lists, tables, images/figures, and links, all directly
   editable in the WYSIWYG view.
 - **Live preview** rendered by the real `typst::compile`, not a reimplementation —
