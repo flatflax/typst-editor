@@ -1,6 +1,30 @@
-# Phase 3 — Single-View WYSIWYG (active, M13–M23)
+# Phase 3 — Single-View WYSIWYG (closed 2026-09-09; M13–M22 complete, M23 deprioritized to backlog)
 
 Architecture reference: [architecture.md](architecture.md). Design rules: [design-principles.md](design-principles.md).
+
+## Closed
+
+Phase 3's purpose — engineering validation of single-view WYSIWYG — is fulfilled:
+M14/M14A/M18/M20/M21/M22 give a working, validated "self-drawn cursor on live Typst
+rendering" editing loop (see Milestones below for the full record, including M15's
+discarded swap mechanism and the design-principle correction it forced). Per
+[interaction-design.md](interaction-design.md) (2026-09-09), the project now moves
+from engineering validation to product design: the remaining work under this phase —
+M23 (porting Phase 2's table/toolbar/slash-menu affordances) and any open Live-cursor
+bugs — is bug-fix/polish-level, not required to validate the next product direction,
+and is demoted to backlog rather than continued as active work. Active work moves to
+the Spikes in [interaction-design.md](interaction-design.md) §10
+(**focus-reveals-source**, a further refinement of the mechanism validated here — see
+that document for full rationale), tracked in [plan.md](../plan.md)'s "Current focus"
+section.
+
+**M23 status at closing**: slice 1 (block-type toggles — heading/paragraph/list,
+`structuralCommand.ts`) done and committed. Slice 2 (mark toggles, table row/column
+operations, plus two Live-cursor bug fixes — a mousedown/drag race corrupting
+selection anchors, and stale click targets resolving against an already-superseded
+render during an in-flight recompile) was in progress, uncommitted, at the time of
+closing; left as-is rather than force-finished, since M23 is no longer being driven
+to completion. The slash-command menu (a further planned slice) was never started.
 
 ## Reframing
 
@@ -656,12 +680,38 @@ already redraws every page from scratch on each settle, so there is no
 separate "stale layout" state to reconcile. What was missing was purely the
 feedback *during* the settle window, which the badge now covers.
 
-**M23 — Port Phase 2 editing affordances (not started).** Table editing, the
+**M23 — Port Phase 2 editing affordances — partial progress, deprioritized to
+backlog at Phase 3's closing (see Closed section above).** Table editing, the
 slash-command menu, the floating toolbar, and list operations — currently built
 on PM's persistent DOM tree — reimplemented against the parse → transform →
 serialize model (M15's finding: PM, where still used, becomes an on-demand
-structural transformer, not a persistent editing surface). Largest-effort
-milestone here; lowest technical risk.
+structural transformer, not a persistent editing surface).
+
+- **Slice 1 (done, committed).** Block-type toggles (heading/paragraph/list)
+  ported to the Live cursor toolbar via `structuralCommand.ts`: each click runs
+  an existing `wysiwygCommands.ts` PM command against a throwaway `EditorState`
+  parsed from the whole current source, then serializes the result straight
+  back to Typst text. Also: "P" now escapes a list item (a button the original
+  WYSIWYG toolbar never exposed), and ordered lists serialize with Typst's
+  native `+` auto-number marker instead of explicit `1. 2. 3.` when the list
+  starts at 1 (a `pmDocToTypst` change, not toolbar-specific). Manual testing
+  confirmed three initially-reported "bugs" (repeated list-toggle clicks not
+  merging into one list; toggling a list again being a no-op) are pre-existing
+  PM command behavior already present in the old WYSIWYG editor, not
+  regressions — pinned as characterization tests.
+- **Slice 2 (in progress, uncommitted at closing).** Mark toggles
+  (bold/italic/code/link) and table row/column operations ported the same way.
+  Two Live-cursor bugs found and fixed along the way: a mousedown/drag race
+  where a fast drag's own `offsetAtClient` call could resolve before
+  mousedown's anchor-setting one, corrupting the selection range they form
+  together; and stale click/drag targets resolving against an
+  already-superseded render while a recompile is in flight (`isPending`),
+  fixed by refusing to resolve a click/drag position at all during that
+  window rather than risk silently selecting the wrong text. Known,
+  accepted gap: mark toggles are a no-op on a collapsed cursor with nothing
+  selected, since there's no persistent PM `storedMarks` state for this raw
+  splice-based editing model to carry a pending toggle in.
+- **Slash-command menu**: not started.
 
 ## Risks
 

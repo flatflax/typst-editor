@@ -49,12 +49,27 @@ import {
   type RawRangeBox,
 } from "./typstCursor";
 import { runStructuralCommand, type StructuralEditResult } from "./structuralCommand";
-import { liftList, setHeading, setParagraph, toggleBulletList, toggleOrderedList } from "./wysiwygCommands";
+import {
+  addTableColumn,
+  addTableRow,
+  deleteTableColumn,
+  deleteTableRow,
+  insertTable2x2,
+  liftList,
+  setHeading,
+  setParagraph,
+  toggleBulletList,
+  toggleCode,
+  toggleEm,
+  toggleLink,
+  toggleOrderedList,
+  toggleStrong,
+} from "./wysiwygCommands";
 
 // M23: the toolbar buttons ported from the WYSIWYG view's own toolbar
-// (wysiwygCommands.ts) — table/mark/slash-menu support comes in later
-// slices of this milestone, once this first slice (block-type toggles) is
-// confirmed working end to end.
+// (wysiwygCommands.ts) — the slash menu comes in a later slice of this
+// milestone, once block-type/mark/table toggles are confirmed working end
+// to end.
 //
 // Each item names a `run` step chain rather than a single PM `Command`: most
 // buttons are exactly one command, but "P" needs two run in sequence
@@ -64,6 +79,15 @@ import { liftList, setHeading, setParagraph, toggleBulletList, toggleOrderedList
 // `paragraph`) was never *reachable* as a "stuck in a list" toolbar bug
 // there. Live cursor's toolbar is button-only (no keymap yet), so it has to
 // stand on its own.
+//
+// Known gap, not fixed here: `toggleStrong`/`toggleEm`/`toggleCode` are a
+// no-op on a collapsed cursor with nothing selected — the same as the
+// original WYSIWYG toolbar *looks* like on the surface, but there PM's
+// `storedMarks` would carry the toggle onto the *next* typed character; here
+// there's no persistent PM state for storedMarks to live in between one
+// throwaway transform and the next real keystroke (which goes through
+// `commitEdit`'s raw splice, not PM at all). Select text first for a mark
+// toggle to do anything.
 const TOOLBAR_ITEMS: { label: string; steps: Command[] }[] = [
   { label: "P", steps: [liftList, setParagraph] },
   { label: "H1", steps: [setHeading(1)] },
@@ -71,6 +95,15 @@ const TOOLBAR_ITEMS: { label: string; steps: Command[] }[] = [
   { label: "H3", steps: [setHeading(3)] },
   { label: "• List", steps: [toggleBulletList] },
   { label: "1. List", steps: [toggleOrderedList] },
+  { label: "B", steps: [toggleStrong] },
+  { label: "I", steps: [toggleEm] },
+  { label: "Code", steps: [toggleCode] },
+  { label: "Link", steps: [toggleLink] },
+  { label: "Table", steps: [insertTable2x2] },
+  { label: "+Row", steps: [addTableRow] },
+  { label: "+Col", steps: [addTableColumn] },
+  { label: "-Row", steps: [deleteTableRow] },
+  { label: "-Col", steps: [deleteTableColumn] },
 ];
 
 type Props = {
@@ -147,6 +180,19 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // position instead of queuing a backlog.
   const pendingDragPointRef = useRef<{ clientX: number; clientY: number } | null>(null);
   const dragRequestInFlightRef = useRef(false);
+  // `handleMouseDown`'s own offset resolution (setting anchorOffset) is
+  // *also* an async invoke round-trip, same as a drag point's — a fast drag
+  // fires mousemove (and its own offsetAtClient call) before mousedown's
+  // promise has resolved, so `resolveNextDragPoint` could set cursorOffset
+  // from a *later* mouse position while anchorOffset is still whatever it
+  // was from the previous interaction, corrupting the selection range they
+  // end up forming together. Confirmed live: dragging over "matching"
+  // yielded a selection landing on "hing poi" instead, on the very first
+  // interaction after launch — not something a stale/prior anchorOffset
+  // value would produce unless this exact race occurred. Every drag point
+  // now waits for this to resolve first, guaranteeing anchorOffset always
+  // lands before any cursorOffset update from dragging can.
+  const mouseDownResolvedRef = useRef<Promise<unknown>>(Promise.resolve());
   // Sticky column for consecutive Up/Down presses (standard editor UX: moving
   // down through a short line then back up returns to the original column).
   // Reset on click/Left/Right; a ref since it shouldn't itself trigger a
@@ -316,7 +362,18 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     return stageRef.current?.querySelector<SVGSVGElement>(".typst-live-svg svg") ?? null;
   }
 
+  // M23 fix: while `isPending` (a real recompile is in flight, M22), the
+  // still-*displayed* SVG was rendered from an *older* source than the one
+  // `jump_from_click`/`block_geometry` would now resolve a pixel position
+  // against (both always query the current `source`, invoked fresh — see
+  // those two call sites below). Confirmed live: a click/drag made in that
+  // window can land on visibly different text than what's under the
+  // pointer, because the layout has already shifted underneath the still-
+  // stale render. Refusing to resolve anything until the render catches up
+  // trades a brief moment of "click does nothing" for never silently
+  // selecting/positioning against the wrong text.
   async function offsetAtClient(clientX: number, clientY: number): Promise<number | null> {
+    if (isPending) return null;
     const base = baseSvgEl();
     if (!base) return null;
     const { xPt, yPt } = svgPointFromClient(base, clientX, clientY);
@@ -358,7 +415,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     // no button held) then extended a selection, which read as a bogus
     // "long press."
     draggingRef.current = true;
-    offsetAtClient(event.clientX, event.clientY).then((offset) => {
+    mouseDownResolvedRef.current = offsetAtClient(event.clientX, event.clientY).then((offset) => {
       if (offset == null) return;
       preferredXPtRef.current = null;
       setAnchorOffset(offset);
@@ -373,10 +430,14 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
       dragRequestInFlightRef.current = false;
       return;
     }
-    offsetAtClient(point.clientX, point.clientY).then((offset) => {
-      if (offset != null) setCursorOffset(offset);
-      resolveNextDragPoint();
-    });
+    // Wait for mousedown's own anchor-setting resolution first — see
+    // `mouseDownResolvedRef`'s own comment above.
+    mouseDownResolvedRef.current
+      .then(() => offsetAtClient(point.clientX, point.clientY))
+      .then((offset) => {
+        if (offset != null) setCursorOffset(offset);
+        resolveNextDragPoint();
+      });
   }
 
   function handleMouseMove(event: React.MouseEvent<HTMLDivElement>) {

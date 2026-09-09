@@ -6,7 +6,15 @@
 import { describe, expect, it } from "vitest";
 import { applyStructuralCommand } from "./structuralCommand";
 import { typstAstToDoc } from "../spokes/typstAst";
-import { liftList, setHeading, setParagraph, toggleBulletList, toggleOrderedList } from "./wysiwygCommands";
+import {
+  insertTable2x2,
+  liftList,
+  setHeading,
+  setParagraph,
+  toggleBulletList,
+  toggleOrderedList,
+  toggleStrong,
+} from "./wysiwygCommands";
 import { fixtures } from "../spokes/typstAst.fixtures";
 
 describe("applyStructuralCommand", () => {
@@ -158,5 +166,53 @@ describe("applyStructuralCommand", () => {
     });
     const settled = applyStructuralCommand(plainDoc, lifted!.cursorOffset, lifted!.anchorOffset, setParagraph);
     expect(settled).toBeNull();
+  });
+
+  it("toggleStrong marks a real (non-collapsed) selection as bold", () => {
+    const doc = typstAstToDoc(fixtures.marks.ast);
+    // "plain" specifically (not "italic"): it's unmarked, plain text, so the
+    // offset<->PM-position mapping is exact. A selection landing *inside* an
+    // already marked-up run (e.g. "italic", wrapped in "_..._") only maps
+    // approximately (typstAst.ts's own doc comment on `PositionMapEntry`:
+    // "escaping/*/_/`` ` `` wrappers shift Typst length away from PM
+    // length") — a pre-existing imprecision, not something to newly assert
+    // an exact boundary against here.
+    const start = 0;
+    const end = "plain".length;
+    const result = applyStructuralCommand(doc, start, end, toggleStrong);
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe("*plain* *bold* _italic_ `code` *_bold italic_*");
+  });
+
+  // Not actually a no-op: PM's `toggleMark` on a collapsed selection still
+  // dispatches a transaction (toggling `state.storedMarks`, meant to affect
+  // the *next* typed character) rather than returning false — so
+  // `applyStructuralCommand` reports success, just with the source
+  // unchanged. `storedMarks` has nothing to attach to here: there is no
+  // "next keystroke" in this ephemeral PM state, it's thrown away the
+  // instant this call returns (see TOOLBAR_ITEMS's own comment on this
+  // known gap versus the old WYSIWYG toolbar).
+  it("toggleStrong on a collapsed cursor runs but leaves the source unchanged", () => {
+    const doc = typstAstToDoc(fixtures.marks.ast);
+    const result = applyStructuralCommand(doc, 0, 0, toggleStrong);
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe(fixtures.marks.source);
+  });
+
+  // `insertTable(rows, cols)` uses `replaceSelectionWith` (wysiwygCommands.ts
+  // :103), which splits the surrounding paragraph around a collapsed cursor
+  // rather than replacing the whole block — expected block-editor behavior
+  // (matches "insert table" in any rich-text editor: it inserts *at* the
+  // cursor, not "replace the current paragraph"), not something special to
+  // this adapter. Cursor at offset 0 here means nothing precedes it (an
+  // empty "before" paragraph, which serializes to nothing) and the whole
+  // original paragraph becomes its own block *after* the table.
+  it("insertTable2x2 inserts an empty table at the cursor, splitting the surrounding paragraph around it", () => {
+    const doc = typstAstToDoc(fixtures.marks.ast);
+    const result = applyStructuralCommand(doc, 0, 0, insertTable2x2);
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe(
+      "#table(columns: 2, [], [], [], [])\n\nplain *bold* _italic_ `code` *_bold italic_*",
+    );
   });
 });

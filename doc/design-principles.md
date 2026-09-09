@@ -66,3 +66,16 @@ The bridge is still `editor position ⇄ source range ⇄ Typst layout geometry`
 (`jump_from_click`/`jump_from_cursor`, M1/M5; `geometry_for_range`/`block_geometry`,
 M14A/M20) — the editing system holds and moves the position; geometry only answers
 where it currently renders.
+
+## Pending revision (not yet adopted)
+
+[interaction-design.md](interaction-design.md) §6 (2026-09-09) proposes collapsing
+this rule's yes/no geometry test into one: **focused → source text, unfocused →
+rendered according to geometry.** This does not supersede the rule above yet — it's
+pending the Spike validation tracked in that document's §10 (see
+[phase3-single-view.md](phase3-single-view.md)'s Closed section and
+[plan.md](../plan.md)'s Phase 4). Even if validated, it wouldn't cover every case on
+its own: `#set`/`#let`/tag-style references need reference-chain navigation beyond a
+placeholder, and comments need a fidelity guarantee regardless of focus state —
+interaction-design.md §5A treats those as two separate requirements, not instances of
+this simplified rule.

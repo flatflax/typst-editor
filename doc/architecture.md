@@ -18,6 +18,11 @@ Typst source  <---parse/serialize--->  Editor Model (ProseMirror doc)  <---parse
 - **Preview always goes through real Typst source + the real Typst compiler.** On every
   debounced change, the current model serializes to Typst source and compiles, regardless
   of which view is active.
+- **The Live cursor view (Phase 3 M20–M23) is a second, source-first editing path, not
+  routed through the Editor Model** — it edits Typst source text directly and
+  self-draws a cursor/selection layer against the compiled `Frame`'s own geometry
+  instead. See Key technical decisions below and
+  [phase3-single-view.md](phase3-single-view.md) M15 for why.
 
 ## Process split
 
@@ -32,6 +37,11 @@ Typst source  <---parse/serialize--->  Editor Model (ProseMirror doc)  <---parse
   `TauriWorld`/`PagedDocument` pipeline, writes bytes directly to disk.
 - `read_image_as_data_url(path)` — resolves a relative image path against the open
   document's directory and returns a base64 `data:` URL for the live WYSIWYG preview.
+- `geometry_for_range`/`block_geometry` (`geometry.rs`, Phase 3 M14A/M20) — walk the
+  compiled `Frame` tree for a source byte range and return rendered geometry (page,
+  x/y, width/height, baseline), generalizing `jump_from_click`/`jump_from_cursor`'s
+  span-matching from a point to a range. Backs the Live cursor view's self-drawn
+  cursor/selection.
 
 **TypeScript frontend** owns the Editor Model and both source-format conversions —
 ProseMirror already lives there, and Markdown parsing has mature TS-typed libraries:
@@ -49,8 +59,10 @@ Reorganized 2026-09-04 into five folders mirroring the architecture:
 - `editor/` — WYSIWYG and source-mode editing surfaces: `WysiwygEditor.tsx`,
   `wysiwygCommands.ts`, `SourceEditor.tsx`. Also, since M20 (Phase 3's
   revised mechanism — see below): `TypstLiveView.tsx` (the "Live cursor"
-  view, no PM involved) and `typstCursor.ts` (its pure geometry/offset
-  math, tested independently of React/Tauri).
+  view, no PM involved), `typstCursor.ts` (its pure geometry/offset
+  math, tested independently of React/Tauri), and `structuralCommand.ts`
+  (M23 — runs a `wysiwygCommands.ts` PM command against a throwaway
+  `EditorState` for the Live cursor view's block-level toolbar).
 - `shell/` — app-level, non-editing concerns: `fileIO.ts`, `recentFiles.ts`,
   `appMenu.ts`.
 - `util/` — small pure helpers: `offsets.ts`, `diagnosticPosition.ts`,
