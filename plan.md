@@ -7,20 +7,22 @@
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
 | 3 — Single-View WYSIWYG (engineering validation) | M13–M22 | Validate that single-view editing is technically feasible: perf ceiling, rendered geometry, CJK IME, a working edit loop | Closed 2026-09-09 — feasibility validated (M14/M14A/M18/M20/M21/M22 positive, M15 negative but superseded); M23 deprioritized to backlog |
-| 4 — Product Validation | Spikes 1–3 | Validate the "focus-reveals-source" interaction model before further engineering investment | Spike 1 next |
+| 4 — Product Validation | Spikes 1–3 | Validate the "focus-reveals-source" interaction model before further engineering investment | In progress — Spikes 1–3 (lazy and eager) feel-tested and fixed live, incl. two bugs found only on real hardware; lazy adopted; remaining: independent user validation of true WYSIWYG as a real pain point |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Phase 4 — Product Validation](doc/phase4-product-validation.md) · [Interaction Design](doc/interaction-design.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
 ## Product goal
 
 A desktop Typst editor for writers who already know Typst syntax and want faster
-everyday input — not a syntax-free editor. The core promise is **zero render drift**:
-what's on screen while editing is never an approximation, because it's always the
-real Typst compiler's own output, not a second layout engine's guess, inside a single
-visual surface (no separate preview pane). See
-[doc/interaction-design.md](doc/interaction-design.md) for the current product
-positioning (2026-09-09; supersedes the earlier "edits like Typora/Notion, zero
-syntax" framing — "zero syntax" was dropped as a goal, replaced by
+everyday input — not a syntax-free editor. The core promise is **true WYSIWYG** (the
+industry's own term for this specific property — see
+[doc/interaction-design.md](doc/interaction-design.md) §4/footnote; this doc used to
+call it "zero render drift," a made-up term now retired): what's on screen while
+editing is never an approximation, because it's always the real Typst compiler's own
+output, not a second layout engine's guess, inside a single visual surface (no separate
+preview pane). See [doc/interaction-design.md](doc/interaction-design.md) for the
+current product positioning (2026-09-09; supersedes the earlier "edits like
+Typora/Notion, zero syntax" framing — "zero syntax" was dropped as a goal, replaced by
 **focus-reveals-source**, see that document §6) and [Phase 3](doc/phase3-single-view.md)
 for the engineering feasibility work that validated this is achievable.
 

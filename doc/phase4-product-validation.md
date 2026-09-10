@@ -23,15 +23,19 @@ Full rationale in [interaction-design.md](interaction-design.md) §10.
 1. ~~**Spike 1**~~ — done, positive; see Milestones below.
 2. ~~**Spike 2**~~ — feel-tested and fixed live (width, staleness, page height, fair-share
    margins on both axes); see Milestones below.
-3. **Fact-check (parallel, low-cost)** — confirm Typst's blank-line paragraph-split
-   rule holds inside list items and table cells (check the `typst-syntax` parser
-   directly, not by analogy to Markdown/LaTeX). Still open.
-4. ~~**Spike 3**~~ — "lazy" (commit-on-blur) half implemented and verified; the "eager"
-   comparison is still open. See Milestones below.
+3. ~~**Fact-check**~~ — done: blank line safely ends a list item (matches our splitting
+   assumption), but does *not* end a table cell, and `blockByteRanges` used to split there
+   anyway. Confirmed architectural gap, fixed by making the split bracket-depth-aware
+   (`src/editor/blockSplit.ts`) — see Milestones below.
+4. ~~**Spike 3**~~ — both "lazy" and "eager" halves implemented, verified, and feel-tested
+   against each other; lazy wins (eager flickers on every paragraph split during continuous
+   typing). See Milestones below.
 5. **User validation** (independent, parallel track) — interview real target users on
-   whether "zero render drift" (editing always shows the real compiled result, not an
-   approximation) is a pain point they actually feel; currently only supported by
-   indirect evidence.
+   whether **true WYSIWYG** (editing always shows the real compiled result, not an
+   approximation — the industry's own term for this specific property, per
+   interaction-design.md §4/footnote; this doc used to call it "zero render drift," a
+   made-up term now retired) is a pain point they actually feel; currently only
+   supported by indirect evidence.
 
 ## Milestones
 
@@ -276,8 +280,163 @@ blurring, then clicked directly on a sibling that was rendered at what was about
 become a stale index — it correctly resolved to that sibling's real, unaffected content
 rather than the wrong (shifted) block.
 
-**Not yet done**: feel-testing on real hardware (does the reparse-at-commit read as
-natural, or does the sudden appearance of a new block feel jarring); the "eager"
-alternative, to actually compare against; and the fact-check on whether Typst's
-blank-line rule holds inside list items/table cells (§10's own open item, unaffected by
-which of lazy/eager wins — both would need it before covering that content).
+**Found and fixed during that same pass, in both Spike 2 and Spike 3**: clicking sometimes
+resolved to the wrong paragraph. Root cause was the same class of bug M23 already found and
+fixed in `TypstLiveView.tsx`, just never ported to these two spikes: a click's pixel
+coordinates come from whatever SVG is *currently rendered*, but `jump_from_click` resolves
+them against the *current* `source` — right after any commit, for one round trip, those two
+can disagree (stale pixels, fresh document), silently landing on the wrong text. The same
+mismatch corrupts a cropped sibling too (stale pixels + fresh geometry coordinates cut the
+wrong band out of the old image). Not a caching bug in the ordinary sense. Fixed by porting
+M23's own fix: an `isPending` flag (true the instant `source` changes, false once the
+displayed SVG catches up) that makes click resolution refuse to run, and cropping fall back
+to a "Compiling…" placeholder, until the two are back in sync. Verified via Playwright
+against a deliberately-delayed mock: confirmed the bug reproduces with the guard removed
+(a pending-window click both fired `jump_from_click` and corrupted the view), and disappears
+with it restored (the click is silently ignored until the compile lands, then works
+normally).
+
+**Spike 3 (eager) — implemented and verified.** `FocusRevealSpike3Eager.tsx`: the instant a
+complete blank-line separator appears in the focused draft (checked on every `onChange`, not
+waiting for blur), the completed part splices into `source` immediately and the textarea
+keeps only the remainder as its live value — reusing the `isPending` mechanism above for
+free to show the freshly-split block as "Compiling…" until it actually renders, which is
+exactly M22's optimistic-pending convention applied here rather than built again from
+scratch. Cursor handling needed no manual DOM work either: bumping `focusedBlock` by however
+many blocks the split produced means the array position that now holds `<textarea>` was a
+different element type a moment ago, so React's own keyed reconciliation unmounts/remounts
+it with `defaultValue` already set to the trimmed remainder, and the existing
+focus/cursor-placement effect (already needed for plain click-to-focus) runs again for free.
+Verified via Playwright: typing content containing a blank line *without blurring* correctly
+trims the live textarea to just the tail, and the completed part is independently
+addressable (as its own committed block) immediately, no blur required.
+
+**Found and fixed live, in the eager variant specifically**: editing the first paragraph
+could silently overwrite the *next* paragraph's content. Root cause: the eager split fires
+the moment a blank-line separator is typed, before anything follows it — so the freshly-
+split-off "new paragraph" is still empty at that instant. Splicing `completed + "\n\n" + ""`
+back into `source` puts that empty paragraph directly against whatever separator already
+followed the old block, producing a run of 4+ consecutive newlines. Typst collapses any run
+of blank lines into a single paragraph break (this spike's own `blockByteRanges` mirrors that
+with a greedy `\n{2,}` regex), so the "empty paragraph" was never actually a distinct block
+at all — it silently merged with the real paragraph after it. `focusedBlock` still pointed at
+that (now-merged) slot, so the textarea ended up editing the *next real paragraph's* byte
+range, and committing overwrote it. Fixed by not splitting until `remaining` has at least one
+non-whitespace character — guarantees the split always produces a genuinely distinct block,
+never an empty one that Typst (and this function's own regex) wouldn't recognize as separate.
+Verified via Playwright: with the fix, typing a blank line with nothing after it yet leaves
+the textarea showing the full undivided text (no premature split); typing real content after
+it then splits correctly; and the original next paragraph's text is confirmed byte-for-byte
+intact after commit. Confirmed the fix is load-bearing by disabling it and reproducing the
+premature split.
+
+**Conclusion (2026-09-10)**: hands-on comparison of both variants settled it — lazy feels
+better. Eager's cost is a flicker on every paragraph completion during continuous typing: each
+time a blank line completes, `isPending` (correctly) forces all non-focused sibling blocks back
+into their "Compiling…" placeholder until the next compile lands, so a long block-splitting
+paragraph produces repeated flicker before the user has even paused. Lazy only makes that same
+transition once, at the natural pause point of blur, so it never interrupts mid-sentence. This
+isn't a bug in the eager implementation — the pending-guard is doing exactly what it's supposed
+to — it's an inherent cost of splitting eagerly at all: more splits during a single continuous
+edit means more flicker. `FocusRevealSpike3Eager.tsx` stays in the repo as a validated-but-not-
+adopted alternative; no further polish is planned for it. See interaction-design.md §10 item 13.
+
+**Fact-check done (2026-09-10): Typst's blank-line rule does *not* hold uniformly.** Tested
+directly against the real compiler (not a mock): a blank line inside a list item's body ends
+the list — the content after it becomes a new top-level paragraph outside the list, matching
+this spike's own `\n{2,}`-splits-everything assumption (safe). But a blank line inside a table
+cell (`#table(...)`'s `[...]` argument) stays inside that cell — it does *not* end anything.
+`blockByteRanges`, which only pattern-matched `\n{2,}` textually with no idea it's sitting
+inside a bracketed argument, still split there anyway. Confirmed live: clicking into that
+cell's content showed the wrong text in the textarea (content from *above* the table), because
+the byte range this produced didn't correspond to any real top-level block.
+
+**Fixed (2026-09-10)**: extracted `blockByteRanges`/`blockAt` out of the spike components into
+their own module, `src/editor/blockSplit.ts`, and rewrote the splitter as a single linear scan
+that tracks `(`/`[`/`{` nesting depth (not distinguishing bracket type — a working document
+never mismatches them, and a temporarily-unbalanced one mid-edit is safer to under-count toward
+*more* splitting than to get permanently stuck above depth 0) and only treats `\n{2,}` as a
+split point at depth 0. String literals, single-backtick raw spans, and line/block comments are
+skipped while scanning so bracket-like characters inside them (`"(unbalanced"`, `` `foo(bar]` ``,
+`// see [ref]`) don't distort the count. Covered by 13 unit tests in `blockSplit.test.ts`
+(exercising exactly the two fact-checked scenarios above, plus `#figure[...]`, the
+string/comment/raw-span edge cases, and CJK byte-offset correctness) — no live app or mocked
+Tauri backend needed, since this is pure text logic. `FocusRevealSpike3.tsx` now imports from
+this module instead of keeping its own copy; re-verified end to end via Playwright that
+ordinary plain-paragraph splitting still works unchanged after the swap. **Known, small,
+accepted gap**: triple-backtick raw *fences* aren't tracked as a single span, so a bracket
+inside a fenced code sample could still distort the depth count — not hit by either fact-
+checked scenario, worth revisiting if fenced code examples become common content. Spike 2 and
+the (unadopted) eager variant were *not* updated to use the new module — Spike 2 is superseded
+by Spike 3, and the project's own conclusion on eager (see the lazy-vs-eager entry above) is
+that it gets no further polish. See interaction-design.md §10.
+
+**Cross-block feel-test (2026-09-10), on Spike 3 lazy — two findings, both found live and
+fixed same day:**
+
+1. **Entering focus visibly stuttered; exiting didn't**, even though both involve a
+   comparable height change (rendered line height vs. textarea line height differ
+   substantially). Root cause, confirmed by reading `enterSplitMode`/the old
+   `focusedBlockLayoutPx` effect: entering focus was a *two-step* reveal —
+   `setFocusedBlock(idx)` fired immediately, rendering the textarea with only its locked
+   width (no computed margins yet) and all sibling blocks as "Compiling…" placeholders;
+   only once the `block_geometry` round trip to Rust resolved (a second, later render) did
+   the real margins/crops land. Exiting didn't have this problem because `commitEdit` just
+   flips back to combined mode showing whatever `combinedSvg` already is (stale but
+   complete) — one clean swap, no intermediate no-margin/placeholder frame. **Fixed** by
+   extracting the geometry computation into `computeSplitLayout` and `await`-ing it in both
+   `enterSplitMode` and `switchFocusTo` *before* touching any state, then setting
+   `focusedBlock`/`otherBlocksYRanges`/`focusedBlockLayoutPx` together in one go — the
+   reactive `useEffect` that used to do this after the fact is gone, so there's no longer a
+   window where split mode is showing with the wrong (or no) layout. Not an inherent cost of
+   the mechanism — an ordering bug.
+2. **Dragging out of the focused textarea to start a cross-block selection didn't produce a
+   visible selection — it just looked like the textarea closed, and reopened on mouseup.**
+
+   **First diagnosis (wrong)**: suspected `handoffToCombined` committing the draft flipped
+   `isPending` true for the rest of the drag, and a real compile round trip usually outlasts
+   the gesture, so the mouse went up with cursor still equal to anchor before `isPending`
+   ever cleared. Fixed with an `ignorePending` bypass scoped to the handoff-continued drag,
+   verified via Playwright against a mock with an artificial `compile_typst` delay — the
+   symptom reproduced with the bypass disabled and disappeared with it restored. **This
+   "verification" was misleading**: real hands-on testing in the actual app (`pnpm tauri
+   dev`, real Typst compiles) showed the exact same failure, bypass and all. Live debug
+   logging (temporarily added to `offsetAtClient`, `handoffToCombined`, the window
+   mouse-move/up listeners) showed `isPending` was `false` the entire time — the guard was
+   never even the blocker. `jump_from_click` was being called with plausible-looking
+   coordinates and legitimately returning `null` for every sample.
+
+   **Real root cause**: the native `<textarea>` (browser font/line-height) and the combined
+   mode's real Typst SVG render the *same text* at different heights — the same mismatch
+   already flagged informally in the very first round of Spike testing ("a flicker during the
+   focus/blur transition", "should the textarea's edges align with the paragraph being
+   edited"). The old implementation switched into combined mode
+   *mid-gesture*, the instant the mouse left the textarea, and kept re-resolving the mouse's
+   screen position against the combined SVG on every subsequent mousemove. Each resolution
+   had to translate a screen position that was calibrated against the textarea's (taller)
+   layout into the SVG's (shorter, real) coordinate space — so a drag that visually still
+   looked like it was inside block B's text had, numerically, already passed the last real
+   glyph into blank page space, where `jump_from_click_in_frame` correctly (and permanently,
+   for the rest of that gesture) returns no target.
+
+   **Real fix**: this also turned out to be a case of not following interaction-design.md §6's
+   own stated principle — "which mode a drag/shift-select gesture is in is decided once, at
+   the gesture's end, not switched back and forth mid-gesture" — which the mid-drag handoff
+   violated. Rewrote it to match: while the mouse is outside the textarea mid-drag, nothing
+   updates live (the native textarea does whatever a browser does in that situation, no JS
+   involved); only on `mouseup` does the gesture commit the draft and resolve a *single* final
+   position, once every sign that commit has actually landed agrees (`focusedBlock === null`,
+   `source` equals the exact string just committed, and `!isPending` — checked together
+   declaratively, since `isPending` flipping true is itself a separate, later effect off
+   `source` changing, so it can't be trusted alone immediately after the commit). One
+   cross-coordinate-system resolution per gesture, against one fully-settled render, instead
+   of dozens against a moving target — removing the drift, not papering over it.
+
+Both #1 and #2 were re-verified via Playwright against mocks with artificial delays (on
+`block_geometry` for #1, `compile_typst` for #2): each symptom reproduces with its fix
+disabled and disappears with it restored. #2's fix was additionally confirmed by hand in the
+real app (three rounds of live debugging with temporary console logging, since the Playwright
+mock's simplistic layout model never actually reproduced the real font-metric mismatch that
+was the true cause) — dragging across a block boundary now shows no live update while the
+mouse is outside the textarea (expected), and the cross-block selection appears quickly and
+accurately the instant the mouse is released. See interaction-design.md §10 item 16.

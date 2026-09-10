@@ -12,19 +12,24 @@
 // Builds directly on Spike 2's architecture (combined/split rendering,
 // crop-based unfocused siblings, fair-share margins) but generalizes the one
 // thing Spike 2 hardcoded: exactly two blocks, split once at the first blank
-// line. Here `blockByteRanges` recomputes the *actual* current block count
-// from `source` every time — because that recompute, at commit time, is
-// the entire mechanic this spike exists to test. One consequence that
-// needed real handling (not just widening `0 | 1` to `number`): clicking a
-// sibling block while the currently-focused one is about to expand into
-// several can shift that sibling's *index* — `switchFocusTo` relocates it by
-// byte position after the commit, not by its old index.
+// line. `blockByteRanges`/`blockAt` (./blockSplit.ts) recompute the *actual*
+// current block count from `source` every time — because that recompute, at
+// commit time, is the entire mechanic this spike exists to test. One
+// consequence that needed real handling (not just widening `0 | 1` to
+// `number`): clicking a sibling block while the currently-focused one is
+// about to expand into several can shift that sibling's *index* —
+// `switchFocusTo` relocates it by byte position after the commit, not by its
+// old index. `blockSplit.ts` also tracks bracket depth (not just a plain
+// `\n{2,}` regex) — a fact-check against the real compiler
+// (phase4-product-validation.md, 2026-09-10) found a blank line inside a
+// table cell doesn't end anything, unlike inside a list item, which does.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { EditorDiagnostic } from "./SourceEditor";
 import { svgPointFromClient } from "../util/svgGeometry";
 import { byteToUtf16Offset, utf16ToByteOffset } from "../util/offsets";
 import { selectionRectsFromBoxes, spliceSource, type AbsoluteRect, type RawRangeBox } from "./typstCursor";
+import { blockAt, blockByteRanges } from "./blockSplit";
 
 const BLOCK_A_INITIAL =
   "This is the *first* paragraph. Focus it, then try typing a blank line in the middle of " +
@@ -42,33 +47,6 @@ type CompileResult = {
 type Props = {
   documentDir: string | null;
 };
-
-// Split on *every* blank-line boundary (Typst's own paragraph separator),
-// not just the first — unlike Spike 2, the block count here is exactly what
-// this spike is testing, so it can't be assumed fixed. One or more blank
-// lines collapse to a single split, matching Typst's own rule for this
-// (fact-checking whether that rule also holds inside list items/table cells
-// is a separate, parallel item in phase4-product-validation.md, not
-// something this spike's plain top-level paragraphs need).
-function blockByteRanges(source: string): [number, number][] {
-  const ranges: [number, number][] = [];
-  const blankLine = /\n{2,}/g;
-  let lastEnd = 0;
-  let match: RegExpExecArray | null;
-  while ((match = blankLine.exec(source))) {
-    ranges.push([utf16ToByteOffset(source, lastEnd), utf16ToByteOffset(source, match.index)]);
-    lastEnd = match.index + match[0].length;
-  }
-  ranges.push([utf16ToByteOffset(source, lastEnd), utf16ToByteOffset(source, source.length)]);
-  return ranges;
-}
-
-function blockAt(ranges: [number, number][], byteOffset: number): number | null {
-  for (let i = 0; i < ranges.length; i++) {
-    if (byteOffset >= ranges[i][0] && byteOffset <= ranges[i][1]) return i;
-  }
-  return null;
-}
 
 function sliceByBytes(source: string, startByte: number, endByte: number): string {
   return source.slice(byteToUtf16Offset(source, startByte), byteToUtf16Offset(source, endByte));
@@ -161,70 +139,94 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
     };
   }, [source, documentDir]);
 
+  // M23's own fix (TypstLiveView.tsx), needed here for the same reason:
+  // whether the currently-*displayed* `combinedSvg` actually reflects the
+  // current `source` yet. Confirmed live as "clicking sometimes resolves to
+  // the wrong paragraph": a click's pixel coordinates come from whatever
+  // svg is *currently rendered* (`combinedSvgEl()`), but `jump_from_click`
+  // resolves them against the *current* `source` — right after a commit,
+  // for one round trip, those two can disagree (stale pixels, fresh
+  // document), silently landing on the wrong text. The same mismatch
+  // corrupts a cropped sibling too: cropping stale pixels with fresh
+  // geometry coordinates cuts the wrong band out of the (old) image. Not a
+  // caching bug in the usual sense — the fix is the same one M23 already
+  // found: refuse to resolve/crop until the two are back in sync, rather
+  // than trusting a mix of old-image-coordinates and new-document-geometry.
+  const [isPending, setIsPending] = useState(false);
+  useEffect(() => {
+    setIsPending(true);
+  }, [source]);
+  useEffect(() => {
+    setIsPending(false);
+  }, [combinedSvg]);
+
   // Fair-share Y-range for every block *except* the focused one (which is
   // instead sized via `focusedBlockLayoutPx` below) — a `Map` rather than a
   // fixed pair, since split mode can now show any number of siblings.
   const [otherBlocksYRanges, setOtherBlocksYRanges] = useState<Map<number, { yTopPt: number; heightPt: number }>>(
     new Map(),
   );
-  const [focusedBlockLayoutPx, setFocusedBlockLayoutPx] = useState<{
+  type FocusedLayoutPx = {
     width: number;
     marginTop: number;
     marginBottom: number;
     marginLeft: number;
     marginRight: number;
-  } | null>(null);
-  useEffect(() => {
-    if (focusedBlock === null) return;
-    const ranges = blockByteRanges(source);
+  };
+  const [focusedBlockLayoutPx, setFocusedBlockLayoutPx] = useState<FocusedLayoutPx | null>(null);
+
+  // Computes the split-mode layout (fair-share crops for siblings, textarea
+  // width/margins for the focused block) *before* any state changes — found
+  // live (2026-09-10, phase4-product-validation.md) that doing this as a
+  // reactive effect keyed on `focusedBlock` produced a visible stutter on
+  // every focus-entry: the first render (state already flipped, geometry
+  // not back yet) showed no margins and "Compiling…" siblings, then a
+  // second render corrected it once this round trip landed. Callers now
+  // await this and set all three states together, so split mode's first
+  // frame is already correct.
+  async function computeSplitLayout(
+    effectiveSource: string,
+    idx: number,
+  ): Promise<{ otherMap: Map<number, { yTopPt: number; heightPt: number }>; focusedLayoutPx: FocusedLayoutPx } | null> {
+    const ranges = blockByteRanges(effectiveSource);
     const pageDims = pageDimsFromSvg(combinedSvg);
-    if (pageDims == null) return;
-    let cancelled = false;
-    invoke<RawRangeBox[][]>("block_geometry", { source, baseDir: documentDir, ranges })
-      .then((results) => {
-        if (cancelled) return;
-        const ownRanges = results.map((boxes) => unionYRange(selectionRectsFromBoxes(pageOffsetsPt, boxes)));
-        if (ownRanges.some((r) => r == null) || focusedBlock >= ownRanges.length) {
-          setOtherBlocksYRanges(new Map());
-          setFocusedBlockLayoutPx(null);
-          return;
-        }
-        const validRanges = ownRanges as { yTopPt: number; heightPt: number }[];
+    if (pageDims == null) return null;
+    let results: RawRangeBox[][];
+    try {
+      results = await invoke<RawRangeBox[][]>("block_geometry", { source: effectiveSource, baseDir: documentDir, ranges });
+    } catch {
+      return null;
+    }
+    const ownRanges = results.map((boxes) => unionYRange(selectionRectsFromBoxes(pageOffsetsPt, boxes)));
+    if (ownRanges.some((r) => r == null) || idx >= ownRanges.length) return null;
+    const validRanges = ownRanges as { yTopPt: number; heightPt: number }[];
 
-        const otherMap = new Map<number, { yTopPt: number; heightPt: number }>();
-        for (let i = 0; i < validRanges.length; i++) {
-          if (i === focusedBlock) continue;
-          otherMap.set(i, fairShareBoundsForIndex(i, validRanges, pageDims.heightPt));
-        }
-        setOtherBlocksYRanges(otherMap);
+    const otherMap = new Map<number, { yTopPt: number; heightPt: number }>();
+    for (let i = 0; i < validRanges.length; i++) {
+      if (i === idx) continue;
+      otherMap.set(i, fairShareBoundsForIndex(i, validRanges, pageDims.heightPt));
+    }
 
-        const focusedRange = validRanges[focusedBlock];
-        const focusedFairShare = fairShareBoundsForIndex(focusedBlock, validRanges, pageDims.heightPt);
-        const scale = (lockedWidthPxRef.current ?? pageDims.widthPt) / pageDims.widthPt;
-        const allBoxes = results.flat();
-        const contentLeftPt = allBoxes.length ? Math.min(...allBoxes.map((b) => b.x_pt)) : 0;
-        const contentRightPt = allBoxes.length ? Math.max(...allBoxes.map((b) => b.x_pt + b.width_pt)) : pageDims.widthPt;
-        setFocusedBlockLayoutPx({
-          width: Math.max(0, (contentRightPt - contentLeftPt) * scale),
-          marginLeft: Math.max(0, contentLeftPt * scale),
-          marginRight: Math.max(0, (pageDims.widthPt - contentRightPt) * scale),
-          marginTop: Math.max(0, (focusedRange.yTopPt - focusedFairShare.yTopPt) * scale),
-          marginBottom: Math.max(
-            0,
-            (focusedFairShare.yTopPt + focusedFairShare.heightPt - (focusedRange.yTopPt + focusedRange.heightPt)) * scale,
-          ),
-        });
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setOtherBlocksYRanges(new Map());
-          setFocusedBlockLayoutPx(null);
-        }
-      });
-    return () => {
-      cancelled = true;
+    const focusedRange = validRanges[idx];
+    const focusedFairShare = fairShareBoundsForIndex(idx, validRanges, pageDims.heightPt);
+    const scale = (lockedWidthPxRef.current ?? pageDims.widthPt) / pageDims.widthPt;
+    const allBoxes = results.flat();
+    const contentLeftPt = allBoxes.length ? Math.min(...allBoxes.map((b) => b.x_pt)) : 0;
+    const contentRightPt = allBoxes.length ? Math.max(...allBoxes.map((b) => b.x_pt + b.width_pt)) : pageDims.widthPt;
+    return {
+      otherMap,
+      focusedLayoutPx: {
+        width: Math.max(0, (contentRightPt - contentLeftPt) * scale),
+        marginLeft: Math.max(0, contentLeftPt * scale),
+        marginRight: Math.max(0, (pageDims.widthPt - contentRightPt) * scale),
+        marginTop: Math.max(0, (focusedRange.yTopPt - focusedFairShare.yTopPt) * scale),
+        marginBottom: Math.max(
+          0,
+          (focusedFairShare.yTopPt + focusedFairShare.heightPt - (focusedRange.yTopPt + focusedRange.heightPt)) * scale,
+        ),
+      },
     };
-  }, [focusedBlock, source, documentDir, pageOffsetsPt, combinedSvg]);
+  }
 
   const anchorOffsetRef = useRef(0);
   const cursorOffsetRef = useRef(0);
@@ -241,6 +243,7 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
   }
 
   async function offsetAtClient(clientX: number, clientY: number): Promise<number | null> {
+    if (isPending) return null;
     const base = combinedSvgEl();
     if (!base) return null;
     const { xPt, yPt } = svgPointFromClient(base, clientX, clientY);
@@ -267,20 +270,29 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const nativeDragAnchorUtf16Ref = useRef<number | null>(null);
   const nativeDraggingRef = useRef(false);
+  const draggedOutsideRef = useRef(false);
+  const lastMouseClientRef = useRef<{ clientX: number; clientY: number } | null>(null);
   const handedOffRef = useRef(false);
 
-  function enterSplitMode(idx: number, widthSourceSvg: SVGSVGElement | null) {
+  async function enterSplitMode(idx: number, widthSourceSvg: SVGSVGElement | null) {
     const ranges = blockByteRanges(source);
-    draftRef.current = sliceByBytes(source, ranges[idx][0], ranges[idx][1]);
     lockedWidthPxRef.current = widthSourceSvg?.getBoundingClientRect().width ?? null;
+    const layout = await computeSplitLayout(source, idx);
+    draftRef.current = sliceByBytes(source, ranges[idx][0], ranges[idx][1]);
     handedOffRef.current = false;
-    setOtherBlocksYRanges(new Map());
-    setFocusedBlockLayoutPx(null);
+    setOtherBlocksYRanges(layout?.otherMap ?? new Map());
+    setFocusedBlockLayoutPx(layout?.focusedLayoutPx ?? null);
     setFocusedBlock(idx);
   }
 
   function handleCombinedMouseDown(event: React.MouseEvent<HTMLDivElement>) {
     event.preventDefault();
+    // Bail out entirely rather than let `offsetAtClient`'s own `isPending`
+    // guard silently no-op here: if this click is refused, `draggingRef`
+    // must stay false, or mouseup would reuse whatever anchor/cursor a
+    // *previous* interaction left behind (still wrong, just a different
+    // flavor of the same stale-vs-fresh mismatch).
+    if (isPending) return;
     draggingRef.current = true;
     setSelectionRects([]);
     mouseDownResolvedRef.current = offsetAtClient(event.clientX, event.clientY).then((offset) => {
@@ -323,44 +335,120 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
     const cursor = cursorOffsetRef.current;
     if (anchor === cursor) {
       const idx = blockAt(blockByteRanges(source), anchor);
-      if (idx != null) enterSplitMode(idx, combinedSvgEl());
+      if (idx != null) void enterSplitMode(idx, combinedSvgEl());
     }
   }
 
-  function handoffToCombined(idx: number) {
-    handedOffRef.current = true;
-    nativeDraggingRef.current = false;
-    const ranges = blockByteRanges(source);
-    const [blockStart, blockEnd] = ranges[idx];
-    const { source: newSource } = spliceSource(source, blockStart, blockEnd, draftRef.current);
-    const anchorByte = blockStart + utf16ToByteOffset(draftRef.current, nativeDragAnchorUtf16Ref.current ?? draftRef.current.length);
-    anchorOffsetRef.current = anchorByte;
-    cursorOffsetRef.current = anchorByte;
-    setSelectionRects([]);
-    setSource(newSource);
-    setFocusedBlock(null);
-    draggingRef.current = true;
+  // Resolves where a drag that continued out of the textarea and was
+  // released in combined-mode territory should land — but only once *every*
+  // sign that this specific commit has fully landed agrees: we're back in
+  // combined mode (`focusedBlock`), `source` itself is the exact string we
+  // committed (not still mid-batch), and no recompile is in flight
+  // (`isPending`). Declarative rather than tracking the isPending true→false
+  // transition by hand: `source` changing to the committed value and
+  // `isPending` becoming true are two *separate* state updates (the second
+  // is itself effect-driven off the first), so checking "isPending is
+  // currently false" immediately after the commit is unreliable — it can
+  // still read as false for a render or two before the recompile it's
+  // supposed to be guarding has even started. Re-checking all three
+  // conditions on every relevant change avoids needing to know *which*
+  // update was the one that finally satisfied them.
+  async function resolveHandoffDrop(pending: { anchorByte: number; clientX: number; clientY: number }) {
+    const base = combinedSvgEl();
+    if (!base) return;
+    const { xPt, yPt } = svgPointFromClient(base, pending.clientX, pending.clientY);
+    const offset = await invoke<number | null>("jump_from_click", { source, xPt, yPt, baseDir: documentDir }).catch(
+      () => null,
+    );
+    if (offset == null) return;
+    anchorOffsetRef.current = pending.anchorByte;
+    cursorOffsetRef.current = offset;
+    void updateSelectionRects(pending.anchorByte, offset);
   }
+
+  const pendingHandoffResolutionRef = useRef<{
+    anchorByte: number;
+    clientX: number;
+    clientY: number;
+    expectedSource: string;
+  } | null>(null);
+  useEffect(() => {
+    const pending = pendingHandoffResolutionRef.current;
+    if (!pending) return;
+    if (focusedBlock !== null) return;
+    if (source !== pending.expectedSource) return;
+    if (isPending) return;
+    pendingHandoffResolutionRef.current = null;
+    void resolveHandoffDrop(pending);
+  }, [focusedBlock, source, isPending]);
 
   function handleTextareaMouseDown(event: React.MouseEvent<HTMLTextAreaElement>) {
     nativeDragAnchorUtf16Ref.current = event.currentTarget.selectionStart;
     nativeDraggingRef.current = true;
+    draggedOutsideRef.current = false;
+    lastMouseClientRef.current = null;
     handedOffRef.current = false;
   }
 
+  // Deliberately does *not* live-update a cross-block selection while the
+  // mouse is still outside the textarea mid-drag (interaction-design.md §6:
+  // "which mode a drag/shift-select gesture is in is decided once, at the
+  // gesture's end, not switched back and forth mid-gesture" — an existing
+  // design decision this used to violate). Found live (2026-09-10,
+  // phase4-product-validation.md): live-updating requires converting the
+  // *same* screen position through two different coordinate systems in
+  // quick succession — the native textarea's own font/line-height, and
+  // Typst's real SVG layout for the identical text, which are never
+  // pixel-identical — so a drag that visually looked like it was still
+  // inside block B's text could numerically already be past the last real
+  // glyph, in blank page space, where `jump_from_click` legitimately (and
+  // permanently, for the rest of that gesture) returns no target. Resolving
+  // only once, at mouseup, against the mouse's one final position and one
+  // fresh render, sidesteps the whole class of mid-drag coordinate drift —
+  // there is no "intermediate" position to get wrong.
   useEffect(() => {
     if (focusedBlock === null) return;
     const thisBlock = focusedBlock;
     function onWindowMouseMove(event: MouseEvent) {
       if (!nativeDraggingRef.current || handedOffRef.current) return;
+      lastMouseClientRef.current = { clientX: event.clientX, clientY: event.clientY };
       const el = textareaRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
       const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
-      if (!inside) handoffToCombined(thisBlock);
+      if (!inside) draggedOutsideRef.current = true;
     }
     function onWindowMouseUp() {
+      const wasDragging = nativeDraggingRef.current;
       nativeDraggingRef.current = false;
+      if (!wasDragging || !draggedOutsideRef.current) return;
+      draggedOutsideRef.current = false;
+      const dropPoint = lastMouseClientRef.current;
+      lastMouseClientRef.current = null;
+      if (!dropPoint) return;
+
+      handedOffRef.current = true;
+      const ranges = blockByteRanges(source);
+      const [blockStart, blockEnd] = ranges[thisBlock];
+      const { source: newSource } = spliceSource(source, blockStart, blockEnd, draftRef.current);
+      const anchorByte =
+        blockStart + utf16ToByteOffset(draftRef.current, nativeDragAnchorUtf16Ref.current ?? draftRef.current.length);
+
+      setSelectionRects([]);
+      setSource(newSource);
+      setFocusedBlock(null);
+      // Always deferred to the effect above — even when `newSource` is
+      // identical to `source` (nothing typed, just a plain drag) this still
+      // needs at least one render for `focusedBlock` to actually reach the
+      // DOM as null (`stageRef` isn't attached to anything yet in this same
+      // synchronous handler); the effect's conditions are already trivially
+      // satisfied in that case, so it resolves on the very next render.
+      pendingHandoffResolutionRef.current = {
+        anchorByte,
+        clientX: dropPoint.clientX,
+        clientY: dropPoint.clientY,
+        expectedSource: newSource,
+      };
     }
     window.addEventListener("mousemove", onWindowMouseMove);
     window.addEventListener("mouseup", onWindowMouseUp);
@@ -408,7 +496,7 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
   // *before* the commit, shift that position by the focused block's own
   // length delta (only if the sibling came after it), then find whichever
   // fresh block now contains that (possibly shifted) position.
-  function switchFocusTo(oldIdx: number, event: React.MouseEvent<HTMLDivElement>) {
+  async function switchFocusTo(oldIdx: number, event: React.MouseEvent<HTMLDivElement>) {
     const oldRanges = blockByteRanges(source);
     let effectiveSource = source;
     let targetByte = oldRanges[oldIdx][0];
@@ -422,11 +510,14 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
     }
     const newRanges = blockByteRanges(effectiveSource);
     const newIdx = blockAt(newRanges, targetByte) ?? Math.min(oldIdx, newRanges.length - 1);
-    draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
+    // Read before the `await` below — React nulls out `currentTarget` on a
+    // synthetic event once its handler returns synchronously.
     lockedWidthPxRef.current = event.currentTarget.querySelector("svg")?.getBoundingClientRect().width ?? null;
+    const layout = await computeSplitLayout(effectiveSource, newIdx);
+    draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
     handedOffRef.current = false;
-    setOtherBlocksYRanges(new Map());
-    setFocusedBlockLayoutPx(null);
+    setOtherBlocksYRanges(layout?.otherMap ?? new Map());
+    setFocusedBlockLayoutPx(layout?.focusedLayoutPx ?? null);
     setSource(effectiveSource);
     setFocusedBlock(newIdx);
   }
@@ -468,7 +559,10 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
 
   function renderOtherBlock(idx: number) {
     const yRange = otherBlocksYRanges.get(idx);
-    const cropped = combinedSvg && yRange ? cropSvgVertically(combinedSvg, yRange.yTopPt, yRange.heightPt) : null;
+    // NOT cropped while `isPending` — `combinedSvg` is still the *previous*
+    // commit's pixels at that point, and `yRange` (fetched fresh against
+    // the current source) would cut the wrong band out of them.
+    const cropped = !isPending && combinedSvg && yRange ? cropSvgVertically(combinedSvg, yRange.yTopPt, yRange.heightPt) : null;
     return (
       <div
         key={idx}

@@ -203,6 +203,25 @@ const FocusRevealSpike2 = ({ documentDir }: Props) => {
     };
   }, [source, documentDir]);
 
+  // M23's own fix (TypstLiveView.tsx), ported here for the same reason:
+  // whether the currently-*displayed* `combinedSvg` actually reflects the
+  // current `source` yet. Confirmed live in Spike 3 (same architecture) as
+  // "clicking sometimes resolves to the wrong paragraph": a click's pixel
+  // coordinates come from whatever svg is *currently rendered*, but
+  // `jump_from_click` resolves them against the *current* `source` — right
+  // after a commit, for one round trip, those two can disagree. The same
+  // mismatch corrupts the cropped sibling too (stale pixels, fresh geometry
+  // coordinates cut the wrong band out of the old image). Fixed the same
+  // way M23 already did: refuse to resolve/crop until the two are back in
+  // sync, rather than trusting a mix of old-image and new-document data.
+  const [isPending, setIsPending] = useState(false);
+  useEffect(() => {
+    setIsPending(true);
+  }, [source]);
+  useEffect(() => {
+    setIsPending(false);
+  }, [combinedSvg]);
+
   // "Split" mode's view of whichever block ISN'T focused — a vertical crop
   // of the combined SVG (see `cropSvgVertically`'s own comment), not a
   // second compile. Needs *both* blocks' line-box geometry (not just the
@@ -287,8 +306,13 @@ const FocusRevealSpike2 = ({ documentDir }: Props) => {
     };
   }, [focusedBlock, source, documentDir, pageOffsetsPt, combinedSvg]);
 
+  // NOT cropped while `isPending` — `combinedSvg` is still the *previous*
+  // commit's pixels at that point, and `otherBlockYRange` (fetched fresh
+  // against the current source) would cut the wrong band out of them.
   const otherBlockCroppedSvg =
-    combinedSvg && otherBlockYRange ? cropSvgVertically(combinedSvg, otherBlockYRange.yTopPt, otherBlockYRange.heightPt) : null;
+    !isPending && combinedSvg && otherBlockYRange
+      ? cropSvgVertically(combinedSvg, otherBlockYRange.yTopPt, otherBlockYRange.heightPt)
+      : null;
 
   // Cross-block selection state (combined mode only) — refs, not state:
   // nothing renders these numbers directly, only the derived
@@ -310,6 +334,7 @@ const FocusRevealSpike2 = ({ documentDir }: Props) => {
   }
 
   async function offsetAtClient(clientX: number, clientY: number): Promise<number | null> {
+    if (isPending) return null;
     const base = combinedSvgEl();
     if (!base) return null;
     const { xPt, yPt } = svgPointFromClient(base, clientX, clientY);
@@ -366,6 +391,12 @@ const FocusRevealSpike2 = ({ documentDir }: Props) => {
 
   function handleCombinedMouseDown(event: React.MouseEvent<HTMLDivElement>) {
     event.preventDefault();
+    // Bail out entirely rather than let `offsetAtClient`'s own `isPending`
+    // guard silently no-op here: if this click is refused, `draggingRef`
+    // must stay false, or mouseup would reuse whatever anchor/cursor a
+    // *previous* interaction left behind (still wrong, just a different
+    // flavor of the same stale-vs-fresh mismatch).
+    if (isPending) return;
     draggingRef.current = true;
     setSelectionRects([]);
     mouseDownResolvedRef.current = offsetAtClient(event.clientX, event.clientY).then((offset) => {

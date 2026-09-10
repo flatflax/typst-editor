@@ -3,14 +3,15 @@
 A desktop [Typst](https://typst.app/) editor built with Tauri + React + TypeScript.
 
 This project targets writers who already know Typst syntax and want faster everyday
-input, not a syntax-free editor. The direction it's working toward is **zero render
-drift** — editing without a gap between what's on screen and what the real Typst
-compiler would actually produce. Today it's a work in progress: the WYSIWYG view is a
-regular rich-text editor (ProseMirror + CSS) kept in sync with a separate live preview
-pane rendered by the real compiler, alongside raw Typst/Markdown source views and an
-experimental "Live cursor" view (a real caret/selection drawn directly on the
-live-compiled document, no separate preview pane — see Features below) that's the
-current step toward closing that gap. The target end state, per the
+input, not a syntax-free editor. The direction it's working toward is **true WYSIWYG**
+— editing without a gap between what's on screen and what the real Typst compiler would
+actually produce (see [doc/interaction-design.md](doc/interaction-design.md) §4 for the
+term and its use by comparable LaTeX editors). Today it's a work in progress: the
+WYSIWYG view is a regular rich-text editor (ProseMirror + CSS) kept in sync with a
+separate live preview pane rendered by the real compiler, alongside raw Typst/Markdown
+source views and an experimental "Live cursor" view (a real caret/selection drawn
+directly on the live-compiled document, no separate preview pane — see Features below)
+that's the current step toward closing that gap. The target end state, per the
 **focus-reveals-source** design, collapses these into one surface where every block
 renders normally except the one currently focused, which shows its native editable
 source — see [plan.md](plan.md) and [doc/interaction-design.md](doc/interaction-design.md)

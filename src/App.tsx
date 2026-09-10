@@ -9,6 +9,7 @@ import TypstLiveView from "./editor/TypstLiveView";
 import FocusRevealSpike from "./editor/FocusRevealSpike";
 import FocusRevealSpike2 from "./editor/FocusRevealSpike2";
 import FocusRevealSpike3 from "./editor/FocusRevealSpike3";
+import FocusRevealSpike3Eager from "./editor/FocusRevealSpike3Eager";
 import { RECOMPILE_DEBOUNCE_MS as COMPILE_DEBOUNCE_MS } from "./editor/typstCursor";
 import { byteToUtf16Offset, utf16ToByteOffset } from "./util/offsets";
 import { svgPointFromClient, clientPointFromPt } from "./util/svgGeometry";
@@ -96,7 +97,8 @@ type ViewMode =
   | "typst-live"
   | "focus-reveal-spike"
   | "focus-reveal-spike-2"
-  | "focus-reveal-spike-3";
+  | "focus-reveal-spike-3"
+  | "focus-reveal-spike-3-eager";
 
 type CompileResult = {
   svg: string | null;
@@ -480,6 +482,7 @@ function App() {
               "focus-reveal-spike",
               "focus-reveal-spike-2",
               "focus-reveal-spike-3",
+              "focus-reveal-spike-3-eager",
             ] as const
           ).map((mode) => (
             <button
@@ -502,7 +505,9 @@ function App() {
                         ? "Focus reveal (Phase 4 Spike 1)"
                         : mode === "focus-reveal-spike-2"
                           ? "Focus reveal (Phase 4 Spike 2)"
-                          : "Focus reveal (Phase 4 Spike 3)"}
+                          : mode === "focus-reveal-spike-3"
+                            ? "Focus reveal (Phase 4 Spike 3, lazy)"
+                            : "Focus reveal (Phase 4 Spike 3, eager)"}
             </button>
           ))}
         </div>
@@ -552,14 +557,12 @@ function App() {
           <div hidden={viewMode !== "focus-reveal-spike-3"} className="view-panel">
             <FocusRevealSpike3 documentDir={documentDir} />
           </div>
+          <div hidden={viewMode !== "focus-reveal-spike-3-eager"} className="view-panel">
+            <FocusRevealSpike3Eager documentDir={documentDir} />
+          </div>
         </div>
 
-        <div
-          className="preview-pane"
-          hidden={
-            viewMode === "focus-reveal-spike" || viewMode === "focus-reveal-spike-2" || viewMode === "focus-reveal-spike-3"
-          }
-        >
+        <div className="preview-pane" hidden={viewMode.startsWith("focus-reveal-spike")}>
           {result?.diagnostics.map((d, i) => (
             <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
               {d.severity}
