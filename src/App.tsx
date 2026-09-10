@@ -6,6 +6,8 @@ import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./editor/SourceEditor";
 import WysiwygEditor, { type WysiwygEditorHandle } from "./editor/WysiwygEditor";
 import TypstLiveView from "./editor/TypstLiveView";
+import FocusRevealSpike from "./editor/FocusRevealSpike";
+import FocusRevealSpike2 from "./editor/FocusRevealSpike2";
 import { RECOMPILE_DEBOUNCE_MS as COMPILE_DEBOUNCE_MS } from "./editor/typstCursor";
 import { byteToUtf16Offset, utf16ToByteOffset } from "./util/offsets";
 import { svgPointFromClient, clientPointFromPt } from "./util/svgGeometry";
@@ -86,7 +88,7 @@ const INITIAL_AST: AstDocument = {
 const INITIAL_DOC = typstAstToDoc(INITIAL_AST);
 
 
-type ViewMode = "wysiwyg" | "typst" | "markdown" | "typst-live";
+type ViewMode = "wysiwyg" | "typst" | "markdown" | "typst-live" | "focus-reveal-spike" | "focus-reveal-spike-2";
 
 type CompileResult = {
   svg: string | null;
@@ -180,6 +182,16 @@ function App() {
 
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+
+  // Native window title mirrors the in-app `.file-title` label (`titleFor`
+  // was already written as a "title-bar label" — this is the actual title
+  // bar it was meant for) so the open document is identifiable from the OS
+  // taskbar/Alt-Tab, not just inside the window itself.
+  useEffect(() => {
+    getCurrentWindow()
+      .setTitle(titleFor(filePath, dirty))
+      .catch(() => {});
+  }, [filePath, dirty]);
 
   useEffect(() => {
     getRecentFiles()
@@ -447,13 +459,11 @@ function App() {
   return (
     <main className="app">
       <header className="app-header">
-        <h1>Typst Editor — M5</h1>
-        <p>WYSIWYG / Typst / Markdown, one Editor Model, one live preview.</p>
         <div className="file-bar">
           <span className="file-title">{titleFor(filePath, dirty)}</span>
         </div>
         <div className="view-switcher" role="tablist">
-          {(["wysiwyg", "typst", "markdown", "typst-live"] as const).map((mode) => (
+          {(["wysiwyg", "typst", "markdown", "typst-live", "focus-reveal-spike", "focus-reveal-spike-2"] as const).map((mode) => (
             <button
               key={mode}
               type="button"
@@ -468,7 +478,11 @@ function App() {
                   ? "Typst source"
                   : mode === "markdown"
                     ? "Markdown source"
-                    : "Live cursor (M20/M21)"}
+                    : mode === "typst-live"
+                      ? "Live cursor (M20/M21)"
+                      : mode === "focus-reveal-spike"
+                        ? "Focus reveal (Phase 4 Spike 1)"
+                        : "Focus reveal (Phase 4 Spike 2)"}
             </button>
           ))}
         </div>
@@ -509,9 +523,18 @@ function App() {
               onChange={setLiveTypstText}
             />
           </div>
+          <div hidden={viewMode !== "focus-reveal-spike"} className="view-panel">
+            <FocusRevealSpike documentDir={documentDir} />
+          </div>
+          <div hidden={viewMode !== "focus-reveal-spike-2"} className="view-panel">
+            <FocusRevealSpike2 documentDir={documentDir} />
+          </div>
         </div>
 
-        <div className="preview-pane">
+        <div
+          className="preview-pane"
+          hidden={viewMode === "focus-reveal-spike" || viewMode === "focus-reveal-spike-2"}
+        >
           {result?.diagnostics.map((d, i) => (
             <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
               {d.severity}

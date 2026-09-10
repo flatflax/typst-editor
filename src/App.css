@@ -26,15 +26,6 @@
   flex: 0 0 auto;
 }
 
-.app-header h1 {
-  margin: 0 0 0.25rem;
-}
-
-.app-header p {
-  margin: 0 0 0.75rem;
-  opacity: 0.75;
-}
-
 .file-bar {
   display: flex;
   align-items: center;
@@ -75,9 +66,28 @@
   min-height: 0;
 }
 
+/* Focus-reveal spike hides `.preview-pane` outright (its own rendered/source
+   swap replaces it, and showing the ordinary preview alongside would just
+   confuse the one thing this spike exists to test) — give the editor pane
+   the full row rather than leaving a dead empty column beside it. */
+.workspace:has(.preview-pane[hidden]) {
+  grid-template-columns: 1fr;
+}
+
 .editor-pane,
 .preview-pane {
   min-height: 0;
+  /* Grid items default to `min-width: auto`, which refuses to shrink below
+     their content's min-content width — normally harmless for wrapping
+     prose (min-content is just its longest word), but a `<textarea>` set to
+     `width: 100%` can still report a wide preferred size to the grid sizing
+     pass, pushing this whole column (and the page) wider than the viewport
+     rather than actually wrapping. Explicit `min-width: 0` overrides that
+     default so the column always shrinks to the track's real width instead
+     — this is the standard fix for a grid item that gets forced wide by one
+     child's content (see `.spike-source-textarea` for the matching fix on
+     the actual content that triggered it). */
+  min-width: 0;
   overflow: auto;
   border: 1px solid #ddd;
   border-radius: 8px;
@@ -479,10 +489,97 @@
   z-index: 10;
 }
 
+/* Phase 4 Spike 1 (doc/phase4-product-validation.md): the whole point being
+   tested is the swap between these two, so they intentionally look nothing
+   alike — rendered state has no visual chrome at all (it's meant to read as
+   "this is just the document"), focused state is unmistakably "source now"
+   (monospace, light-yellow ground) per interaction-design.md §6's TeXmacs
+   lesson: a focused block must never look like it could be mistaken for
+   rendered output. */
+.spike-focus-reveal {
+  padding: 1rem;
+  /* Its own scroll region (matching `.typst-live-view`'s own setup) rather
+     than relying on `.editor-pane`'s — needed so the two spikes' own
+     scroll-position-preservation effect (see FocusRevealSpike.tsx/
+     FocusRevealSpike2.tsx) has an element it actually owns to restore
+     `scrollTop` on; `.editor-pane`'s own scroll isn't reachable the same
+     way from inside these components. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.spike-rendered {
+  cursor: text;
+  border-radius: 4px;
+  padding: 0.25rem;
+  outline: none;
+}
+
+.spike-rendered:hover,
+.spike-rendered:focus {
+  background: rgba(57, 108, 216, 0.08);
+}
+
+.spike-rendered-svg svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.spike-rendered-svg.is-compiling {
+  opacity: 0.6;
+}
+
+.spike-placeholder {
+  opacity: 0.5;
+  font-style: italic;
+}
+
+.spike-source-textarea {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  /* Typst source is free-form prose with no guaranteed break opportunities
+     (a long `#label` or URL-like run has no spaces) — without this, one
+     unbroken run wider than the box asks the layout for extra width instead
+     of wrapping, which is what was actually forcing the box (and the grid
+     column containing it, see `.editor-pane`) wider than the page. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* `max-height` + `overflow-y: auto` is a hard cap, not the primary sizing
+     mechanism (that's the JS autosize in FocusRevealSpike.tsx) — it just
+     guarantees the box can never grow past a screenful no matter how much
+     text lands inside it, falling back to an internal scrollbar instead. */
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid #e0c34a;
+  border-radius: 4px;
+  padding: 0.25rem;
+  background: #fffbe6;
+  color: #0f0f0f;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;
     background-color: #2f2f2f;
+  }
+
+  .spike-rendered:hover,
+  .spike-rendered:focus {
+    background: rgba(96, 150, 255, 0.12);
+  }
+
+  .spike-source-textarea {
+    background: #3a341a;
+    color: #f6f6f6;
+    border-color: #8a7420;
   }
 
   .editor-pane,
