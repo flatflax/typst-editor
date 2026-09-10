@@ -21,14 +21,13 @@ browser text editing (free undo/redo, IME preview, copy/paste).
 Full rationale in [interaction-design.md](interaction-design.md) §10.
 
 1. ~~**Spike 1**~~ — done, positive; see Milestones below.
-2. **Spike 2** — implemented, mechanism verified by automated drag simulation; see
-   Milestones below. Feel-testing on real hardware (does the handoff actually read as
-   smooth, not just work) is still open — next thing to try.
+2. ~~**Spike 2**~~ — feel-tested and fixed live (width, staleness, page height, fair-share
+   margins on both axes); see Milestones below.
 3. **Fact-check (parallel, low-cost)** — confirm Typst's blank-line paragraph-split
    rule holds inside list items and table cells (check the `typst-syntax` parser
-   directly, not by analogy to Markdown/LaTeX).
-4. **Spike 3** (later) — compare commit-on-blur vs. eager-split-on-blank-line for how
-   a new block gets created while typing.
+   directly, not by analogy to Markdown/LaTeX). Still open.
+4. ~~**Spike 3**~~ — "lazy" (commit-on-blur) half implemented and verified; the "eager"
+   comparison is still open. See Milestones below.
 5. **User validation** (independent, parallel track) — interview real target users on
    whether "zero render drift" (editing always shows the real compiled result, not an
    approximation) is a pain point they actually feel; currently only supported by
@@ -243,3 +242,42 @@ sides: width and both margins came back in exactly the expected ratio to the pag
 **Noted, not yet fixed**: a brief visual flash during the mode transition itself (clicking
 to focus/switch blocks) — not yet investigated, recorded here so it isn't lost before the
 next pass at this spike.
+
+**Spike 3 — "lazy" block-count-change on commit (lazy half implemented and verified;
+"eager" comparison still open).** interaction-design.md §6 offers two options for how a
+new block gets created while typing — "lazy" (freely type anything, including blank
+lines, and only reparse into however many blocks that produces at blur) and "eager"
+(split off each completed paragraph the instant its blank line appears, keep typing the
+remainder, reuse M22's optimistic-pending visual for the just-split-off part). The doc's
+own priority order says try lazy first; this pass builds only that half.
+
+`FocusRevealSpike3.tsx` builds directly on Spike 2's architecture (combined/split
+rendering, crop-based unfocused siblings, fair-share margins on both axes) but
+generalizes the one thing Spike 2 hardcoded: exactly two blocks, split once at the first
+blank line. Here `blockByteRanges` splits on *every* blank-line boundary and is always
+recomputed fresh from `source` — never trusted as a remembered count — because that
+recompute, at commit time, is the entire mechanic under test.
+
+One consequence needed real handling, not just widening a type from `0 | 1` to `number`:
+clicking a sibling block directly (`switchFocusTo`) while the currently-focused block is
+about to expand into several can shift that sibling's *index* out from under it. Fixed by
+relocating the sibling by byte position instead of index: capture where it started before
+the commit, shift that position by the focused block's own length delta (only if the
+sibling came after it), then find whichever freshly-recomputed block now contains that
+position — not the block that used to be at slot N.
+
+Verified via Playwright against the live dev server (a mock backend, geometry model as
+in Spike 1/2's own verification): focused one paragraph, replaced its content with two
+halves separated by a blank line, blurred via Escape (confirming Escape's earlier fix —
+commit, not discard — matters here too), and confirmed clicking each half afterward
+resolves to exactly that half's own text, not the original combined block. Separately
+verified the index-shift case: edited a focused block to contain a blank line *without*
+blurring, then clicked directly on a sibling that was rendered at what was about to
+become a stale index — it correctly resolved to that sibling's real, unaffected content
+rather than the wrong (shifted) block.
+
+**Not yet done**: feel-testing on real hardware (does the reparse-at-commit read as
+natural, or does the sudden appearance of a new block feel jarring); the "eager"
+alternative, to actually compare against; and the fact-check on whether Typst's
+blank-line rule holds inside list items/table cells (§10's own open item, unaffected by
+which of lazy/eager wins — both would need it before covering that content).
