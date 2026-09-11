@@ -30,6 +30,7 @@ import { svgPointFromClient } from "../util/svgGeometry";
 import { byteToUtf16Offset, utf16ToByteOffset } from "../util/offsets";
 import { selectionRectsFromBoxes, spliceSource, type AbsoluteRect, type RawRangeBox } from "./typstCursor";
 import { blockAt, blockByteRanges } from "./blockSplit";
+import { computeSplitLayoutFromBoxes, cropSvgVertically, pageDimsFromSvg, parseViewBox, type FocusedLayoutPx } from "./splitLayout";
 
 const BLOCK_A_INITIAL =
   "This is the *first* paragraph. Focus it, then try typing a blank line in the middle of " +
@@ -50,53 +51,6 @@ type Props = {
 
 function sliceByBytes(source: string, startByte: number, endByte: number): string {
   return source.slice(byteToUtf16Offset(source, startByte), byteToUtf16Offset(source, endByte));
-}
-
-function parseViewBox(svg: string | null): string | null {
-  if (!svg) return null;
-  const match = svg.match(/<svg[^>]*\sviewBox="([^"]+)"/);
-  return match ? match[1] : null;
-}
-
-function unionYRange(rects: AbsoluteRect[]): { yTopPt: number; heightPt: number } | null {
-  if (rects.length === 0) return null;
-  const yTopPt = Math.min(...rects.map((r) => r.yTopPt));
-  const yBottomPt = Math.max(...rects.map((r) => r.yTopPt + r.heightPt));
-  return { yTopPt, heightPt: yBottomPt - yTopPt };
-}
-
-// Generalized from Spike 2's two-block special case: block `idx`'s "fair
-// share" of the page's vertical space extends up to the true page top (if
-// it's first) or the midpoint with its previous neighbor, and down to the
-// true page bottom (if it's last) or the midpoint with its next neighbor —
-// needs every block's own ink range (not just its neighbors') since the
-// array itself is what identifies who those neighbors are.
-function fairShareBoundsForIndex(
-  idx: number,
-  ownRanges: { yTopPt: number; heightPt: number }[],
-  pageHeightPt: number,
-): { yTopPt: number; heightPt: number } {
-  const prev = ownRanges[idx - 1];
-  const next = ownRanges[idx + 1];
-  const top = prev ? (prev.yTopPt + prev.heightPt + ownRanges[idx].yTopPt) / 2 : 0;
-  const bottom = next ? (ownRanges[idx].yTopPt + ownRanges[idx].heightPt + next.yTopPt) / 2 : pageHeightPt;
-  return { yTopPt: top, heightPt: bottom - top };
-}
-
-function pageDimsFromSvg(svg: string | null): { widthPt: number; heightPt: number } | null {
-  const viewBox = parseViewBox(svg);
-  if (!viewBox) return null;
-  const parts = viewBox.trim().split(/\s+/).map(Number);
-  return parts.length === 4 ? { widthPt: parts[2], heightPt: parts[3] } : null;
-}
-
-function cropSvgVertically(svg: string, yTopPt: number, heightPt: number): string | null {
-  const viewBoxMatch = svg.match(/viewBox="([^"]+)"/);
-  if (!viewBoxMatch) return null;
-  const [minX, , width] = viewBoxMatch[1].trim().split(/\s+/).map(Number);
-  let result = svg.replace(/viewBox="[^"]+"/, `viewBox="${minX} ${yTopPt} ${width} ${heightPt}"`);
-  result = result.replace(/(<svg[^>]*\sheight=")[^"]+(")/, `$1${heightPt}pt$2`);
-  return result;
 }
 
 const FocusRevealSpike3 = ({ documentDir }: Props) => {
@@ -166,13 +120,6 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
   const [otherBlocksYRanges, setOtherBlocksYRanges] = useState<Map<number, { yTopPt: number; heightPt: number }>>(
     new Map(),
   );
-  type FocusedLayoutPx = {
-    width: number;
-    marginTop: number;
-    marginBottom: number;
-    marginLeft: number;
-    marginRight: number;
-  };
   const [focusedBlockLayoutPx, setFocusedBlockLayoutPx] = useState<FocusedLayoutPx | null>(null);
 
   // Computes the split-mode layout (fair-share crops for siblings, textarea
@@ -183,7 +130,9 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
   // not back yet) showed no margins and "Compiling…" siblings, then a
   // second render corrected it once this round trip landed. Callers now
   // await this and set all three states together, so split mode's first
-  // frame is already correct.
+  // frame is already correct. The actual layout math (fair-share bounds,
+  // pt-to-px scale, margins) lives in `splitLayout.ts`, unit-tested there —
+  // this is just the `block_geometry` round trip feeding it.
   async function computeSplitLayout(
     effectiveSource: string,
     idx: number,
@@ -197,35 +146,7 @@ const FocusRevealSpike3 = ({ documentDir }: Props) => {
     } catch {
       return null;
     }
-    const ownRanges = results.map((boxes) => unionYRange(selectionRectsFromBoxes(pageOffsetsPt, boxes)));
-    if (ownRanges.some((r) => r == null) || idx >= ownRanges.length) return null;
-    const validRanges = ownRanges as { yTopPt: number; heightPt: number }[];
-
-    const otherMap = new Map<number, { yTopPt: number; heightPt: number }>();
-    for (let i = 0; i < validRanges.length; i++) {
-      if (i === idx) continue;
-      otherMap.set(i, fairShareBoundsForIndex(i, validRanges, pageDims.heightPt));
-    }
-
-    const focusedRange = validRanges[idx];
-    const focusedFairShare = fairShareBoundsForIndex(idx, validRanges, pageDims.heightPt);
-    const scale = (lockedWidthPxRef.current ?? pageDims.widthPt) / pageDims.widthPt;
-    const allBoxes = results.flat();
-    const contentLeftPt = allBoxes.length ? Math.min(...allBoxes.map((b) => b.x_pt)) : 0;
-    const contentRightPt = allBoxes.length ? Math.max(...allBoxes.map((b) => b.x_pt + b.width_pt)) : pageDims.widthPt;
-    return {
-      otherMap,
-      focusedLayoutPx: {
-        width: Math.max(0, (contentRightPt - contentLeftPt) * scale),
-        marginLeft: Math.max(0, contentLeftPt * scale),
-        marginRight: Math.max(0, (pageDims.widthPt - contentRightPt) * scale),
-        marginTop: Math.max(0, (focusedRange.yTopPt - focusedFairShare.yTopPt) * scale),
-        marginBottom: Math.max(
-          0,
-          (focusedFairShare.yTopPt + focusedFairShare.heightPt - (focusedRange.yTopPt + focusedRange.heightPt)) * scale,
-        ),
-      },
-    };
+    return computeSplitLayoutFromBoxes(results, pageOffsetsPt, idx, pageDims, lockedWidthPxRef.current);
   }
 
   const anchorOffsetRef = useRef(0);

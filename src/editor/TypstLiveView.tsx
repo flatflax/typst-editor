@@ -1,8 +1,22 @@
+// Focus-reveals-source (interaction-design.md §6, plan.md Phase 4): the
+// primary editing mechanism as of its real (non-spike) landing — validated
+// in the Phase 4 spikes (phase4-product-validation.md) and ported from
+// `FocusRevealSpike3.tsx` onto this component's already-working M20/M21/M22
+// machinery, rather than rebuilt from scratch, since that machinery already
+// correctly handles the "combined" state this narrows down to. A block
+// (`blockSplit.ts`) whose cursor/selection is fully collapsed inside it
+// becomes a real, native `<textarea>` (free undo/redo, IME, copy/paste) —
+// `focusedBlock` state, `enterFocus`/`commitFocusedDraft`/`switchFocusTo`,
+// split-mode rendering (`splitLayout.ts`) further down. `focusedBlock ===
+// null` is the *narrower* state everything below this comment originally
+// covered for the whole document — now only reached for a genuine
+// cross-block selection, or before the first click:
+//
 // M20/M21 (plan.md): static cursor/selection/hit-testing, plus (M21) a real
-// edit loop, directly on live Typst rendering. The first milestone of the
-// revised single-view mechanism (see doc/phase3-single-view.md's M15 entry)
-// with a directly visible result: the whole compiled document is always
-// shown, full multi-page, with a caret/selection drawn from the same
+// edit loop, directly on live Typst rendering — still exactly how a
+// cross-block selection is drawn and edited (self-drawn caret/selection
+// overlay, hidden-textarea-driven splice). The whole compiled document is
+// always shown, full multi-page, with a caret/selection drawn from the same
 // geometry data (`block_geometry`/`geometry_for_range`, M14A) that M18
 // already proved can host CJK IME composition.
 //
@@ -15,12 +29,15 @@
 //
 // M21 typing model: a hidden `<textarea>` captures keystrokes and IME
 // composition (matching M18's validated harness — `input`/`compositionend`
-// events, not `keydown`, so IME composition machinery works correctly). No
-// live composition overlay yet — a composing IME shows nothing on screen
-// until `compositionend` commits it, unlike M18's own harness. Deferred as
-// a known limitation, not solved here: it needs the same live-overlay
-// technique M18 validated, wired to the real compiled document instead of a
-// static sample.
+// events, not `keydown`, so IME composition machinery works correctly) —
+// now only reachable while editing/deleting an active cross-block
+// selection, since a collapsed cursor always focuses a block instead (see
+// `handleMouseUp`). No live composition overlay yet — a composing IME shows
+// nothing on screen until `compositionend` commits it, unlike M18's own
+// harness. Deferred as a known limitation, not solved here: it needs the
+// same live-overlay technique M18 validated, wired to the real compiled
+// document instead of a static sample. Moot for the common case now that a
+// focused block gets IME natively for free.
 //
 // M22: a "pending" badge fills the settle window between a keystroke and
 // the next real redraw — there is no second rendering engine to draw from
@@ -28,12 +45,22 @@
 // the document's own text flow, which would need reimplementing Typst's
 // line-wrapping. It's an obviously-distinct floating tooltip near the
 // caret showing the current paragraph's raw source text, not a fake
-// rendering of it — gone the instant the real compile lands.
+// rendering of it — gone the instant the real compile lands. Split mode's
+// per-block "Compiling…" placeholder (`renderOtherBlock`) is the
+// block-focused equivalent of this same idea, not a separate mechanism.
+//
+// Deliberately not covered by this pass (phase4-product-validation.md's own
+// scope note for this milestone): the M23 toolbar's integration with a
+// focused block's draft (toolbar is hidden while a block is focused, not
+// wired to it yet); Up/Down navigation across a block boundary; multi-page
+// documents specifically in split mode (untested risk, not just undone);
+// reference-chain navigation UI for `#set`/`#let`/labels.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Command } from "prosemirror-state";
 import type { EditorDiagnostic } from "./SourceEditor";
 import { clientPointFromPt, svgPointFromClient } from "../util/svgGeometry";
+import { byteToUtf16Offset, utf16ToByteOffset } from "../util/offsets";
 import {
   caretRectFromBoxes,
   clampXToLine,
@@ -65,6 +92,19 @@ import {
   toggleOrderedList,
   toggleStrong,
 } from "./wysiwygCommands";
+import { blockAt, blockByteRanges } from "./blockSplit";
+import {
+  cropSvgVertically,
+  fairShareBoundsFromInk,
+  focusedLayoutPxFromInk,
+  pageDimsFromSvg,
+  parseViewBox,
+  unionYRange,
+  widenContentBounds,
+  type BlockYRange,
+  type ContentBoundsPt,
+  type FocusedLayoutPx,
+} from "./splitLayout";
 
 // M23: the toolbar buttons ported from the WYSIWYG view's own toolbar
 // (wysiwygCommands.ts) — the slash menu comes in a later slice of this
@@ -127,13 +167,8 @@ type Props = {
 // `block_geometry`'s compile call is then a comemo cache hit (near-free,
 // M14), and navigation stays instant.
 
-function parseViewBox(svg: string | null): string | null {
-  if (!svg) return null;
-  // Cheaper than mounting into the DOM just to read one attribute back —
-  // `svg_merged`'s own output always has a plain `viewBox="..."` attribute
-  // on its root element (see typst-svg's `svg_header`).
-  const match = svg.match(/<svg[^>]*\sviewBox="([^"]+)"/);
-  return match ? match[1] : null;
+function sliceByBytes(source: string, startByte: number, endByte: number): string {
+  return source.slice(byteToUtf16Offset(source, startByte), byteToUtf16Offset(source, endByte));
 }
 
 const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, onChange }: Props) => {
@@ -208,11 +243,16 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // (e.g. holding an arrow key, which repeats faster than React re-renders
   // land) — Up/Down navigation reads this ref instead of the state directly
   // so each keypress starts from the *actual* current position, not
-  // whatever `cursorOffset` was as of this closure's last render.
+  // whatever `cursorOffset` was as of this closure's last render. Also
+  // updated *synchronously* inside `handleMouseDown`/`resolveNextDragPoint`'s
+  // own async resolution below (not just from this per-render sync line) —
+  // `handleMouseUp` needs to read the *just-resolved* value the instant the
+  // button is released, which a value that only updates on the next render
+  // can't guarantee.
   const cursorOffsetRef = useRef(cursorOffset);
   cursorOffsetRef.current = cursorOffset;
-
-  const viewBox = parseViewBox(svg);
+  const anchorOffsetRef = useRef(anchorOffset);
+  anchorOffsetRef.current = anchorOffset;
 
   // M22: whether the currently-typed `source` is reflected by the
   // currently-*displayed* `svg` yet. Two explicit effects, not one derived
@@ -229,6 +269,376 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   useEffect(() => {
     setIsPending(false);
   }, [svg]);
+
+  // Block model (interaction-design.md §6, validated in Phase 4's spikes —
+  // phase4-product-validation.md): when the cursor/selection falls entirely
+  // within one block, that block becomes a real, native `<textarea>`
+  // (free undo/redo, IME, copy/paste); every other block stays fully
+  // rendered. `focusedBlock === null` is the narrower "combined" state this
+  // now is — a genuine cross-block selection (the self-drawn overlay below
+  // still owns that), or nothing at all yet — not "free typing happens
+  // here" the way it used to; a plain click always resolves into some
+  // block's focus (see `handleMouseUp`), matching the design doc's own
+  // wording rather than requiring a second, separate action to "enter" a
+  // block.
+  const [focusedBlock, setFocusedBlock] = useState<number | null>(null);
+  const [otherBlocksYRanges, setOtherBlocksYRanges] = useState<Map<number, BlockYRange>>(new Map());
+  const [focusedBlockLayoutPx, setFocusedBlockLayoutPx] = useState<FocusedLayoutPx | null>(null);
+  const lockedWidthPxRef = useRef<number | null>(null);
+  const draftRef = useRef("");
+  const focusedTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const nativeDragAnchorUtf16Ref = useRef<number | null>(null);
+  const nativeDraggingRef = useRef(false);
+  const draggedOutsideRef = useRef(false);
+  const lastMouseClientRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  // True from the instant a focused block's blur/handoff has already
+  // committed its draft into `source` (`commitFocusedDraft`/the native-drag
+  // handoff below) until the next time a block is (re-)focused — guards
+  // against the native `blur` event a DOM-unmount fires (when React swaps
+  // the textarea back out for rendered content) re-triggering the same
+  // commit a second time.
+  const handedOffRef = useRef(false);
+
+  // Incremental replacement for the original "fetch every block's geometry
+  // in one `block_geometry` call" approach (still what the throwaway spike
+  // this was ported from does). `geometry_for_range` (src-tauri) walks the
+  // *entire* document's glyphs for *each* requested range regardless of how
+  // narrow that range is — one call covering every block in a real
+  // multi-page document costs O(block count × total glyphs), confirmed live
+  // (phase4-product-validation.md, 2026-09-11) to make every focus-entry/
+  // switch on a real multi-page document slow, with every other block stuck
+  // on its "Compiling…" placeholder for however long that took. Only the
+  // focused block + its immediate neighbors are fetched synchronously (a
+  // small, bounded request regardless of document size) before flipping
+  // into split mode — same reasoning as before for *why* this needs to
+  // happen before any state change (a reactive effect keyed on
+  // `focusedBlock` produced a visible stutter, entering split mode with no
+  // margins for one frame). Every other block is backfilled lazily, only
+  // once it actually scrolls into view — the `IntersectionObserver` wiring
+  // below `renderOtherBlock`.
+  //
+  // `blockInkRangesRef` caches each block's own *raw* ink range (not
+  // fair-share — every block's fair share only ever needs its own ink plus
+  // its two immediate neighbors', per `fairShareBoundsFromInk`, so there's
+  // no cascading whole-document dependency to worry about), valid only for
+  // `blockInkSourceRef.current` — reset whenever `source` no longer matches
+  // (any commit invalidates every block's position, since blocks after the
+  // edited one may have reflowed).
+  const blockInkRangesRef = useRef<Map<number, BlockYRange>>(new Map());
+  const blockInkSourceRef = useRef<string | null>(null);
+  const contentBoundsRef = useRef<ContentBoundsPt | null>(null);
+  const pendingBlockFetchRef = useRef<Set<number>>(new Set());
+
+  async function ensureBlockGeometry(
+    effectiveSource: string,
+    focusedIdx: number | null,
+    indices: number[],
+  ): Promise<FocusedLayoutPx | null> {
+    if (blockInkSourceRef.current !== effectiveSource) {
+      blockInkRangesRef.current = new Map();
+      contentBoundsRef.current = null;
+      pendingBlockFetchRef.current = new Set();
+      blockInkSourceRef.current = effectiveSource;
+      // Clears stale (pre-edit) crops rather than leaving them displayed —
+      // React batches this with the fresh subset this same call goes on to
+      // set below (each queued update to the same state is applied in
+      // order), so the blocks this call is actually responsible for don't
+      // flash empty first.
+      setOtherBlocksYRanges(new Map());
+    }
+
+    const totalBlocks = blockByteRanges(effectiveSource).length;
+    const validIndices = indices.filter((i) => i >= 0 && i < totalBlocks);
+    const toFetch = validIndices.filter(
+      (i) => !blockInkRangesRef.current.has(i) && !pendingBlockFetchRef.current.has(i),
+    );
+
+    if (toFetch.length > 0) {
+      for (const i of toFetch) pendingBlockFetchRef.current.add(i);
+      const allRanges = blockByteRanges(effectiveSource);
+      let results: RawRangeBox[][] | null = null;
+      try {
+        results = await invoke<RawRangeBox[][]>("block_geometry", {
+          source: effectiveSource,
+          baseDir: documentDir,
+          ranges: toFetch.map((i) => allRanges[i]),
+        });
+      } catch {
+        results = null;
+      }
+      for (const i of toFetch) pendingBlockFetchRef.current.delete(i);
+      // The cache was invalidated (a newer `source`) while this was in
+      // flight — these results are for a document that no longer exists,
+      // discard rather than merge them into the new cache.
+      if (blockInkSourceRef.current !== effectiveSource) return null;
+      if (results) {
+        toFetch.forEach((i, n) => {
+          const boxes = results![n];
+          const ink = unionYRange(selectionRectsFromBoxes(pageOffsetsPt, boxes));
+          if (ink) blockInkRangesRef.current.set(i, ink);
+          contentBoundsRef.current = widenContentBounds(contentBoundsRef.current, boxes);
+        });
+      }
+    }
+
+    const pageDims = pageDimsFromSvg(svg);
+    if (pageDims == null) return null;
+
+    const otherUpdates = new Map<number, BlockYRange>();
+    for (const i of validIndices) {
+      if (i === focusedIdx) continue;
+      const bounds = fairShareBoundsFromInk(i, blockInkRangesRef.current, totalBlocks, pageDims.heightPt);
+      if (bounds) otherUpdates.set(i, bounds);
+    }
+    if (otherUpdates.size > 0) {
+      setOtherBlocksYRanges((prev) => {
+        const next = new Map(prev);
+        for (const [i, r] of otherUpdates) next.set(i, r);
+        return next;
+      });
+    }
+
+    if (focusedIdx == null) return null;
+    const focusedFairShare = fairShareBoundsFromInk(focusedIdx, blockInkRangesRef.current, totalBlocks, pageDims.heightPt);
+    const focusedOwnInk = blockInkRangesRef.current.get(focusedIdx);
+    if (!focusedFairShare || !focusedOwnInk || !contentBoundsRef.current) return null;
+    return focusedLayoutPxFromInk(focusedFairShare, focusedOwnInk, contentBoundsRef.current, pageDims, lockedWidthPxRef.current);
+  }
+
+  // Lazily backfills every non-focused block's own ink range the instant it
+  // actually scrolls into view, instead of proactively fetching the whole
+  // document up front (see `ensureBlockGeometry`'s own comment). One
+  // long-lived observer for the component's lifetime; each
+  // `renderOtherBlock` div registers/unregisters itself via its `ref`
+  // callback as it mounts/unmounts (naturally happens whenever the block
+  // count changes after a commit).
+  const blockObserverRef = useRef<IntersectionObserver | null>(null);
+  const observedBlockElementsRef = useRef<Map<number, Element>>(new Map());
+  const elementToBlockIndexRef = useRef<WeakMap<Element, number>>(new WeakMap());
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
+  const focusedBlockRef = useRef(focusedBlock);
+  focusedBlockRef.current = focusedBlock;
+
+  function ensureBlockObserver(): IntersectionObserver {
+    if (!blockObserverRef.current) {
+      blockObserverRef.current = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const idx = elementToBlockIndexRef.current.get(entry.target);
+            if (idx == null) continue;
+            if (blockInkSourceRef.current === sourceRef.current && blockInkRangesRef.current.has(idx)) continue;
+            void ensureBlockGeometry(sourceRef.current, focusedBlockRef.current, [idx - 1, idx, idx + 1]);
+          }
+        },
+        { root: scrollContainerRef.current, rootMargin: "200px" },
+      );
+    }
+    return blockObserverRef.current;
+  }
+
+  function registerBlockElement(idx: number, el: HTMLDivElement | null) {
+    const observer = ensureBlockObserver();
+    const prevEl = observedBlockElementsRef.current.get(idx);
+    if (prevEl && prevEl !== el) {
+      observer.unobserve(prevEl);
+      observedBlockElementsRef.current.delete(idx);
+    }
+    if (el) {
+      elementToBlockIndexRef.current.set(el, idx);
+      observedBlockElementsRef.current.set(idx, el);
+      observer.observe(el);
+    }
+  }
+
+  // Enters focus for block `idx` — the one place a block *starts* being
+  // shown as a native textarea (a plain click, or landing back on a single
+  // block after a cross-block drag collapses to one — see `handleMouseUp`).
+  async function enterFocus(idx: number, widthSourceSvg: SVGSVGElement | null) {
+    const ranges = blockByteRanges(source);
+    lockedWidthPxRef.current = widthSourceSvg?.getBoundingClientRect().width ?? null;
+    const focusedLayoutPx = await ensureBlockGeometry(source, idx, [idx - 1, idx, idx + 1]);
+    draftRef.current = sliceByBytes(source, ranges[idx][0], ranges[idx][1]);
+    handedOffRef.current = false;
+    setFocusedBlockLayoutPx(focusedLayoutPx);
+    setSelectionRects([]);
+    setFocusedBlock(idx);
+  }
+
+  // Native blur — the focused block's draft (which may now contain its own
+  // blank line(s)) is reparsed only at this point ("lazy" split, the
+  // winning half of Spike 3's lazy-vs-eager comparison —
+  // phase4-product-validation.md). `blockByteRanges` on the freshly
+  // committed source naturally reports however many blocks that produces.
+  function commitFocusedDraft() {
+    if (handedOffRef.current || focusedBlock === null) return;
+    const ranges = blockByteRanges(source);
+    const [start, end] = ranges[focusedBlock];
+    const result = spliceSource(source, start, end, draftRef.current);
+    onChange(result.source);
+    setFocusedBlock(null);
+  }
+
+  // Clicking a sibling block directly while another is focused. Committing
+  // the currently-focused block first can change *how many* blocks exist
+  // before this one — relocates the target by byte position (captured
+  // before the commit, shifted by the focused block's own length delta)
+  // rather than trusting its old array index, which the commit can shift
+  // out from under it.
+  async function switchFocusTo(oldIdx: number, event: React.MouseEvent<HTMLDivElement>) {
+    const oldRanges = blockByteRanges(source);
+    let effectiveSource = source;
+    let targetByte = oldRanges[oldIdx][0];
+    if (focusedBlock !== null) {
+      const [s, e] = oldRanges[focusedBlock];
+      const oldLenBytes = e - s;
+      const spliced = spliceSource(source, s, e, draftRef.current);
+      effectiveSource = spliced.source;
+      const newLenBytes = utf16ToByteOffset(draftRef.current, draftRef.current.length);
+      if (targetByte > s) targetByte += newLenBytes - oldLenBytes;
+    }
+    const newRanges = blockByteRanges(effectiveSource);
+    const newIdx = blockAt(newRanges, targetByte) ?? Math.min(oldIdx, newRanges.length - 1);
+    // Read before the `await` below — React nulls out `currentTarget` on a
+    // synthetic event once its handler returns synchronously.
+    lockedWidthPxRef.current = event.currentTarget.querySelector("svg")?.getBoundingClientRect().width ?? null;
+    const focusedLayoutPx = await ensureBlockGeometry(effectiveSource, newIdx, [newIdx - 1, newIdx, newIdx + 1]);
+    draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
+    handedOffRef.current = false;
+    setFocusedBlockLayoutPx(focusedLayoutPx);
+    if (effectiveSource !== source) onChange(effectiveSource);
+    setFocusedBlock(newIdx);
+  }
+
+  function autosizeTextarea(el: HTMLTextAreaElement) {
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }
+
+  useLayoutEffect(() => {
+    if (focusedBlock === null) return;
+    const el = focusedTextareaRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+    autosizeTextarea(el);
+  }, [focusedBlock]);
+
+  // Resolves where a drag that continued out of a focused block's textarea
+  // and was released in combined-mode territory should land — once every
+  // sign that the resulting commit has actually landed agrees. Reuses the
+  // *existing* selection state/geometry-fetch effect above (setting
+  // `anchorOffset`/`cursorOffset` here is enough to make it draw the
+  // resulting cross-block selection) rather than a second, parallel one —
+  // unlike the throwaway spike this was ported from, which had no such
+  // effect of its own to reuse.
+  async function resolveHandoffDrop(pending: { anchorByte: number; clientX: number; clientY: number }) {
+    const base = baseSvgEl();
+    if (!base) return;
+    const { xPt, yPt } = svgPointFromClient(base, pending.clientX, pending.clientY);
+    const offset = await invoke<number | null>("jump_from_click", { source, xPt, yPt, baseDir: documentDir }).catch(
+      () => null,
+    );
+    if (offset == null) return;
+    anchorOffsetRef.current = pending.anchorByte;
+    cursorOffsetRef.current = offset;
+    setAnchorOffset(pending.anchorByte);
+    setCursorOffset(offset);
+  }
+
+  const pendingHandoffResolutionRef = useRef<{
+    anchorByte: number;
+    clientX: number;
+    clientY: number;
+    expectedSource: string;
+  } | null>(null);
+  useEffect(() => {
+    const pending = pendingHandoffResolutionRef.current;
+    if (!pending) return;
+    if (focusedBlock !== null) return;
+    if (source !== pending.expectedSource) return;
+    if (isPending) return;
+    pendingHandoffResolutionRef.current = null;
+    void resolveHandoffDrop(pending);
+  }, [focusedBlock, source, isPending]);
+
+  function handleTextareaMouseDown(event: React.MouseEvent<HTMLTextAreaElement>) {
+    nativeDragAnchorUtf16Ref.current = event.currentTarget.selectionStart;
+    nativeDraggingRef.current = true;
+    draggedOutsideRef.current = false;
+    lastMouseClientRef.current = null;
+    handedOffRef.current = false;
+  }
+
+  // Deliberately does *not* live-update a cross-block selection while the
+  // mouse is still outside the textarea mid-drag (interaction-design.md §6:
+  // mode is decided once, at the gesture's end, not switched back and forth
+  // mid-gesture). Found live (phase4-product-validation.md, 2026-09-10):
+  // live-updating requires converting the *same* screen position through
+  // two different coordinate systems in quick succession — the native
+  // textarea's own font/line-height, and Typst's real SVG layout for the
+  // identical text, which are never pixel-identical — so a drag that
+  // visually looked like it was still inside the next block's text could
+  // numerically already be past the last real glyph, in blank page space,
+  // where `jump_from_click` legitimately (and permanently, for the rest of
+  // that gesture) finds no target. Resolving only once, at mouseup, against
+  // the mouse's one final position and one fresh render, sidesteps the
+  // whole class of mid-drag coordinate drift.
+  useEffect(() => {
+    if (focusedBlock === null) return;
+    const thisBlock = focusedBlock;
+    function onWindowMouseMove(event: MouseEvent) {
+      if (!nativeDraggingRef.current || handedOffRef.current) return;
+      lastMouseClientRef.current = { clientX: event.clientX, clientY: event.clientY };
+      const el = focusedTextareaRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const inside =
+        event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+      if (!inside) draggedOutsideRef.current = true;
+    }
+    function onWindowMouseUp() {
+      const wasDragging = nativeDraggingRef.current;
+      nativeDraggingRef.current = false;
+      if (!wasDragging || !draggedOutsideRef.current) return;
+      draggedOutsideRef.current = false;
+      const dropPoint = lastMouseClientRef.current;
+      lastMouseClientRef.current = null;
+      if (!dropPoint) return;
+
+      handedOffRef.current = true;
+      const ranges = blockByteRanges(source);
+      const [blockStart, blockEnd] = ranges[thisBlock];
+      const result = spliceSource(source, blockStart, blockEnd, draftRef.current);
+      const anchorByte =
+        blockStart + utf16ToByteOffset(draftRef.current, nativeDragAnchorUtf16Ref.current ?? draftRef.current.length);
+
+      setFocusedBlock(null);
+      onChange(result.source);
+      // Always deferred to the effect above — even when the committed
+      // source is unchanged (nothing typed, just a plain drag) this still
+      // needs at least one render for `focusedBlock` to actually reach the
+      // DOM as null; that effect's other two conditions are already
+      // trivially satisfied in that case, so it resolves on the very next
+      // render.
+      pendingHandoffResolutionRef.current = {
+        anchorByte,
+        clientX: dropPoint.clientX,
+        clientY: dropPoint.clientY,
+        expectedSource: result.source,
+      };
+    }
+    window.addEventListener("mousemove", onWindowMouseMove);
+    window.addEventListener("mouseup", onWindowMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onWindowMouseMove);
+      window.removeEventListener("mouseup", onWindowMouseUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedBlock, source]);
+
+  const viewBox = parseViewBox(svg);
 
   // The caret geometry (before/after a given offset) — shared by the
   // reactive display effect below and by vertical navigation
@@ -418,6 +828,8 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     mouseDownResolvedRef.current = offsetAtClient(event.clientX, event.clientY).then((offset) => {
       if (offset == null) return;
       preferredXPtRef.current = null;
+      anchorOffsetRef.current = offset;
+      cursorOffsetRef.current = offset;
       setAnchorOffset(offset);
       setCursorOffset(offset);
     });
@@ -435,7 +847,10 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     mouseDownResolvedRef.current
       .then(() => offsetAtClient(point.clientX, point.clientY))
       .then((offset) => {
-        if (offset != null) setCursorOffset(offset);
+        if (offset != null) {
+          cursorOffsetRef.current = offset;
+          setCursorOffset(offset);
+        }
         resolveNextDragPoint();
       });
   }
@@ -448,8 +863,21 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     resolveNextDragPoint();
   }
 
+  // A plain click (no movement — anchor and cursor resolved to the same
+  // offset) always lands inside exactly one block; per the design doc's own
+  // wording (§6) that's enough to focus it, not just position a collapsed
+  // caret there. A real drag whose two ends land in *different* blocks
+  // stays exactly as before — a cross-block selection on the self-drawn
+  // overlay, `focusedBlock` untouched.
   function handleMouseUp() {
+    if (!draggingRef.current) return;
     draggingRef.current = false;
+    const anchor = anchorOffsetRef.current;
+    const cursor = cursorOffsetRef.current;
+    if (anchor === cursor) {
+      const idx = blockAt(blockByteRanges(source), anchor);
+      if (idx != null) void enterFocus(idx, baseSvgEl());
+    }
   }
 
   function moveTo(offset: number, extendSelection: boolean) {
@@ -672,13 +1100,70 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     return { clientX, clientY, text: currentParagraphText(source, cursorOffset) };
   })();
 
+  function renderFocusedTextarea(key: number) {
+    return (
+      <textarea
+        key={key}
+        ref={focusedTextareaRef}
+        className="typst-live-block-textarea"
+        style={
+          focusedBlockLayoutPx
+            ? {
+                width: focusedBlockLayoutPx.width,
+                marginTop: focusedBlockLayoutPx.marginTop,
+                marginBottom: focusedBlockLayoutPx.marginBottom,
+                marginLeft: focusedBlockLayoutPx.marginLeft,
+                marginRight: focusedBlockLayoutPx.marginRight,
+              }
+            : lockedWidthPxRef.current != null
+              ? { width: lockedWidthPxRef.current }
+              : undefined
+        }
+        defaultValue={draftRef.current}
+        onMouseDown={handleTextareaMouseDown}
+        onChange={(event) => {
+          draftRef.current = event.currentTarget.value;
+          autosizeTextarea(event.currentTarget);
+        }}
+        onBlur={commitFocusedDraft}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") event.currentTarget.blur();
+        }}
+      />
+    );
+  }
+
+  function renderOtherBlock(idx: number) {
+    const yRange = otherBlocksYRanges.get(idx);
+    // NOT cropped while `isPending` — `svg` is still the *previous* commit's
+    // pixels at that point, and `yRange` (fetched fresh against the current
+    // source) would cut the wrong band out of them.
+    const cropped = !isPending && svg && yRange ? cropSvgVertically(svg, yRange.yTopPt, yRange.heightPt) : null;
+    return (
+      <div
+        key={idx}
+        ref={(el) => registerBlockElement(idx, el)}
+        className="typst-live-block-rendered"
+        tabIndex={0}
+        onClick={(event) => void switchFocusTo(idx, event)}
+        aria-label="Focus to edit source"
+      >
+        {cropped ? (
+          <div className="typst-live-block-rendered-svg" dangerouslySetInnerHTML={{ __html: cropped }} />
+        ) : (
+          <p className="typst-live-block-placeholder">Compiling…</p>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="typst-live-view" ref={scrollContainerRef} onScroll={handleContainerScroll}>
       <p className="scope-note">
-        Experimental (M20/M21): a real caret/selection and typing directly on the live Typst render — click to
-        position, drag to select, arrow keys (with Shift to extend) to navigate, type to edit. IME composition
-        commits correctly but shows no live preview yet (that's a follow-up — see M18). The document redraws on a
-        short debounce after each edit, not instantly per keystroke.
+        Focus-reveals-source (interaction-design.md §6): click a paragraph to edit its real source in a native
+        textarea (free undo/redo, IME, copy/paste); every other paragraph stays fully rendered. Drag across a
+        paragraph boundary for a cross-block selection instead. Structural editing (toolbar) and Up/Down navigation
+        across a block boundary are still being integrated with this — see phase4-product-validation.md.
       </p>
       {diagnostics.map((d, i) => (
         <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
@@ -686,59 +1171,71 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
           {d.line != null ? ` at ${d.line}:${d.column}` : ""}: {d.message}
         </p>
       ))}
-      <div className="typst-live-toolbar">
-        {TOOLBAR_ITEMS.map((item) => (
-          <button
-            key={item.label}
-            type="button"
-            // Clicking a button naturally steals DOM focus from the hidden
-            // textarea; without this, the *next* keystroke after using the
-            // toolbar would land nowhere (same class of bug as M21's
-            // mousedown-focus fix on the stage itself).
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => void runToolbarCommand(item.steps)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-      <div
-        ref={stageRef}
-        className="typst-live-stage"
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-      >
-        <textarea
-          ref={hiddenInputRef}
-          className="typst-live-hidden-input"
-          autoComplete="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          onKeyDown={handleKeyDown}
-          onInput={handleHiddenInputChange}
-          onCompositionStart={handleCompositionStart}
-          onCompositionEnd={handleCompositionEnd}
-        />
-        <div className="typst-live-svg" dangerouslySetInnerHTML={{ __html: svg ?? "" }} />
-        {viewBox && (
-          <svg className="typst-live-overlay" viewBox={viewBox}>
-            {selectionRects.map((r, i) => (
-              <rect key={i} x={r.xPt} y={r.yTopPt} width={r.widthPt} height={r.heightPt} className="selection-rect" />
-            ))}
-            {caretRect && (
-              <rect
-                x={caretRect.xPt - 0.4}
-                y={caretRect.yTopPt}
-                width={0.8}
-                height={caretRect.visualHeightPt}
-                className="caret-bar"
-              />
-            )}
-          </svg>
-        )}
-      </div>
+      {focusedBlock === null && (
+        // M23 toolbar operates on cursorOffset/anchorOffset across the whole
+        // document — not yet integrated with a focused block's own
+        // uncommitted draft (deferred, phase4-product-validation.md's plan
+        // for this milestone), so it's only available in the narrower
+        // "combined" state below (empty or cross-block selection), not while
+        // a block is focused.
+        <div className="typst-live-toolbar">
+          {TOOLBAR_ITEMS.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              // Clicking a button naturally steals DOM focus from the hidden
+              // textarea; without this, the *next* keystroke after using the
+              // toolbar would land nowhere (same class of bug as M21's
+              // mousedown-focus fix on the stage itself).
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => void runToolbarCommand(item.steps)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {focusedBlock === null ? (
+        <div
+          ref={stageRef}
+          className="typst-live-stage"
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+        >
+          <textarea
+            ref={hiddenInputRef}
+            className="typst-live-hidden-input"
+            autoComplete="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            onKeyDown={handleKeyDown}
+            onInput={handleHiddenInputChange}
+            onCompositionStart={handleCompositionStart}
+            onCompositionEnd={handleCompositionEnd}
+          />
+          <div className="typst-live-svg" dangerouslySetInnerHTML={{ __html: svg ?? "" }} />
+          {viewBox && (
+            <svg className="typst-live-overlay" viewBox={viewBox}>
+              {selectionRects.map((r, i) => (
+                <rect key={i} x={r.xPt} y={r.yTopPt} width={r.widthPt} height={r.heightPt} className="selection-rect" />
+              ))}
+              {caretRect && (
+                <rect
+                  x={caretRect.xPt - 0.4}
+                  y={caretRect.yTopPt}
+                  width={0.8}
+                  height={caretRect.visualHeightPt}
+                  className="caret-bar"
+                />
+              )}
+            </svg>
+          )}
+        </div>
+      ) : (
+        blockByteRanges(source).map((_, i) => (i === focusedBlock ? renderFocusedTextarea(i) : renderOtherBlock(i)))
+      )}
       {pendingBadge && (
         <div
           className="typst-live-pending-badge"

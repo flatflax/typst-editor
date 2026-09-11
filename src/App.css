@@ -489,6 +489,91 @@
   z-index: 10;
 }
 
+/* Focus-reveals-source (interaction-design.md §6), the real implementation —
+   validated in Phase 4's spikes (phase4-product-validation.md), same rules as
+   `.spike-*` below: rendered and focused states intentionally look nothing
+   alike — rendered has no visual chrome (reads as "this is just the
+   document"), focused is unmistakably "source now" (monospace, light-yellow
+   ground) per interaction-design.md §6's TeXmacs lesson — a focused block
+   must never look like it could be mistaken for rendered output. */
+.typst-live-block-rendered {
+  cursor: text;
+  border-radius: 4px;
+  padding: 0.25rem;
+  outline: none;
+  /* `.typst-live-view` is a `flex-direction: column` container (unlike the
+     spikes' own plain-block wrapper) — a flex item's default `flex-shrink: 1`
+     lets it be squeezed *below* its own content size (even below an
+     explicitly-set height, since that only sets the flex-basis, not a
+     floor) whenever the column's total children don't fit the container's
+     fixed `height: 100%`. Without this, a focused block's textarea/its
+     siblings could render squashed to a sliver — not even one line tall —
+     regardless of what the JS autosize computed. */
+  flex-shrink: 0;
+}
+
+.typst-live-block-rendered:hover,
+.typst-live-block-rendered:focus {
+  background: rgba(57, 108, 216, 0.08);
+}
+
+.typst-live-block-rendered-svg svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.typst-live-block-placeholder {
+  opacity: 0.5;
+  font-style: italic;
+}
+
+.typst-live-block-textarea {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  /* See `.typst-live-block-rendered`'s own comment — same flex-column
+     shrinking problem, and this is the element it was actually reported
+     against (rendered squashed to less than one line tall). */
+  flex-shrink: 0;
+  /* Typst source is free-form prose with no guaranteed break opportunities
+     (a long `#label` or URL-like run has no spaces) — without this, one
+     unbroken run wider than the box asks the layout for extra width instead
+     of wrapping, which is what would otherwise force the box wider than the
+     page. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* `max-height` + `overflow-y: auto` is a hard cap, not the primary sizing
+     mechanism (that's the JS autosize) — it just guarantees the box can
+     never grow past a screenful no matter how much text lands inside it,
+     falling back to an internal scrollbar instead. */
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid #e0c34a;
+  border-radius: 4px;
+  padding: 0.25rem;
+  background: #fffbe6;
+  color: #0f0f0f;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+@media (prefers-color-scheme: dark) {
+  .typst-live-block-rendered:hover,
+  .typst-live-block-rendered:focus {
+    background: rgba(96, 150, 255, 0.12);
+  }
+
+  .typst-live-block-textarea {
+    background: #3a341a;
+    color: #f6f6f6;
+    border-color: #8a7420;
+  }
+}
+
 /* Phase 4 Spike 1 (doc/phase4-product-validation.md): the whole point being
    tested is the swap between these two, so they intentionally look nothing
    alike — rendered state has no visual chrome at all (it's meant to read as

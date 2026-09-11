@@ -36,6 +36,25 @@ Full rationale in [interaction-design.md](interaction-design.md) §10.
    interaction-design.md §4/footnote; this doc used to call it "zero render drift," a
    made-up term now retired) is a pain point they actually feel; currently only
    supported by indirect evidence.
+6. ~~**Land the core mechanism as a real implementation**~~ — done (2026-09-11), scoped
+   narrowly per direct confirmation: `TypstLiveView.tsx` (not a new/parallel component —
+   see its own "Landed as a real implementation" entry below for why) now has a block
+   model, and a block whose cursor/selection collapses fully inside it becomes a real
+   `<textarea>`. **Deliberately deferred, not silently dropped**: the M23 toolbar's
+   integration with a focused block (toolbar is hidden while a block is focused); Up/Down
+   navigation across a block boundary; reference-chain navigation UI for `#set`/`#let`/
+   labels (interaction-design.md §10 item 14 — the interaction is designed, nothing is
+   implemented). Real-machine testing (below) found and fixed two real problems (a
+   flex-shrink layout bug; slow, whole-document-scanning focus-entry/switch on a real
+   multi-page document) — everything else it covered passed.
+7. **Next task (promoted from "someday" given real-machine testing on a multi-page
+   document, 2026-09-11)**: the backend algorithmic fix for `geometry_for_range`
+   (`src-tauri/src/geometry.rs`) — invert its loop to walk each page's frame tree once and
+   bucket glyphs into whichever target range they fall in, instead of walking the whole
+   tree once per requested range. The most valuable fix specifically for editing
+   repeatedly across many locations in a large document (per-`source` caching can't help
+   there since every edit invalidates it) — see the lazy-fetch milestone below for the
+   full tradeoff analysis against the frontend-only mitigation actually shipped this pass.
 
 ## Milestones
 
@@ -440,3 +459,160 @@ mock's simplistic layout model never actually reproduced the real font-metric mi
 was the true cause) — dragging across a block boundary now shows no live update while the
 mouse is outside the textarea (expected), and the cross-block selection appears quickly and
 accurately the instant the mouse is released. See interaction-design.md §10 item 16.
+
+**Landed as a real implementation (2026-09-11), not a spike — the mechanism itself, scoped
+narrowly.** Confirmed with the user beforehand: land the core mechanism now, defer M23
+toolbar integration, multi-page documents, Up/Down cross-block navigation, and
+reference-chain navigation UI to follow-up work rather than bundling everything into one
+pass.
+
+**Where this landed, and why not a new/parallel component**: the plan going in left "extend
+`TypstLiveView.tsx` in place, or build a new component reusing its combined-mode logic" as an
+implementation-time call. Reading all 754 lines of it settled it: its *existing* M20
+mechanism (self-drawn cursor/selection, click/drag hit-testing, IME via a hidden textarea,
+diagnostics) is already exactly "the whole document is one big block with nothing else
+focused" — building a second, parallel version of that same logic in a new file to serve as
+the "nothing focused" state would have been pure duplication of code that already works,
+not a meaningfully safer path. So `TypstLiveView.tsx` was extended in place: `focusedBlock`
+state (`blockSplit.ts`) narrows what its *existing* mechanism is responsible for down to a
+genuine cross-block selection (or nothing yet) — a plain collapsed click, which used to just
+position a self-drawn caret, now resolves into focusing whichever block it landed in
+instead (confirmed with the user: any click that resolves to a single position should focus
+a block immediately, matching interaction-design.md §6's own wording, not require a second
+action). Split-mode itself (native textarea for the focused block, fair-share-cropped
+siblings, lazy commit-on-blur, the corrected mouseup-only cross-block drag) is ported
+directly from `FocusRevealSpike3.tsx`.
+
+**One deviation from the plan worth being explicit about**: the plan's own verification
+section called for landing this as a *new* tab first, so it could be compared side by side
+against the existing behavior before anything was replaced — precisely because extending
+`TypstLiveView.tsx` in place, as this did, means there is no longer a separate "old flat
+editor" tab in the running app to compare against directly. That tradeoff was made
+deliberately (see the reuse rationale above), but it does mean the promised side-by-side
+comparison isn't available the way the plan described it — real-machine testing (below) is
+this landing's *only* verification against real usage, not a second opinion against a
+known-good baseline still running alongside it.
+
+**New shared, unit-tested module**: `src/editor/splitLayout.ts` (+ 15 tests in
+`splitLayout.test.ts`) — the fair-share/crop/scale math extracted out of
+`FocusRevealSpike3.tsx`, mirroring how `blockSplit.ts` was already extracted from the same
+spike. `FocusRevealSpike3.tsx` itself was updated to import from this module too (removing
+its own now-duplicate inline copy) rather than leaving two copies of the same logic to drift
+apart — the same motivation as extracting it in the first place.
+
+**M23 toolbar**: hidden (not shown, not merely disabled) while any block is focused, since
+its commands operate on `cursorOffset`/`anchorOffset` across the whole document and aren't
+yet integrated with a focused block's own uncommitted draft — confirmed with the user as the
+simplest safe choice for this pass rather than risking a command applying against a stale or
+wrong range.
+
+**Verified so far**: `npx tsc --noEmit` and the full `npx vitest run` suite (269 tests, all
+passing) after every meaningful step. Two Playwright-against-mock smoke tests against the
+real `TypstLiveView` (not the spike) on the live dev server, reusing the same mock-backend
+pattern as every spike test this session: (1) clicking a paragraph enters focus with the
+toolbar hidden, typing content containing a blank line and blurring correctly splits it into
+two independently-addressable blocks, and the toolbar reappears back in combined mode; (2) a
+drag started inside a focused block's textarea and released past its boundary, with an
+artificial `compile_typst` delay, produces a real cross-block selection on mouseup rather
+than silently reopening the textarea — the exact bug pattern found and fixed today.
+
+**Not yet done, and important**: real-machine testing in `pnpm tauri dev`, by the user,
+specifically covering the items this pass's own plan flagged as needing it — a genuinely
+long, multi-page document (the one point flagged as a real, untested risk, not just an
+unstarted task); IME composition and undo/redo inside a focused block; and re-confirming
+today's two fixed bugs (focus-entry stutter, cross-block drag-select) on this real
+component rather than the throwaway spike. Nothing here has been committed pending that.
+
+**Real-machine testing (2026-09-11) — items 1, 3, 4, 5 above passed. Two real problems
+found on item 2 (the multi-page fixture), both fixed the same day.**
+
+**Found and fixed: a focused block's textarea rendered squashed to less than one line
+tall.** Root cause: `.typst-live-view` is a `flex-direction: column` container (unlike the
+spikes' own plain-block wrapper, `.spike-focus-reveal`) — a flex item's default
+`flex-shrink: 1` lets it be squeezed *below* its own content size (even below an
+explicitly-set inline height, since that only sets the flex-basis, not a floor) whenever
+the column's total children exceed the container's fixed `height: 100%`. The JS autosize
+was computing the right height correctly the whole time; flexbox was shrinking the
+rendered result underneath it. Confirmed with a real layout measurement (not just the
+inline style, since that's exactly where the two diverged): reproduced by temporarily
+forcing an ancestor short enough to trigger the shrink, with the fix removed;
+`getBoundingClientRect().height` came back far below the autosized value. **Fixed** by
+adding `flex-shrink: 0` to `.typst-live-block-textarea` and `.typst-live-block-rendered`
+in `App.css`, confirmed to resolve it under the same forced-overflow condition. Related,
+not fixed (not reported, out of scope for now): the same mechanism could in principle
+squeeze the combined-mode SVG view (`.typst-live-stage`) too, if the window is small/
+content tall enough — pre-existing, not introduced by this pass.
+
+**Found: entering/switching focus on a real multi-page document (the `m21-multipage-test.typ`
+fixture, `test-fixtures/`) was slow, and every other block sat on "Compiling…" long after
+that.** Root cause, confirmed by reading the Rust source rather than guessed:
+`block_geometry`'s own `typst::compile` call *is* comemo-cached as intended (near-free on
+unchanged content) — the actual cost is `geometry_for_range` (`src-tauri/src/geometry.rs`),
+called once per requested range, which walks *every page's every glyph* checking
+range-membership regardless of how narrow that range is. `computeSplitLayout` (as it
+existed before this fix) requested every block's range in one `block_geometry` call on
+every focus-entry/switch — for an N-block document that's N full-document glyph walks in
+one round trip, an O(blocks × total glyphs) cost that scales badly with real document
+size, confirmed live on the 20-section/~80-block fixture. "Compiling…" on every other
+block was a direct symptom, not a separate bug: `otherBlocksYRanges` simply couldn't
+populate until that whole expensive call returned.
+
+Four mitigations were weighed, specifically for the "editing repeatedly across many
+different locations in a large document" workload (not just read-only navigation), since
+that changes which one actually helps:
+- **Caching the whole-document result per `source`** — nearly useless for this workload:
+  every edit changes `source`, invalidating the cache immediately, so it never gets reused
+  between edits. Only helps a click-around-without-editing pattern. Not done.
+- **A small "focused block + immediate neighbors" fetch, with the rest backfilled in one
+  background call** — keeps focus-entry fast regardless of document size, but the
+  background call still eventually costs the same O(blocks × glyphs) as before, just moved
+  off the interactive path; for a genuinely huge document doing many edits, this cost
+  recurs after *every* edit regardless of what the user actually looks at.
+- **True lazy, visibility-driven fetching** (adopted, see below) — a block's geometry is
+  only ever fetched once it actually scrolls into view; cost scales with what's visible,
+  not with document size or edit count, which matters more the larger the document and the
+  more scattered the edits are.
+- **A backend algorithmic fix** — invert `geometry_for_range`'s loop (walk the frame tree
+  *once*, bucket each glyph into whichever of the sorted target ranges it falls in, instead
+  of walking the whole tree once per range) to cut the *fundamental* per-call cost for
+  every caller, not just this one. The most valuable fix for an edit-heavy-across-many-
+  locations workload specifically (caching can't help there since `source` keeps changing,
+  so raw per-call cost dominates), but it's a change to core M14A/M20 geometry-extraction
+  code with real risk and testing surface — **not done this pass, promoted to the next
+  task** rather than left as a someday-idea.
+
+**Fixed**: `fairShareBoundsFromInk`/`widenContentBounds`/`focusedLayoutPxFromInk`
+(`src/editor/splitLayout.ts`, +8 unit tests) are sparse-input equivalents of the existing
+`fairShareBoundsForIndex`/`computeSplitLayoutFromBoxes` — computing a block's fair share
+from whatever neighbor ink is *known so far* rather than requiring the whole document's
+geometry up front, and distinguishing "neighbor not fetched yet" (wait) from "no such
+neighbor, genuine document edge" (resolve using the page edge, same as before) via an
+explicit `totalBlocks` bound rather than conflating both cases as "undefined" in a sparse
+map. `TypstLiveView.tsx`'s `enterFocus`/`switchFocusTo` now fetch only `[idx-1, idx,
+idx+1]` before flipping into split mode (small and bounded regardless of document size —
+preserves the earlier entry-stutter fix's "resolve geometry before any state change"
+discipline, just over a cheap request instead of an expensive one); every other block is
+backfilled the instant it actually scrolls into view via one long-lived
+`IntersectionObserver` (`registerBlockElement`/`ensureBlockObserver`), not proactively for
+the whole document. A block whose real crop can't be shown yet keeps showing "Compiling…"
+exactly as before — this changes *when* that resolves, not the placeholder mechanism
+itself. Cache (`blockInkRangesRef`, keyed by `source`) is invalidated on any edit, clearing
+`otherBlocksYRanges` to placeholder rather than leaving stale (pre-edit) crops displayed.
+
+**Known, disclosed limitation, not fixed**: a block that stays continuously visible across
+an edit made elsewhere won't refresh until it's scrolled out and back into view (or until
+focus/switch happens to touch it as a neighbor) — `IntersectionObserver` only fires on a
+visibility *change*, and this pass doesn't re-trigger it for already-visible elements after
+an edit invalidates their cached position. Never shows *wrong* data (worst case, a
+correctly-cleared "Compiling…" placeholder lingering longer than ideal), just occasionally
+more conservative than necessary. Acceptable tradeoff for this pass given the added
+complexity of tracking "currently visible" separately from "has been fetched"; revisit if
+it turns out to matter in practice.
+
+Verified via Playwright against a synthetic 40-block document (built by focusing a block
+and pasting 40 paragraphs into it, then re-focusing): logged every `block_geometry` call's
+requested-range count — focus-entry produced several calls of 1-2 ranges each (the
+IntersectionObserver firing for on-screen siblings), never the whole 40; scrolling the
+container to the bottom afterward increased the resolved (non-placeholder) block count
+from 8 to 20, confirming blocks actually do backfill progressively as they're scrolled
+into view rather than sitting on "Compiling…" indefinitely or all resolving in one shot.

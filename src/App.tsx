@@ -6,10 +6,6 @@ import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./editor/SourceEditor";
 import WysiwygEditor, { type WysiwygEditorHandle } from "./editor/WysiwygEditor";
 import TypstLiveView from "./editor/TypstLiveView";
-import FocusRevealSpike from "./editor/FocusRevealSpike";
-import FocusRevealSpike2 from "./editor/FocusRevealSpike2";
-import FocusRevealSpike3 from "./editor/FocusRevealSpike3";
-import FocusRevealSpike3Eager from "./editor/FocusRevealSpike3Eager";
 import { RECOMPILE_DEBOUNCE_MS as COMPILE_DEBOUNCE_MS } from "./editor/typstCursor";
 import { byteToUtf16Offset, utf16ToByteOffset } from "./util/offsets";
 import { svgPointFromClient, clientPointFromPt } from "./util/svgGeometry";
@@ -90,15 +86,7 @@ const INITIAL_AST: AstDocument = {
 const INITIAL_DOC = typstAstToDoc(INITIAL_AST);
 
 
-type ViewMode =
-  | "wysiwyg"
-  | "typst"
-  | "markdown"
-  | "typst-live"
-  | "focus-reveal-spike"
-  | "focus-reveal-spike-2"
-  | "focus-reveal-spike-3"
-  | "focus-reveal-spike-3-eager";
+type ViewMode = "wysiwyg" | "typst" | "markdown" | "typst-live";
 
 type CompileResult = {
   svg: string | null;
@@ -473,18 +461,7 @@ function App() {
           <span className="file-title">{titleFor(filePath, dirty)}</span>
         </div>
         <div className="view-switcher" role="tablist">
-          {(
-            [
-              "wysiwyg",
-              "typst",
-              "markdown",
-              "typst-live",
-              "focus-reveal-spike",
-              "focus-reveal-spike-2",
-              "focus-reveal-spike-3",
-              "focus-reveal-spike-3-eager",
-            ] as const
-          ).map((mode) => (
+          {(["wysiwyg", "typst", "markdown", "typst-live"] as const).map((mode) => (
             <button
               key={mode}
               type="button"
@@ -499,15 +476,7 @@ function App() {
                   ? "Typst source"
                   : mode === "markdown"
                     ? "Markdown source"
-                    : mode === "typst-live"
-                      ? "Live cursor (M20/M21)"
-                      : mode === "focus-reveal-spike"
-                        ? "Focus reveal (Phase 4 Spike 1)"
-                        : mode === "focus-reveal-spike-2"
-                          ? "Focus reveal (Phase 4 Spike 2)"
-                          : mode === "focus-reveal-spike-3"
-                            ? "Focus reveal (Phase 4 Spike 3, lazy)"
-                            : "Focus reveal (Phase 4 Spike 3, eager)"}
+                    : "Live cursor (M20/M21)"}
             </button>
           ))}
         </div>
@@ -548,21 +517,9 @@ function App() {
               onChange={setLiveTypstText}
             />
           </div>
-          <div hidden={viewMode !== "focus-reveal-spike"} className="view-panel">
-            <FocusRevealSpike documentDir={documentDir} />
-          </div>
-          <div hidden={viewMode !== "focus-reveal-spike-2"} className="view-panel">
-            <FocusRevealSpike2 documentDir={documentDir} />
-          </div>
-          <div hidden={viewMode !== "focus-reveal-spike-3"} className="view-panel">
-            <FocusRevealSpike3 documentDir={documentDir} />
-          </div>
-          <div hidden={viewMode !== "focus-reveal-spike-3-eager"} className="view-panel">
-            <FocusRevealSpike3Eager documentDir={documentDir} />
-          </div>
         </div>
 
-        <div className="preview-pane" hidden={viewMode.startsWith("focus-reveal-spike")}>
+        <div className="preview-pane">
           {result?.diagnostics.map((d, i) => (
             <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
               {d.severity}
