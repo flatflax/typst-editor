@@ -282,6 +282,13 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // wording rather than requiring a second, separate action to "enter" a
   // block.
   const [focusedBlock, setFocusedBlock] = useState<number | null>(null);
+  // Bumped on every (re-)focus (`enterFocus`/`switchFocusTo`/a toolbar
+  // command's own re-focus below), folded into the focused textarea's React
+  // `key` — without it, re-focusing the *same* block index (e.g. a toolbar
+  // command that changes a paragraph's content but not which block it is)
+  // wouldn't remount the textarea, so its uncontrolled `defaultValue` would
+  // never pick up the new draft text.
+  const [focusGeneration, setFocusGeneration] = useState(0);
   const [otherBlocksYRanges, setOtherBlocksYRanges] = useState<Map<number, BlockYRange>>(new Map());
   const [focusedBlockLayoutPx, setFocusedBlockLayoutPx] = useState<FocusedLayoutPx | null>(null);
   const lockedWidthPxRef = useRef<number | null>(null);
@@ -463,6 +470,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     handedOffRef.current = false;
     setFocusedBlockLayoutPx(focusedLayoutPx);
     setSelectionRects([]);
+    setFocusGeneration((g) => g + 1);
     setFocusedBlock(idx);
   }
 
@@ -508,6 +516,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     handedOffRef.current = false;
     setFocusedBlockLayoutPx(focusedLayoutPx);
     if (effectiveSource !== source) onChange(effectiveSource);
+    setFocusGeneration((g) => g + 1);
     setFocusedBlock(newIdx);
   }
 
@@ -516,12 +525,22 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     el.style.height = `${el.scrollHeight}px`;
   }
 
+  // Where the caret should land the next time a block is (re-)focused, in
+  // UTF-16 units within *that block's own* draft text — `null` means "the
+  // end" (every ordinary click-to-focus path's existing behavior). Only
+  // `runToolbarCommand` sets this today, so a structural command that lands
+  // its result mid-paragraph (not just "append a heading at the end") still
+  // puts the caret where the edit actually happened, not at the tail.
+  const pendingCursorUtf16Ref = useRef<number | null>(null);
+
   useLayoutEffect(() => {
     if (focusedBlock === null) return;
     const el = focusedTextareaRef.current;
     if (!el) return;
     el.focus();
-    el.setSelectionRange(el.value.length, el.value.length);
+    const pos = pendingCursorUtf16Ref.current ?? el.value.length;
+    pendingCursorUtf16Ref.current = null;
+    el.setSelectionRange(pos, pos);
     autosizeTextarea(el);
   }, [focusedBlock]);
 
@@ -545,6 +564,14 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     cursorOffsetRef.current = offset;
     setAnchorOffset(pending.anchorByte);
     setCursorOffset(offset);
+    // The focused block's own textarea had DOM focus right up until this
+    // handoff unmounted it; nothing else claims it once combined mode
+    // renders instead, so it silently reverts to nothing (`document.body`).
+    // Found live (2026-09-11): without this, every keyboard interaction the
+    // resulting cross-block selection is supposed to support — arrow-key
+    // collapse, typing/Backspace to replace or delete it — silently went
+    // nowhere, since `handleKeyDown` is wired to this element specifically.
+    hiddenInputRef.current?.focus();
   }
 
   const pendingHandoffResolutionRef = useRef<{
@@ -880,7 +907,27 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     }
   }
 
+  // Collapsing (not extending) a cross-block selection via the keyboard —
+  // Left/Right always collapse, Up/Down collapse without Shift — used to
+  // just leave a self-drawn, collapsed caret sitting in combined mode.
+  // Found live (2026-09-11): that's the one path left where a collapsed
+  // position doesn't immediately focus its block, unlike every mouse-driven
+  // path (`handleMouseUp`) — inconsistent with the design's own rule that a
+  // collapsed cursor/selection is *always* a focused block, not a separate
+  // "combined mode with nothing selected" state. `pendingCursorUtf16Ref`
+  // (see the toolbar-command comment above it) lands the caret at the exact
+  // collapsed position instead of defaulting to the block's end.
   function moveTo(offset: number, extendSelection: boolean) {
+    if (!extendSelection) {
+      const ranges = blockByteRanges(source);
+      const idx = blockAt(ranges, offset);
+      if (idx != null) {
+        const blockText = sliceByBytes(source, ranges[idx][0], ranges[idx][1]);
+        pendingCursorUtf16Ref.current = byteToUtf16Offset(blockText, offset - ranges[idx][0]);
+        void enterFocus(idx, baseSvgEl());
+        return;
+      }
+    }
     setCursorOffset(offset);
     if (!extendSelection) setAnchorOffset(offset);
   }
@@ -922,8 +969,35 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // (returns null) just leaves the source/cursor as the previous step left
   // them, rather than aborting the whole chain — e.g. `liftList` no-ops
   // outside a list, so "P" still falls through to plain `setParagraph`.
+  //
+  // While a block is focused, this still runs against the *whole* document
+  // (a structural transform needs surrounding context — list nesting, table
+  // structure — that a single block's text can't answer on its own), but
+  // the visible result lands back *inside the same textarea* rather than
+  // bouncing out to combined mode: the draft is committed first, the
+  // command runs against that fresh source, and whichever block the
+  // result's cursor now falls in is (re-)focused with the new content
+  // already showing — confirmed live that this reads far better than a
+  // jarring "exit focus, apply, re-enter" round trip would have.
   async function runToolbarCommand(steps: Command[]) {
-    let current: StructuralEditResult = { source, cursorOffset, anchorOffset };
+    const wasFocused = focusedBlock;
+    let effectiveSource = source;
+    let cursorForCommand = cursorOffset;
+    let anchorForCommand = anchorOffset;
+
+    if (wasFocused !== null) {
+      const ranges = blockByteRanges(source);
+      const [start] = ranges[wasFocused];
+      const el = focusedTextareaRef.current;
+      const selStartUtf16 = el?.selectionStart ?? draftRef.current.length;
+      const selEndUtf16 = el?.selectionEnd ?? draftRef.current.length;
+      const spliced = spliceSource(source, ranges[wasFocused][0], ranges[wasFocused][1], draftRef.current);
+      effectiveSource = spliced.source;
+      anchorForCommand = start + utf16ToByteOffset(draftRef.current, Math.min(selStartUtf16, selEndUtf16));
+      cursorForCommand = start + utf16ToByteOffset(draftRef.current, Math.max(selStartUtf16, selEndUtf16));
+    }
+
+    let current: StructuralEditResult = { source: effectiveSource, cursorOffset: cursorForCommand, anchorOffset: anchorForCommand };
     let ranAny = false;
     for (const step of steps) {
       const result = await runStructuralCommand(current.source, current.cursorOffset, current.anchorOffset, step);
@@ -933,9 +1007,26 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
       }
     }
     if (!ranAny) return;
-    onChange(current.source);
-    setCursorOffset(current.cursorOffset);
-    setAnchorOffset(current.anchorOffset);
+
+    if (wasFocused !== null) {
+      // Suppresses the stale `onBlur` the *old*-keyed textarea fires as
+      // React unmounts it below (see `handedOffRef`'s own comment) — the
+      // draft it would try to commit is about to be replaced anyway.
+      handedOffRef.current = true;
+      const newRanges = blockByteRanges(current.source);
+      const newIdx = blockAt(newRanges, current.cursorOffset) ?? Math.min(wasFocused, newRanges.length - 1);
+      draftRef.current = sliceByBytes(current.source, newRanges[newIdx][0], newRanges[newIdx][1]);
+      pendingCursorUtf16Ref.current = byteToUtf16Offset(draftRef.current, current.cursorOffset - newRanges[newIdx][0]);
+      const focusedLayoutPx = await ensureBlockGeometry(current.source, newIdx, [newIdx - 1, newIdx, newIdx + 1]);
+      onChange(current.source);
+      setFocusedBlockLayoutPx(focusedLayoutPx);
+      setFocusGeneration((g) => g + 1);
+      setFocusedBlock(newIdx);
+    } else {
+      onChange(current.source);
+      setCursorOffset(current.cursorOffset);
+      setAnchorOffset(current.anchorOffset);
+    }
   }
 
   function handleDeleteBackward() {
@@ -1100,10 +1191,10 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     return { clientX, clientY, text: currentParagraphText(source, cursorOffset) };
   })();
 
-  function renderFocusedTextarea(key: number) {
+  function renderFocusedTextarea(idx: number) {
     return (
       <textarea
-        key={key}
+        key={`${idx}-${focusGeneration}`}
         ref={focusedTextareaRef}
         className="typst-live-block-textarea"
         style={
@@ -1171,30 +1262,26 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
           {d.line != null ? ` at ${d.line}:${d.column}` : ""}: {d.message}
         </p>
       ))}
-      {focusedBlock === null && (
-        // M23 toolbar operates on cursorOffset/anchorOffset across the whole
-        // document — not yet integrated with a focused block's own
-        // uncommitted draft (deferred, phase4-product-validation.md's plan
-        // for this milestone), so it's only available in the narrower
-        // "combined" state below (empty or cross-block selection), not while
-        // a block is focused.
-        <div className="typst-live-toolbar">
-          {TOOLBAR_ITEMS.map((item) => (
-            <button
-              key={item.label}
-              type="button"
-              // Clicking a button naturally steals DOM focus from the hidden
-              // textarea; without this, the *next* keystroke after using the
-              // toolbar would land nowhere (same class of bug as M21's
-              // mousedown-focus fix on the stage itself).
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => void runToolbarCommand(item.steps)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* Shown regardless of `focusedBlock` — `runToolbarCommand` now handles
+          both cases (commit-and-stay-focused vs. the original combined-mode
+          path) itself. */}
+      <div className="typst-live-toolbar">
+        {TOOLBAR_ITEMS.map((item) => (
+          <button
+            key={item.label}
+            type="button"
+            // Clicking a button naturally steals DOM focus from whichever
+            // textarea currently has it (the hidden one, or a focused
+            // block's own); without this, the *next* keystroke after using
+            // the toolbar would land nowhere (same class of bug as M21's
+            // mousedown-focus fix on the stage itself).
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => void runToolbarCommand(item.steps)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
       {focusedBlock === null ? (
         <div
           ref={stageRef}

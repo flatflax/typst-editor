@@ -8,6 +8,7 @@ import {
 } from "./typstAst";
 import { fixtures } from "./typstAst.fixtures";
 import { schema, type PMDoc } from "../model/schema";
+import { utf16ToByteOffset } from "../util/offsets";
 
 describe("typstAstToDoc / pmDocToTypst round trip", () => {
   it.each(Object.entries(fixtures))(
@@ -207,5 +208,39 @@ describe("pmDocToTypstWithPositions (plan.md M5)", () => {
     // click 2/5 into "plain" should land near pos 3, not snap to pos 1.
     expect(pmPos).toBe(3);
     expect(source.slice(0, 5)).toBe("plain");
+  });
+
+  it("accounts for multi-byte UTF-8 characters earlier in the document when mapping later offsets", () => {
+    // Regression guard for a bug found live (2026-09-11): leaf()/join() used
+    // to track typstFrom/typstTo via JS string .length (UTF-16 code units)
+    // instead of UTF-8 byte length. An em dash is 1 UTF-16 code unit but 3
+    // UTF-8 bytes, so every position-map entry *after* one was undercounted
+    // by 2 bytes -- confirmed live by a toolbar mark-toggle command landing
+    // 4 bytes off in a document with two em dashes before the target text.
+    const doc = typstAstToDoc({
+      settings: [],
+      content: [
+        { type: "paragraph", children: [{ type: "text", text: "em — dash", marks: [] }] },
+        { type: "paragraph", children: [{ type: "text", text: "target", marks: [] }] },
+      ],
+    });
+    const { source, positions } = pmDocToTypstWithPositions(doc);
+    expect(source).toBe("em — dash\n\ntarget");
+
+    // "em — dash" is 9 UTF-16 code units but 11 UTF-8 bytes (the em dash
+    // costs 3 bytes for 1 code unit). The buggy version would have placed
+    // "target" 2 bytes too early -- at typst offset 9 + 2 ("\n\n") = 11
+    // instead of the correct 11 + 2 = 13.
+    const firstParaBytes = utf16ToByteOffset("em — dash", "em — dash".length);
+    expect(firstParaBytes).toBe(11);
+    expect(positions).toHaveLength(2);
+    const targetEntry = positions[1];
+    expect(targetEntry.typstFrom).toBe(firstParaBytes + 2);
+    expect(utf16ToByteOffset(source, source.length)).toBe(targetEntry.typstTo);
+
+    // And the round-trip lookups agree with that byte offset, not the old
+    // (buggy) UTF-16-length-based one.
+    expect(typstOffsetToPmPos(positions, targetEntry.typstFrom)).toBe(targetEntry.pmFrom);
+    expect(pmPosToTypstOffset(positions, targetEntry.pmFrom)).toBe(targetEntry.typstFrom);
   });
 });

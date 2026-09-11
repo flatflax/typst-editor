@@ -13,6 +13,7 @@ import {
 } from "../model/schema";
 import { atomSpecByAstType, atomSpecByPmType } from "./inlineLeaves";
 import { assertNever } from "../util/assertNever";
+import { utf16ToByteOffset } from "../util/offsets";
 
 export type { TypstSet };
 
@@ -182,11 +183,24 @@ function marksFor(markNames: string[]) {
 // raw text). Both lookup directions below interpolate *within* an entry's
 // range rather than snapping to its start — e.g. clicking mid-paragraph in
 // the preview lands the WYSIWYG cursor near that point in the text, not at
-// the paragraph's first character. This is still an approximation inside a
-// marked-up run (escaping/`*`/`_`/`` ` `` wrappers shift Typst length away
-// from PM length), matching the "point/caret-level sync only" precision
-// already established for the Typst-source-only case in M1 (plan.md's
-// precision note) — close enough to click near, not byte-exact.
+// the paragraph's first character.
+//
+// `typstFrom`/`typstTo` are UTF-8 *byte* offsets, matching every other
+// `cursorOffset`/`anchorOffset` in the codebase (`jump_from_click`,
+// `block_geometry`) — found live (phase4-product-validation.md, 2026-09-11)
+// that `leaf`/`join` used to track these via JS string `.length` (UTF-16
+// code units) instead, silently undercounting by 2 bytes for every
+// multi-byte character (e.g. an em dash, 3 UTF-8 bytes vs. 1 UTF-16 unit)
+// appearing anywhere earlier in the document — every position after one
+// drifted, not just inside whatever ran through the multi-byte character
+// itself. A genuinely *remaining*, narrower approximation this doesn't fix:
+// inside a marked-up run, escaping/`*`/`_`/`` ` `` wrappers still shift
+// Typst byte length away from PM position span within that one entry (a
+// "Bold" run is 4 PM positions but 6 Typst bytes as `*Bold*`) — interpolating
+// a target that lands *inside* such a run, not just past its boundary, is
+// still only approximate, matching the "point/caret-level sync only"
+// precision already established for the Typst-source-only case in M1
+// (plan.md's precision note).
 export type PositionMapEntry = {
   pmFrom: number;
   pmTo: number;
@@ -207,7 +221,7 @@ type Serialized = { text: string; positions: PositionMapEntry[] };
 // like "= " and the heading text right after it meet at a shared boundary).
 function leaf(pmFrom: number, pmTo: number, text: string): Serialized {
   return text.length > 0
-    ? { text, positions: [{ pmFrom, pmTo, typstFrom: 0, typstTo: text.length }] }
+    ? { text, positions: [{ pmFrom, pmTo, typstFrom: 0, typstTo: utf16ToByteOffset(text, text.length) }] }
     : { text: "", positions: [] };
 }
 
@@ -219,11 +233,19 @@ function unpositioned(text: string): Serialized {
 
 function join(parts: Serialized[], separator: string): Serialized {
   let text = "";
+  // Tracked incrementally (each part's own byte length added once) rather
+  // than re-deriving it from `utf16ToByteOffset(text, text.length)` on every
+  // iteration — that would re-encode the whole accumulated `text` afresh
+  // each time, O(n) work per part instead of O(1), compounding to O(n²)
+  // across a large document.
+  let base = 0;
+  const separatorBytes = utf16ToByteOffset(separator, separator.length);
   const positions: PositionMapEntry[] = [];
   parts.forEach((part, i) => {
-    if (i > 0) text += separator;
-    const base = text.length;
-    text += part.text;
+    if (i > 0) {
+      text += separator;
+      base += separatorBytes;
+    }
     for (const p of part.positions) {
       positions.push({
         pmFrom: p.pmFrom,
@@ -232,6 +254,8 @@ function join(parts: Serialized[], separator: string): Serialized {
         typstTo: base + p.typstTo,
       });
     }
+    text += part.text;
+    base += utf16ToByteOffset(part.text, part.text.length);
   });
   return { text, positions };
 }

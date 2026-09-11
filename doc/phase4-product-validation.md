@@ -40,13 +40,23 @@ Full rationale in [interaction-design.md](interaction-design.md) §10.
    narrowly per direct confirmation: `TypstLiveView.tsx` (not a new/parallel component —
    see its own "Landed as a real implementation" entry below for why) now has a block
    model, and a block whose cursor/selection collapses fully inside it becomes a real
-   `<textarea>`. **Deliberately deferred, not silently dropped**: the M23 toolbar's
-   integration with a focused block (toolbar is hidden while a block is focused); Up/Down
-   navigation across a block boundary; reference-chain navigation UI for `#set`/`#let`/
-   labels (interaction-design.md §10 item 14 — the interaction is designed, nothing is
-   implemented). Real-machine testing (below) found and fixed two real problems (a
+   `<textarea>`. Real-machine testing (below) found and fixed two real problems (a
    flex-shrink layout bug; slow, whole-document-scanning focus-entry/switch on a real
    multi-page document) — everything else it covered passed.
+6a. ~~**M23 toolbar integration with a focused block**~~ — done (2026-09-11): a toolbar
+   command's result now lands back inside the same textarea (not combined mode), per
+   direct confirmation. Found and fixed three related bugs along the way — a keyboard-driven
+   selection collapse (arrow keys) leaving a stray self-drawn caret instead of focusing a
+   block; a more fundamental one it depended on (a handoff-created cross-block
+   selection left *no* element focused at all, so no keyboard interaction worked for it);
+   and, found only once real-machine testing exercised a mark-toggle command against a
+   selection, a UTF-16-vs-UTF-8-byte-offset bug in the shared PM-position map
+   (`spokes/typstAst.ts`, pre-existing, not introduced by this pass) that misapplied the
+   command to a shifted range whenever a multi-byte character appeared earlier in the
+   document. Still deliberately deferred, not silently dropped: Up/Down navigation across a
+   block boundary; reference-chain navigation UI for `#set`/`#let`/labels
+   (interaction-design.md §10 item 14 — the interaction is designed, nothing is
+   implemented).
 7. **Next task (promoted from "someday" given real-machine testing on a multi-page
    document, 2026-09-11)**: the backend algorithmic fix for `geometry_for_range`
    (`src-tauri/src/geometry.rs`) — invert its loop to walk each page's frame tree once and
@@ -140,6 +150,8 @@ the real compiler, and is exactly the kind of thing that could make the real han
 feel like a visible jump even though the mechanism itself is correct. Feel-testing on
 real hardware (per Spike 1's own lesson: static/automated review missed real problems
 static review wouldn't have caught) is the next step before calling this one closed.
+(Superseded by the "Third pass" below: the isolated other-block compile this assumption
+was about got removed entirely, not merely confirmed.)
 
 **Found and fixed during that same hands-on pass**: the "other" (unfocused) block's
 isolated compile is one shared piece of state (`otherBlockSvg`) regardless of *which*
@@ -264,7 +276,8 @@ sides: width and both margins came back in exactly the expected ratio to the pag
 
 **Noted, not yet fixed**: a brief visual flash during the mode transition itself (clicking
 to focus/switch blocks) — not yet investigated, recorded here so it isn't lost before the
-next pass at this spike.
+next pass at this spike. (Resolved by the entering-focus-stutter fix under the Spike 3
+cross-block feel-test below.)
 
 **Spike 3 — "lazy" block-count-change on commit (lazy half implemented and verified;
 "eager" comparison still open).** interaction-design.md §6 offers two options for how a
@@ -616,3 +629,117 @@ IntersectionObserver firing for on-screen siblings), never the whole 40; scrolli
 container to the bottom afterward increased the resolved (non-placeholder) block count
 from 8 to 20, confirming blocks actually do backfill progressively as they're scrolled
 into view rather than sitting on "Compiling…" indefinitely or all resolving in one shot.
+
+**M23 toolbar integrated with a focused block (2026-09-11).** Previously hidden while any
+block was focused (this milestone's own initial scoping decision). `runToolbarCommand`
+still runs the same whole-document parse → PM-transform → serialize round trip
+(`structuralCommand.ts`) it always did — a structural change like "toggle heading" needs
+surrounding document context (list nesting, table structure) a single block's text can't
+answer alone — but confirmed with the user that the *visible* result should land back
+inside the same textarea, not bounce out to combined mode first. Implementation: if a
+block is focused, its draft is committed and the native textarea's own
+`selectionStart`/`selectionEnd` converted to absolute document byte offsets *before*
+running the command chain; after it resolves, whichever block the result's cursor now
+falls in (usually, but not necessarily, the same index) is (re-)focused with the new
+content already showing. Needed two small supporting pieces:
+- `pendingCursorUtf16Ref`: where the caret should land the next time a block is
+  (re-)focused, in UTF-16 units within that block's own draft — `null` means "the end"
+  (every ordinary click-to-focus path's existing behavior, unchanged). Without this, a
+  structural command's result would always show the caret at the tail of the paragraph
+  regardless of where the edit actually happened.
+- `focusGeneration`: bumped on every (re-)focus, folded into the focused textarea's React
+  `key` (`` `${idx}-${focusGeneration}` ``). Needed because a toolbar command can leave the
+  *same* block index focused (its content changed, not which block it is) — without
+  forcing a remount, React wouldn't pick up the new `defaultValue`, since an uncontrolled
+  input's `defaultValue` is only read on mount.
+- `handedOffRef.current = true` before swapping in the new content — same reasoning as
+  the cross-block drag fix earlier in this doc: removing the old-keyed textarea from the
+  DOM fires a native `blur`, which would otherwise re-trigger `commitFocusedDraft` and
+  re-commit a draft that's about to be discarded anyway.
+
+**Found and fixed, while testing the above: a stray, inconsistent "collapsed caret"
+state.** The design's own rule (interaction-design.md §6) is that a collapsed cursor/
+selection is *always* a focused block — `handleMouseUp` already enforces this for every
+mouse-driven path, but keyboard-driven collapsing (Left/Right always collapse; Up/Down
+collapse without Shift) never went through the same rule, silently leaving a self-drawn
+red caret sitting in combined mode instead. **Fixed** by having `moveTo` check whether the
+target offset would be a collapse (not an extend) and, if so, resolve which block it
+falls in and focus it (reusing `pendingCursorUtf16Ref` so the caret lands at the exact
+collapsed position, not the block's end) instead of just setting `cursorOffset`/
+`anchorOffset` directly.
+
+**Found while verifying that fix: a more fundamental bug it depended on.** Playwright
+verification of the arrow-key fix showed `document.activeElement` was `<body>` after a
+cross-block selection created via dragging out of a focused block's textarea (the
+handoff mechanism from the earlier drag milestone) — the focused textarea had DOM focus
+right up until the handoff unmounted it, and nothing ever claimed focus afterward for
+combined mode's hidden textarea. This meant **no keyboard interaction worked at all** for
+a handoff-created cross-block selection (arrow keys, typing/Backspace to replace or
+delete it) — not just the arrow-key collapse case, since `handleKeyDown` is wired
+specifically to that hidden textarea. **Fixed** by having `resolveHandoffDrop` call
+`hiddenInputRef.current?.focus()` once it successfully resolves the drop position.
+Confirmed both fixes are load-bearing the usual way: disabled `moveTo`'s own check (with
+the focus fix left in place) and reproduced the original lingering-caret symptom exactly;
+restored it and confirmed a clean collapse into focus with no lingering caret/selection
+artifacts.
+
+**Not verified via Playwright, needs real-machine testing**: the toolbar integration
+itself — `runStructuralCommand` calls the real `parse_typst_ast` backend command, whose
+AST response shape isn't practical to fake convincingly in a mock harness the way
+`compile_typst`/`jump_from_click`/`block_geometry` already are elsewhere in this doc: a
+wrong mock would give false confidence rather than real coverage. tsc and the full
+`vitest run` suite (277 tests) pass; the arrow-key/focus fixes above were verified via
+Playwright since they don't depend on real AST parsing.
+
+**Found via real-machine testing of the above: mark-toggle commands (B/I/Code/Link)
+applied to the wrong range within a focused block's selection (2026-09-11).** Reported
+live: selecting text (e.g. "view", "through ") in a focused textarea and clicking a mark
+button wrapped a shifted range of the same length instead — "through " (8 chars) became
+"ugh ever", offset by exactly 4 bytes. This session's own frontend selection-capture code
+(the `selectionStart`/`selectionEnd` → byte-offset conversion added for the toolbar
+integration above) was verified correct first, by temporarily logging the exact substring
+it computed — it matched the real selection both times, ruling out that code as the cause
+and pointing instead at the deeper PM-position ↔ Typst-byte-offset mapping
+(`spokes/typstAst.ts`, built earlier for M5's WYSIWYG cursor sync, unused outside it until
+this pass). Manually reconstructing the position-map entries nearest the target byte range
+from debug output showed a real, consistent 4-byte-too-far offset — matching exactly 2 em
+dashes ("Typst Editor — M5", "...above — they all...") appearing earlier in the demo
+document.
+
+**Root cause**: `leaf()`/`join()`, the two helpers `pmDocToTypstWithPositions` uses to
+build its `PositionMapEntry[]` map, computed `typstFrom`/`typstTo` via JavaScript string
+`.length` — UTF-16 code units — even though every consumer of these values (this map's own
+reverse lookups, `TypstLiveView.tsx`'s `cursorOffset`/`anchorOffset`, `jump_from_click`,
+`block_geometry`) treats them as UTF-8 **byte** offsets, matching what the Rust backend
+uses throughout. An em dash is 1 UTF-16 code unit but 3 UTF-8 bytes, so every position-map
+entry after one was silently undercounted by 2 bytes per such character — a genuinely
+separate, previously-uncaught defect in a module this pass never otherwise touched, not
+something the toolbar-integration work introduced; it surfaced now only because this is
+the first feature to interpolate a *selection range* (not just a single click point)
+through that map against a document containing multi-byte characters.
+
+One red herring along the way, worth recording so it isn't mistaken for a real finding on
+a future re-read of old debug output: an early debug log's `debugSource.slice(anchorOffset,
+cursorOffset)` mixed a UTF-16-indexed `.slice()` with byte-offset arguments, producing a
+misleading `intendedSubstring` independent of the actual bug — not evidence that the
+source used to build the map differed from the source the command ran against.
+
+**Fixed** in `spokes/typstAst.ts`: `leaf()` now derives `typstTo` via
+`utf16ToByteOffset(text, text.length)`; `join()` tracks its running `base` offset as byte
+length (accumulated incrementally per part, not by re-encoding the whole accumulated
+string on every iteration — would have been O(n²) on a large document). Regression test
+added (`typstAst.test.ts`): a two-paragraph document with an em dash in the first paragraph
+asserts the second paragraph's mapped byte offset accounts for the dash's full 3-byte
+encoding, not its 1-code-unit JS length. `tsc --noEmit` clean; full suite now 278 tests,
+all passing (277 pre-existing + the 1 new regression test; no existing fixture happened to
+place a multi-byte character before a mapped target, which is why nothing caught this
+until real-machine use surfaced it).
+
+**Known, separate, still-remaining limitation, not addressed by this fix**: interpolating
+a target position that lands *inside* a marked-up run (bold/italic/code) remains only
+approximate, because the Typst-serialized wrapper characters (`*`/`_`/`` ` ``) make that
+entry's byte span (`typstTo - typstFrom`, wrappers included) differ from its PM position
+span (`pmTo - pmFrom`, wrappers excluded). Distinct from the byte-counting bug just fixed;
+same acceptable-approximation status this doc's earlier M5 interpolation note already
+established for single-point clicks, just not yet re-examined for range selections
+specifically.
