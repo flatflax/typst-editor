@@ -920,8 +920,15 @@ remains worth having even with the actual bug fixed. Confirmed live: focusing a 
 the multi-page fixture after scrolling down now correctly expands that block in place,
 without the view jumping back to the top.
 
-**Not yet investigated, next**: focusing a block correctly expands it in place, but the
-*other* blocks' "Compiling…" placeholders don't resolve starting from near the newly-focused
-block outward — the resolution order doesn't currently prioritize what's nearest the user's
-actual attention. Reported live immediately after the scroll-jump fix; needs its own look at
-`ensureBlockGeometry`/the `IntersectionObserver` wiring's effective fetch order.
+**Found and fixed the same day: unresolved "Compiling…" placeholders didn't settle starting
+from near the newly-focused block outward.** Entering split mode registers every non-focused
+block with the same `IntersectionObserver` at once; the browser's first callback for a
+freshly-observed target reports every *currently* intersecting block together, in one batch —
+several can be newly-visible simultaneously, not just one. That batch's own `entries` order is
+observation order (ascending block index, since that's the order `.map()` mounts them in
+React), unrelated to how visually close each one is to the block the user just focused.
+**Fixed** by sorting each callback's qualifying entries by `|idx - focusedBlock|` before
+issuing their `ensureBlockGeometry` calls — each call is independently async and not awaited,
+but issuing the nearest one first still gets it processed (and painted) first in practice,
+since the backend handles one IPC call at a time. Confirmed live: placeholders now visibly
+settle outward from the focused block instead of in arbitrary index order.

@@ -475,10 +475,31 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     if (!blockObserverRef.current) {
       blockObserverRef.current = new IntersectionObserver(
         (entries) => {
-          for (const entry of entries) {
-            if (!entry.isIntersecting) continue;
-            const idx = elementToBlockIndexRef.current.get(entry.target);
-            if (idx == null) continue;
+          // Entering split mode registers every non-focused block with this
+          // same observer at once, and the browser fires one *initial*
+          // callback reporting every currently-intersecting target's state
+          // together — several blocks can be newly-visible in that single
+          // batch, not just one. `entries`' own order is observation order
+          // (ascending block index, since that's the order `.map()` mounts
+          // them in React), unrelated to how close each one actually is to
+          // the block the user just focused. Found live (2026-09-14):
+          // without sorting, "Compiling…" placeholders resolved in that
+          // arbitrary index order instead of visibly settling outward from
+          // the focused block first, which is what a viewer actually
+          // watches. Each `ensureBlockGeometry` call below is independently
+          // async and not awaited here, but issuing the nearest one first
+          // still gets it processed (and painted) first in practice, since
+          // the backend handles one IPC call at a time.
+          const toProcess = entries
+            .filter((entry) => entry.isIntersecting)
+            .map((entry) => ({ entry, idx: elementToBlockIndexRef.current.get(entry.target) }))
+            .filter((e): e is { entry: IntersectionObserverEntry; idx: number } => e.idx != null)
+            .sort((a, b) => {
+              const focused = focusedBlockRef.current;
+              if (focused == null) return a.idx - b.idx;
+              return Math.abs(a.idx - focused) - Math.abs(b.idx - focused);
+            });
+          for (const { idx } of toProcess) {
             if (
               blockInkSourceRef.current === sourceRef.current &&
               (blockInkRangesRef.current.has(idx) || blockEmptyIndicesRef.current.has(idx))
