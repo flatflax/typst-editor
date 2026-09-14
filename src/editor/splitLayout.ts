@@ -85,27 +85,104 @@ export function fairShareBoundsForIndex(
 // neighbors, lazily, keeps each individual call's cost bounded regardless of
 // document size (phase4-product-validation.md).
 //
-// Returns `null` — "not ready, don't guess" — if a neighbor that genuinely
-// exists (per `totalBlocks`) hasn't been fetched yet. That's a different
-// case from "this is the first/last block" (`hasPrev`/`hasNext` false),
-// which correctly extends to the page edge instead of waiting for a
-// neighbor that was never going to arrive.
+// `emptyBlocks` names indices that were fetched and confirmed to render
+// *nothing at all* (e.g. a `#set`/`#let` line — a real block boundary, but
+// zero glyphs, so `unionYRange` of its boxes is `null`). Found live
+// (2026-09-14): treating that the same as "not fetched yet" meant such a
+// block could never resolve out of its own "Compiling…" placeholder — and,
+// worse, poisoned its *neighbor's* fair share too, since the neighbor's own
+// midpoint math needs to know where this block sits. Fixed by walking past
+// `emptyBlocks` entries when looking for the nearest real ink to share a
+// boundary with (an invisible block occupies no vertical space, so it's
+// transparent for this purpose) — see `nearestRealInk` below. A block that
+// is itself in `emptyBlocks` gets a genuine zero-height share, anchored at
+// the midpoint between its own nearest real neighbors, since there's
+// nothing of its own to crop.
+//
+// Returns `null` — "not ready, don't guess" — only when a neighbor that
+// genuinely exists (per `totalBlocks`) and isn't confirmed empty hasn't
+// been fetched yet. That's different from "this is the first/last block"
+// (`hasPrev`/`hasNext` false), which correctly extends to the page edge
+// instead of waiting for a neighbor that was never going to arrive.
 export function fairShareBoundsFromInk(
   idx: number,
   inkRanges: Map<number, BlockYRange>,
+  emptyBlocks: ReadonlySet<number>,
   totalBlocks: number,
   pageHeightPt: number,
 ): BlockYRange | null {
   const own = inkRanges.get(idx);
-  if (!own) return null;
-  const hasPrev = idx > 0;
-  const hasNext = idx < totalBlocks - 1;
-  const prev = hasPrev ? inkRanges.get(idx - 1) : undefined;
-  const next = hasNext ? inkRanges.get(idx + 1) : undefined;
-  if ((hasPrev && !prev) || (hasNext && !next)) return null;
-  const top = prev ? (prev.yTopPt + prev.heightPt + own.yTopPt) / 2 : 0;
-  const bottom = next ? (own.yTopPt + own.heightPt + next.yTopPt) / 2 : pageHeightPt;
+  const idxIsEmpty = emptyBlocks.has(idx);
+  if (!own && !idxIsEmpty) return null;
+
+  // Walks outward from `idx`, skipping over confirmed-empty blocks, to find
+  // the nearest one with real ink. `undefined` means "walked off the
+  // document edge" (resolve against the page edge); `null` means "hit a
+  // block that hasn't been fetched yet and isn't confirmed empty" (not
+  // ready — the caller should wait, not guess).
+  function nearestRealInk(step: -1 | 1): BlockYRange | null | undefined {
+    for (let i = idx + step; i >= 0 && i < totalBlocks; i += step) {
+      if (emptyBlocks.has(i)) continue;
+      const ink = inkRanges.get(i);
+      if (ink) return ink;
+      return null;
+    }
+    return undefined;
+  }
+
+  const prev = nearestRealInk(-1);
+  if (prev === null) return null;
+  const next = nearestRealInk(1);
+  if (next === null) return null;
+
+  if (idxIsEmpty) {
+    // Nothing of its own to show — a zero-height slice at the midpoint
+    // between its nearest real neighbors (or the page edge), not any
+    // share of visible space that would just show blank page under its
+    // name for no reason.
+    const prevEdge = prev ? prev.yTopPt + prev.heightPt : 0;
+    const nextEdge = next ? next.yTopPt : pageHeightPt;
+    const mid = (prevEdge + nextEdge) / 2;
+    return { yTopPt: mid, heightPt: 0 };
+  }
+
+  const top = prev ? (prev.yTopPt + prev.heightPt + own!.yTopPt) / 2 : 0;
+  const bottom = next ? (own!.yTopPt + own!.heightPt + next.yTopPt) / 2 : pageHeightPt;
   return { yTopPt: top, heightPt: bottom - top };
+}
+
+// Estimates a not-yet-fetched block's rendered height from its own byte
+// length, calibrated against whatever real ink-to-byte ratio is already
+// known from other blocks in the same document — self-calibrating (adapts
+// to the actual font size/page width instead of hardcoding one) rather than
+// a fixed guess. Used only to size "Compiling…" placeholders less wrongly
+// while their real geometry is still being lazily fetched.
+//
+// Found live (2026-09-14): a placeholder with literally no reserved height
+// (one line of italic text) could compress dozens of unfetched blocks down
+// to a sliver the instant a document enters split mode, making a
+// newly-focused block many pages in visually "jump" toward the document's
+// top the moment it's focused — not an actual navigation bug, just the
+// layout being drastically (and misleadingly) shorter than the real
+// document until more of it resolves. This doesn't eliminate that
+// (`knownBlocks` is often empty or sparse right when focus first happens),
+// but narrows the gap enough that the visual jump reads as ordinary
+// progressive-loading reflow instead of "my place in the document is
+// gone" — paired with an explicit scroll-correction in `TypstLiveView.tsx`
+// for the rest.
+export function estimatePlaceholderHeightPt(
+  byteLength: number,
+  knownBlocks: { byteLength: number; heightPt: number }[],
+): number {
+  const totalBytes = knownBlocks.reduce((sum, b) => sum + b.byteLength, 0);
+  const totalHeightPt = knownBlocks.reduce((sum, b) => sum + b.heightPt, 0);
+  // Fallback for the very first paint, before *anything* in this document
+  // has resolved yet to calibrate against: a rough guess for ~11pt body
+  // text at a typical page width (~14pt line height per ~80 ASCII bytes of
+  // wrapped text) — not meant to be accurate, just far closer than 0.
+  const DEFAULT_PT_PER_BYTE = 14 / 80;
+  const ptPerByte = totalBytes > 0 ? totalHeightPt / totalBytes : DEFAULT_PT_PER_BYTE;
+  return byteLength * ptPerByte;
 }
 
 export function cropSvgVertically(svg: string, yTopPt: number, heightPt: number): string | null {

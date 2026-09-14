@@ -81,28 +81,57 @@ struct Hit {
     baseline_from_top_pt: Option<f64>,
 }
 
-/// For every rendered occurrence of `range` in `document`, return one
-/// [`RangeBox`] per reconstructed visual line (text) or per shape/image.
+/// For every rendered occurrence of each of `ranges` in `document`, return
+/// one [`RangeBox`] per reconstructed visual line (text) or per shape/image.
 /// Multiple boxes on the same page, or on different pages, both fall out
 /// naturally from the same collection pass — no special-casing needed for
 /// "this range wraps onto a second line" vs. "this range is a footnote body
 /// rendered elsewhere on the page" vs. "this range crosses a page break":
 /// each is just another non-adjacent hit.
-pub fn geometry_for_range(
+///
+/// Walks `document`'s frame tree exactly *once* regardless of how many
+/// `ranges` are requested, bucketing each hit into whichever range it falls
+/// in, instead of re-walking the whole tree once per range — which is what
+/// this function used to do (one `geometry_for_range` per range, in a
+/// loop). `block_geometry`'s real caller (`compile.rs`) requests one range
+/// per on-screen block, so an N-block document used to cost N full tree
+/// walks per call, each re-resolving every glyph's source span from
+/// scratch — an O(blocks × glyphs) cost confirmed live on a genuinely long,
+/// multi-page document (Phase 4, phase4-product-validation.md). Text hits
+/// are bucketed by binary-searching `ranges` sorted by `start`
+/// (`find_containing_range`) rather than checking every range against every
+/// glyph — **this assumes `ranges` don't overlap**, true for
+/// `blockByteRanges`-derived block boundaries (the only real caller) but
+/// not enforced here; an overlapping pair would silently only credit the
+/// hit to one of them. Image hits (far rarer than glyphs, and matched by
+/// span-overlap rather than a single point) are still checked against every
+/// range directly — not worth the same bucketing complexity for something
+/// this infrequent. Results come back in the same order as `ranges`, not
+/// sorted order.
+pub fn geometry_for_ranges(
     world: &dyn typst::World,
     document: &PagedDocument,
-    range: Range<usize>,
-) -> Vec<RangeBox> {
-    let mut hits = Vec::new();
-    for (index, page) in document.pages().iter().enumerate() {
-        collect_hits(world, &page.frame, Point::zero(), index + 1, &range, &mut hits);
+    ranges: &[Range<usize>],
+) -> Vec<Vec<RangeBox>> {
+    if ranges.is_empty() {
+        return Vec::new();
     }
-    cluster_into_boxes(hits)
+
+    let mut order: Vec<usize> = (0..ranges.len()).collect();
+    order.sort_by_key(|&i| ranges[i].start);
+
+    let mut hits: Vec<Vec<Hit>> = (0..ranges.len()).map(|_| Vec::new()).collect();
+    for (index, page) in document.pages().iter().enumerate() {
+        collect_hits(world, &page.frame, Point::zero(), index + 1, ranges, &order, &mut hits);
+    }
+    hits.into_iter().map(cluster_into_boxes).collect()
 }
 
 /// Recursively walks `frame`, accumulating each item's position relative to
-/// the page origin. `origin` is only translated through nested `Group`s, not
-/// rotated/scaled by `GroupItem::transform` — a known simplification (see
+/// the page origin, and bucketing every hit into `hits[range_index]` for
+/// whichever of `ranges` it belongs to (see [`geometry_for_ranges`]).
+/// `origin` is only translated through nested `Group`s, not rotated/scaled
+/// by `GroupItem::transform` — a known simplification (see
 /// phase3-single-view.md) that holds for ordinary flow content (paragraphs,
 /// headings, lists, images) but not for content under `#rotate`/`#scale`.
 fn collect_hits(
@@ -110,20 +139,23 @@ fn collect_hits(
     frame: &Frame,
     origin: Point,
     page: usize,
-    range: &Range<usize>,
-    hits: &mut Vec<Hit>,
+    ranges: &[Range<usize>],
+    order: &[usize],
+    hits: &mut [Vec<Hit>],
 ) {
     for &(pos, ref item) in frame.items() {
         let abs_pos = origin + pos;
         match item {
             FrameItem::Group(group) => {
-                collect_hits(world, &group.frame, abs_pos, page, range, hits);
+                collect_hits(world, &group.frame, abs_pos, page, ranges, order, hits);
             }
             FrameItem::Text(text) => {
                 let mut x = abs_pos.x;
                 for glyph in &text.glyphs {
                     let width = glyph.x_advance.at(text.size);
-                    if glyph_source_offset(world, glyph).is_some_and(|o| range.contains(&o)) {
+                    if let Some(range_index) = glyph_source_offset(world, glyph)
+                        .and_then(|o| find_containing_range(ranges, order, o))
+                    {
                         // Typst's `Frame` doesn't expose real font-metrics
                         // ascent/descent for a glyph run, only the font
                         // size used to lay it out — the same approximation
@@ -131,7 +163,7 @@ fn collect_hits(
                         // `pos.y - text.size` .. `pos.y`).
                         let ascent = text.size.to_pt();
                         let descent = ascent * 0.25;
-                        hits.push(Hit {
+                        hits[range_index].push(Hit {
                             page,
                             x_pt: x.to_pt(),
                             y_top_pt: abs_pos.y.to_pt() - ascent,
@@ -144,20 +176,37 @@ fn collect_hits(
                 }
             }
             FrameItem::Image(_, size, span) => {
-                if span_overlaps(world, *span, range) {
-                    hits.push(Hit {
-                        page,
-                        x_pt: abs_pos.x.to_pt(),
-                        y_top_pt: abs_pos.y.to_pt(),
-                        width_pt: size.x.to_pt(),
-                        height_pt: size.y.to_pt(),
-                        baseline_from_top_pt: None,
-                    });
+                for (range_index, range) in ranges.iter().enumerate() {
+                    if span_overlaps(world, *span, range) {
+                        hits[range_index].push(Hit {
+                            page,
+                            x_pt: abs_pos.x.to_pt(),
+                            y_top_pt: abs_pos.y.to_pt(),
+                            width_pt: size.x.to_pt(),
+                            height_pt: size.y.to_pt(),
+                            baseline_from_top_pt: None,
+                        });
+                    }
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Finds which of `ranges` contains `offset`, via `order` (indices into
+/// `ranges` sorted by `start`) — binary search for the last range starting
+/// at or before `offset`, then a single containment check, in place of
+/// checking every range in turn. Relies on `ranges` not overlapping (see
+/// [`geometry_for_ranges`]'s own doc comment): with overlapping ranges this
+/// picks at most one of them, not every match.
+fn find_containing_range(ranges: &[Range<usize>], order: &[usize], offset: usize) -> Option<usize> {
+    let pos = order.partition_point(|&i| ranges[i].start <= offset);
+    if pos == 0 {
+        return None;
+    }
+    let candidate = order[pos - 1];
+    ranges[candidate].contains(&offset).then_some(candidate)
 }
 
 /// The exact source byte offset a glyph originated from: `typst-ide`'s own
@@ -249,6 +298,21 @@ mod tests {
     fn range_of(source: &str, needle: &str) -> Range<usize> {
         let start = source.find(needle).unwrap();
         start..start + needle.len()
+    }
+
+    /// Single-range convenience wrapper around `geometry_for_ranges`, kept
+    /// as a private test helper (not production API — `block_geometry`'s
+    /// real caller always wants the batched form) since most tests below
+    /// only care about one range at a time.
+    fn geometry_for_range(
+        world: &dyn typst::World,
+        document: &PagedDocument,
+        range: Range<usize>,
+    ) -> Vec<RangeBox> {
+        geometry_for_ranges(world, document, std::slice::from_ref(&range))
+            .into_iter()
+            .next()
+            .unwrap_or_default()
     }
 
     #[test]
@@ -363,6 +427,60 @@ mod tests {
 
         let pages: std::collections::BTreeSet<_> = boxes.iter().map(|b| b.page).collect();
         assert_eq!(pages, std::collections::BTreeSet::from([1, 2]), "{boxes:?}");
+    }
+
+    /// The whole point of `geometry_for_ranges`: batching several ranges into
+    /// one tree walk must produce exactly the same per-range boxes as the old
+    /// approach of calling `geometry_for_range` once per range — a golden
+    /// regression guard that the walk-once-and-bucket rewrite didn't change
+    /// any actual result, only how many times the tree gets walked.
+    #[test]
+    fn geometry_for_ranges_matches_calling_geometry_for_range_once_per_range() {
+        let source = "First paragraph here.\n\n\
+                       Second paragraph, a bit longer than the first one.\n\n\
+                       Third.";
+        let (world, document) = compile(source);
+        let ranges = vec![
+            range_of(source, "First paragraph here."),
+            range_of(source, "Second paragraph, a bit longer than the first one."),
+            range_of(source, "Third."),
+        ];
+
+        let batched = geometry_for_ranges(&world, &document, &ranges);
+        let individually: Vec<Vec<RangeBox>> = ranges
+            .iter()
+            .map(|r| geometry_for_range(&world, &document, r.clone()))
+            .collect();
+        assert_eq!(batched, individually);
+        assert!(batched.iter().all(|boxes| !boxes.is_empty()), "{batched:?}");
+    }
+
+    /// Results must come back indexed by the caller's own input order, not
+    /// re-sorted into document order — `order` (sorted by `start`, used
+    /// internally for the binary search) must never leak into the output.
+    #[test]
+    fn geometry_for_ranges_preserves_input_order_even_when_ranges_are_passed_out_of_document_order() {
+        let source = "Alpha paragraph.\n\nBravo paragraph.";
+        let (world, document) = compile(source);
+        let alpha = range_of(source, "Alpha paragraph.");
+        let bravo = range_of(source, "Bravo paragraph.");
+
+        // Deliberately reversed: bravo (later in the document) requested first.
+        let results = geometry_for_ranges(&world, &document, &[bravo.clone(), alpha.clone()]);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].len(), 1, "{results:?}");
+        assert_eq!(results[1].len(), 1, "{results:?}");
+        assert!(
+            results[0][0].y_top_pt > results[1][0].y_top_pt,
+            "results[0] must be bravo's (lower) box and results[1] alpha's (higher) box, \
+             matching the input order [bravo, alpha]: {results:?}"
+        );
+    }
+
+    #[test]
+    fn geometry_for_ranges_returns_an_empty_vec_for_an_empty_ranges_list() {
+        let (world, document) = compile("Hello world.");
+        assert_eq!(geometry_for_ranges(&world, &document, &[]), Vec::<Vec<RangeBox>>::new());
     }
 
     #[test]

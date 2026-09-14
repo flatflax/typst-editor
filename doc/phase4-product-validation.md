@@ -57,14 +57,11 @@ Full rationale in [interaction-design.md](interaction-design.md) §10.
    block boundary; reference-chain navigation UI for `#set`/`#let`/labels
    (interaction-design.md §10 item 14 — the interaction is designed, nothing is
    implemented).
-7. **Next task (promoted from "someday" given real-machine testing on a multi-page
-   document, 2026-09-11)**: the backend algorithmic fix for `geometry_for_range`
-   (`src-tauri/src/geometry.rs`) — invert its loop to walk each page's frame tree once and
-   bucket glyphs into whichever target range they fall in, instead of walking the whole
-   tree once per requested range. The most valuable fix specifically for editing
-   repeatedly across many locations in a large document (per-`source` caching can't help
-   there since every edit invalidates it) — see the lazy-fetch milestone below for the
-   full tradeoff analysis against the frontend-only mitigation actually shipped this pass.
+7. ~~**Backend algorithmic fix for `geometry_for_range`**~~ — done (2026-09-14, promoted
+   from "someday" given real-machine testing on a multi-page document, 2026-09-11): added
+   `geometry_for_ranges`, which walks each page's frame tree once for every requested range
+   together and buckets glyphs into whichever target range they fall in, instead of walking
+   the whole tree once per requested range. See Milestones below.
 
 ## Milestones
 
@@ -743,3 +740,188 @@ span (`pmTo - pmFrom`, wrappers excluded). Distinct from the byte-counting bug j
 same acceptable-approximation status this doc's earlier M5 interpolation note already
 established for single-point clicks, just not yet re-examined for range selections
 specifically.
+
+**Backend algorithmic fix for `geometry_for_range` (2026-09-14)**, promoted from "someday"
+in the "Next steps" list above once real-machine testing on the multi-page fixture showed
+the cost scaling badly with document size (see the lazy-fetch milestone above for the full
+tradeoff analysis against the frontend-only mitigation shipped at the time). `geometry.rs`'s
+`geometry_for_range` used to walk `document`'s entire frame tree once *per requested range*
+— `block_geometry`'s real caller (`compile.rs`) requests one range per on-screen block, so
+an N-block document cost N full tree walks per call, each re-resolving every glyph's source
+span from scratch via `glyph_source_offset`'s `world.range(span)` lookup. **Fixed** by adding
+`geometry_for_ranges`, which walks the tree exactly once for however many ranges are
+requested together, bucketing each hit into whichever range it falls in: a glyph's source
+byte offset is resolved once (not once per range), then matched against the target ranges by
+binary-searching them sorted by `start` (`find_containing_range`) rather than checking every
+range in turn. This assumes the ranges don't overlap — true for `blockByteRanges`-derived
+block boundaries (the only real caller) but not enforced by the function itself, documented
+plainly in its doc comment rather than asserted at runtime. Image hits (far rarer than
+glyphs, matched by span-overlap rather than a single point) are still checked against every
+range directly — not worth the same bucketing complexity for something this infrequent. The
+old single-range `geometry_for_range` stays, but only as a private test helper now (moved
+into `geometry.rs`'s own `mod tests`) — `block_geometry_with_world` (`compile.rs`) calls
+`geometry_for_ranges` directly, and no other production caller ever wanted the single-range
+form.
+
+Verified with a regression test (`geometry_for_ranges_matches_calling_geometry_for_range_once_per_range`)
+asserting the batched call produces byte-for-byte identical output to calling the old
+per-range function in a loop — the rewrite changes how many times the tree gets walked, not
+any actual result. Two more tests cover what the rewrite could plausibly have gotten wrong:
+results come back indexed by the caller's *input* order even when ranges are passed out of
+document order (the internal sort-by-`start` used for the binary search must never leak into
+the output), and an empty `ranges` list returns an empty `Vec` rather than panicking on the
+now-inverted loop structure. Full Rust suite (90 tests) and `cargo clippy --all-targets`
+clean; frontend `tsc`/`vitest` (278 tests) unaffected, since this is a backend-only change
+with the same `block_geometry` IPC shape as before.
+
+**Real-machine follow-up (2026-09-14): reported live as "focus-entry is still slow, neighbors
+still stuck on Compiling…" after the fix above landed.** Investigated directly against the
+Rust backend (temporary timing instrumentation, removed once the cause was found — this
+doc's own established pattern) rather than guessing from the frontend symptom alone, since
+the fix under test is backend-only. Two things confirmed, both good news, neither a
+correctness bug:
+- **The fix itself measurably works.** On a document close to the real
+  `m21-multipage-test.typ` fixture's size (7 pages, 81 blocks), 3 calls to the old
+  per-range function took 631ms total; one call to the new batched function took 195ms —
+  a real ~3.2x reduction, not just a theoretical one. Box counts matched exactly between
+  the two (`[3, 5, 4]` both ways) — no correctness regression, geometry keeps resolving
+  to real, non-empty content.
+- **The remaining ~195ms is a debug-build artifact, not a production-representative
+  number.** The identical comparison under `cargo test --release` came back at 16.7ms for
+  the batched call (49.5ms → 16.7ms, same ~3x ratio) — an 11.7x gap between debug and
+  release for the exact same code and document, matching this doc's own earlier M14
+  finding ("Typst's layout pass is 10x+ slower under `cargo test`'s default debug
+  profile"). `pnpm tauri dev` (what real-machine testing in this doc always runs under)
+  builds in that same unoptimized debug profile — confirmed from its own startup log,
+  `Finished `dev` profile [unoptimized + debuginfo]` — so this ~200ms-class latency during
+  development is expected, was already present (worse, at ~600ms-class) before today's
+  fix, and is not representative of what a release build would feel like.
+
+Net: today's fix is confirmed correct and effective (~3x faster by construction, verified
+by direct measurement, not just by algorithmic reasoning); the "still feels slow" report
+reflects a pre-existing, debug-build-only cost this particular fix was never going to
+eliminate (it targets the *walk-count* multiplier, not the underlying per-glyph
+`world.range(span)` cost, which is what actually dominates in an unoptimized build). Not
+promoted to a further task on that basis — revisit only if the same slowness is confirmed
+to persist in a release build, which this measurement suggests it won't.
+
+**Found via the same real-machine follow-up: a genuine, pre-existing correctness bug —
+"the first two blocks stay stuck on Compiling… forever."** Not the timing question above;
+a real bug in the *frontend's* lazy-ink-tracking logic (`fairShareBoundsFromInk`,
+`splitLayout.ts`), unrelated to today's backend change — it already existed under the old
+per-range-call code too, just never surfaced before because nothing had previously tested a
+document whose first block renders *nothing at all*. `test-fixtures/m21-multipage-test.typ`
+opens with `#set text(size: 11pt)` — a real block boundary (`blockByteRanges` splits on the
+blank line after it) but zero glyphs, so `unionYRange` of its (empty) box list returns
+`null`. `blockInkRangesRef` only ever recorded an index when `ink` was truthy
+(`if (ink) blockInkRangesRef.current.set(i, ink)`), so this block's entry was never written —
+indistinguishable from "not fetched yet." Two consequences, confirmed by reading the code
+rather than guessed: (1) this block itself would be re-fetched on every single focus/switch/
+scroll near it, forever, since `toFetch`'s filter only excluded indices already *in* the ink
+map; (2) `fairShareBoundsFromInk`'s own null-if-neighbor-unknown rule then permanently
+blocked the *next* block too (`= Section 0`, which renders completely normally on its own) —
+its fair-share midpoint needs to know where block 0 sits, and block 0 was never going to
+report back. Exactly matches the live symptom: the first two blocks, specifically.
+
+**Fixed**: `blockEmptyIndicesRef` (`TypstLiveView.tsx`) now records "fetched, confirmed zero
+glyphs" separately from "has real ink," checked by both the `toFetch` filter and the
+`IntersectionObserver` callback's skip check, so an empty block stops being endlessly
+re-fetched. `fairShareBoundsFromInk` (`splitLayout.ts`) takes this set as a new parameter and
+walks *past* confirmed-empty neighbors (`nearestRealInk`) when looking for the nearest real
+ink to share a midpoint boundary with, instead of returning `null` forever the moment it
+meets one — an invisible block occupies no vertical space, so it's transparent for this
+purpose. A block that is itself confirmed-empty gets a genuine zero-height share, anchored at
+the midpoint between its own nearest real neighbors (there's nothing of its own to crop, so
+any positive height would just show blank page under its name for no reason). Handles
+multiple consecutive empty blocks (e.g. several `#set`/`#let` lines in a row) by continuing
+the walk past all of them, not just one.
+
+Four new unit tests (`splitLayout.test.ts`): an empty block gets a correct zero-height
+midpoint share; a real block whose only-known neighbor is empty resolves via the page edge
+instead of waiting on it forever; the walk correctly skips *multiple* consecutive empty
+blocks to find real ink on either side; and — the key non-regression check — a genuinely
+not-yet-fetched neighbor (neither ink nor confirmed-empty) still correctly returns `null`
+("not ready"), so the fix doesn't accidentally treat "unknown" and "empty" as the same
+thing. `tsc --noEmit` clean; full suite now 282 tests, all passing. Confirmed live: block 0
+resolves out of "Compiling…" into a real (zero-height) crop instead of staying stuck forever.
+
+**Found via that same real-machine confirmation: focusing a block far into a large,
+mostly-unfetched document visually "jumped back to page 1."** Not a navigation bug — a
+"Compiling…" placeholder (`.typst-live-block-placeholder`) reserved no height of its own
+(one line of italic text), and entering split mode only prefetches `[idx-1, idx, idx+1]`
+(the lazy-fetch milestone above), so every other block — including dozens of pages' worth of
+real content above the clicked one — collapsed to a sliver of placeholder text the instant
+focus entered. The newly-focused block's *actual* DOM position, in that artificially
+compressed layout, really was near the top — the browser's native focus-triggered
+auto-scroll then (correctly, given the layout it saw) scrolled there. As each placeholder
+above the focused block later resolved to its real (usually much taller) height and pushed
+things down in normal document flow, the fixed scroll position was never re-corrected,
+compounding the same problem on every resolution.
+
+**Fixed, two complementary pieces** (deliberately both — one alone narrows the problem, the
+other alone leaves it to correct itself late):
+- `estimatePlaceholderHeightPt` (`splitLayout.ts`, new, unit-tested): estimates an unfetched
+  block's height from its own byte length, calibrated against whatever real ink-to-byte
+  ratio is already known from other resolved blocks in the same document — self-calibrating
+  rather than a hardcoded guess, falling back to a rough constant (~14pt/80 bytes, ~11pt body
+  text) only for the very first paint before anything has resolved to calibrate against.
+  Applied as each placeholder's `min-height` (`TypstLiveView.tsx`'s `renderOtherBlock`, scaled
+  pt→px the same way focused-block margins already are). Narrows the compression — an
+  imperfect estimate is still far closer to reality than zero.
+- An explicit scroll correction (`TypstLiveView.tsx`): `el.focus()` on the newly-focused
+  textarea now passes `preventScroll: true` (suppressing the browser's own auto-scroll, which
+  fires against whatever the still-mostly-unresolved layout looks like at that exact instant)
+  and a separate `useLayoutEffect`, keyed on `[focusedBlock, otherBlocksYRanges]` (not just the
+  initial focus), calls `el.scrollIntoView({ block: "nearest" })` instead — re-running, and
+  re-correcting, every time a sibling's placeholder resolves and shifts the focused block's
+  position, not just once.
+
+Four new unit tests for `estimatePlaceholderHeightPt` (`splitLayout.test.ts`): scales linearly
+with byte length once a ratio is known; averages across every known block, not just the
+first; falls back to the documented constant (not zero, not `NaN`) when nothing is known yet;
+handles a zero-byte-length known block without producing `NaN`. `tsc --noEmit` clean; full
+suite now 286 tests, all passing.
+
+**The fix above did not actually fix it — real-machine re-testing (2026-09-14) still showed
+the jump.** Both the placeholder-height estimate and the `scrollIntoView` correction address
+a real effect (split mode's initial layout is shorter than the real document until more of it
+resolves), but neither was the reported bug's actual cause, and re-testing confirmed the jump
+was completely unchanged. Investigated further with direct instrumentation rather than
+another guess: a temporary capture-phase `scroll` listener on `document` showed the user
+genuinely scrolling `.typst-live-view` deep into the document (`scrollTop` climbing past
+7000), then — right as a click registered — several consecutive `scroll` events fired with
+no valid `event.target` at all, immediately followed by `.typst-live-view` reporting
+`scrollTop: 0`. Two follow-up hypotheses built on this evidence (restoring from
+`lastScrollRef` on the `focusedBlock` transition, then a dedicated pre-transition snapshot
+ref to sidestep a suspected race where the reset's own `scroll` event corrupted
+`lastScrollRef` before the restore could read it) were each implemented, tested live, and
+each still failed to fix it — real, incremental root-causing, not a single lucky guess.
+
+**Actual root cause**: `.typst-live-hidden-input` (the always-mounted textarea that captures
+keystrokes/IME in combined mode) is styled `position: absolute; top: 0; left: 0` — relative
+to `.typst-live-stage`, which *is* the full-height combined-mode content, not the viewport.
+It has always sat at the very top of the whole document, at every scroll position, since M20.
+`handleMouseDown` calls `hiddenInputRef.current?.focus()` on *every* mousedown (needed so the
+hidden input keeps keyboard focus for the click that follows) without `preventScroll` — the
+browser's default "scroll the newly-focused element into view" then fires immediately,
+snapping `.typst-live-view` back to `scrollTop: 0` on every single click, before
+`offsetAtClient` even reads the click's coordinates. This is why a click made while scrolled
+deep into the document could *also* resolve to the wrong (much earlier) offset entirely,
+reported separately earlier the same day: `svgPointFromClient`'s `getBoundingClientRect()`
+read happens synchronously, by which point the container had already jumped back to the top
+underneath it — one root cause explaining two reported symptoms.
+
+**Fixed**: both of `hiddenInputRef`'s `.focus()` call sites (`handleMouseDown`, and the
+handoff-focus-restore call documented earlier this doc) now pass `{ preventScroll: true }`.
+The earlier placeholder-height-estimate and `scrollIntoView`/scroll-restore mechanisms are
+kept, not reverted — they address a real, separate effect (split mode's layout being
+genuinely shorter than the real document until unresolved siblings' geometry arrives) that
+remains worth having even with the actual bug fixed. Confirmed live: focusing a block deep in
+the multi-page fixture after scrolling down now correctly expands that block in place,
+without the view jumping back to the top.
+
+**Not yet investigated, next**: focusing a block correctly expands it in place, but the
+*other* blocks' "Compiling…" placeholders don't resolve starting from near the newly-focused
+block outward — the resolution order doesn't currently prioritize what's nearest the user's
+actual attention. Reported live immediately after the scroll-jump fix; needs its own look at
+`ensureBlockGeometry`/the `IntersectionObserver` wiring's effective fetch order.

@@ -95,6 +95,7 @@ import {
 import { blockAt, blockByteRanges } from "./blockSplit";
 import {
   cropSvgVertically,
+  estimatePlaceholderHeightPt,
   fairShareBoundsFromInk,
   focusedLayoutPxFromInk,
   pageDimsFromSvg,
@@ -186,6 +187,22 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
 
   function handleContainerScroll(event: React.UIEvent<HTMLDivElement>) {
     lastScrollRef.current = { top: event.currentTarget.scrollTop, left: event.currentTarget.scrollLeft };
+  }
+
+  // A snapshot taken deliberately, right before entering/switching focus —
+  // *not* the same thing as `lastScrollRef`. Found live (2026-09-14):
+  // restoring from `lastScrollRef` alone still lost the scroll position,
+  // because the reset this is working around (below) itself fires a native
+  // `scroll` event on `.typst-live-view` the instant the DOM swap happens —
+  // `handleContainerScroll` dutifully records *that* (now-zeroed) position
+  // into `lastScrollRef` before the restore effect gets a chance to read
+  // the real one. Captured synchronously at the very start of
+  // `enterFocus`/`switchFocusTo`, strictly before anything that could
+  // trigger the swap, so nothing has a chance to corrupt it first.
+  const pendingScrollRestoreRef = useRef<{ top: number; left: number } | null>(null);
+  function captureScrollForFocusTransition() {
+    const el = scrollContainerRef.current;
+    pendingScrollRestoreRef.current = el ? { top: el.scrollTop, left: el.scrollLeft } : null;
   }
 
   useLayoutEffect(() => {
@@ -332,6 +349,16 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // (any commit invalidates every block's position, since blocks after the
   // edited one may have reflowed).
   const blockInkRangesRef = useRef<Map<number, BlockYRange>>(new Map());
+  // Indices fetched and confirmed to render literally nothing (e.g. a
+  // `#set`/`#let` line — a real block boundary, but zero glyphs). Found live
+  // (2026-09-14): `unionYRange` of an empty box list is `null`, so such a
+  // block never went into `blockInkRangesRef` — indistinguishable from "not
+  // fetched yet", so it was refetched forever *and* permanently blocked its
+  // neighbor's own fair-share math (which needs to know this block's
+  // position too) from ever resolving, leaving both stuck on "Compiling…".
+  // Tracked separately so `fairShareBoundsFromInk` can treat "confirmed
+  // empty" as resolved (skip it) rather than "still waiting."
+  const blockEmptyIndicesRef = useRef<Set<number>>(new Set());
   const blockInkSourceRef = useRef<string | null>(null);
   const contentBoundsRef = useRef<ContentBoundsPt | null>(null);
   const pendingBlockFetchRef = useRef<Set<number>>(new Set());
@@ -343,6 +370,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   ): Promise<FocusedLayoutPx | null> {
     if (blockInkSourceRef.current !== effectiveSource) {
       blockInkRangesRef.current = new Map();
+      blockEmptyIndicesRef.current = new Set();
       contentBoundsRef.current = null;
       pendingBlockFetchRef.current = new Set();
       blockInkSourceRef.current = effectiveSource;
@@ -357,7 +385,10 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     const totalBlocks = blockByteRanges(effectiveSource).length;
     const validIndices = indices.filter((i) => i >= 0 && i < totalBlocks);
     const toFetch = validIndices.filter(
-      (i) => !blockInkRangesRef.current.has(i) && !pendingBlockFetchRef.current.has(i),
+      (i) =>
+        !blockInkRangesRef.current.has(i) &&
+        !blockEmptyIndicesRef.current.has(i) &&
+        !pendingBlockFetchRef.current.has(i),
     );
 
     if (toFetch.length > 0) {
@@ -383,6 +414,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
           const boxes = results![n];
           const ink = unionYRange(selectionRectsFromBoxes(pageOffsetsPt, boxes));
           if (ink) blockInkRangesRef.current.set(i, ink);
+          else blockEmptyIndicesRef.current.add(i);
           contentBoundsRef.current = widenContentBounds(contentBoundsRef.current, boxes);
         });
       }
@@ -394,7 +426,13 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     const otherUpdates = new Map<number, BlockYRange>();
     for (const i of validIndices) {
       if (i === focusedIdx) continue;
-      const bounds = fairShareBoundsFromInk(i, blockInkRangesRef.current, totalBlocks, pageDims.heightPt);
+      const bounds = fairShareBoundsFromInk(
+        i,
+        blockInkRangesRef.current,
+        blockEmptyIndicesRef.current,
+        totalBlocks,
+        pageDims.heightPt,
+      );
       if (bounds) otherUpdates.set(i, bounds);
     }
     if (otherUpdates.size > 0) {
@@ -406,7 +444,13 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     }
 
     if (focusedIdx == null) return null;
-    const focusedFairShare = fairShareBoundsFromInk(focusedIdx, blockInkRangesRef.current, totalBlocks, pageDims.heightPt);
+    const focusedFairShare = fairShareBoundsFromInk(
+      focusedIdx,
+      blockInkRangesRef.current,
+      blockEmptyIndicesRef.current,
+      totalBlocks,
+      pageDims.heightPt,
+    );
     const focusedOwnInk = blockInkRangesRef.current.get(focusedIdx);
     if (!focusedFairShare || !focusedOwnInk || !contentBoundsRef.current) return null;
     return focusedLayoutPxFromInk(focusedFairShare, focusedOwnInk, contentBoundsRef.current, pageDims, lockedWidthPxRef.current);
@@ -435,7 +479,12 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
             if (!entry.isIntersecting) continue;
             const idx = elementToBlockIndexRef.current.get(entry.target);
             if (idx == null) continue;
-            if (blockInkSourceRef.current === sourceRef.current && blockInkRangesRef.current.has(idx)) continue;
+            if (
+              blockInkSourceRef.current === sourceRef.current &&
+              (blockInkRangesRef.current.has(idx) || blockEmptyIndicesRef.current.has(idx))
+            ) {
+              continue;
+            }
             void ensureBlockGeometry(sourceRef.current, focusedBlockRef.current, [idx - 1, idx, idx + 1]);
           }
         },
@@ -463,6 +512,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // shown as a native textarea (a plain click, or landing back on a single
   // block after a cross-block drag collapses to one — see `handleMouseUp`).
   async function enterFocus(idx: number, widthSourceSvg: SVGSVGElement | null) {
+    captureScrollForFocusTransition();
     const ranges = blockByteRanges(source);
     lockedWidthPxRef.current = widthSourceSvg?.getBoundingClientRect().width ?? null;
     const focusedLayoutPx = await ensureBlockGeometry(source, idx, [idx - 1, idx, idx + 1]);
@@ -495,6 +545,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // rather than trusting its old array index, which the commit can shift
   // out from under it.
   async function switchFocusTo(oldIdx: number, event: React.MouseEvent<HTMLDivElement>) {
+    captureScrollForFocusTransition();
     const oldRanges = blockByteRanges(source);
     let effectiveSource = source;
     let targetByte = oldRanges[oldIdx][0];
@@ -537,12 +588,85 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     if (focusedBlock === null) return;
     const el = focusedTextareaRef.current;
     if (!el) return;
-    el.focus();
+    // `preventScroll` — the correction below (keyed on `otherBlocksYRanges`
+    // too, so it re-runs as sibling placeholders resolve) is what actually
+    // decides where to scroll; the browser's own focus-triggered auto-scroll
+    // would otherwise fire first, against whatever the *still-mostly-
+    // unresolved* layout looks like at this exact instant.
+    el.focus({ preventScroll: true });
     const pos = pendingCursorUtf16Ref.current ?? el.value.length;
     pendingCursorUtf16Ref.current = null;
     el.setSelectionRange(pos, pos);
     autosizeTextarea(el);
   }, [focusedBlock]);
+
+  // Keeps the focused block's textarea in view as sibling "Compiling…"
+  // placeholders resolve to their real (often much taller) height and push
+  // it around in normal document flow. Found live (2026-09-14): a
+  // placeholder reserves no real height of its own (just one line of
+  // italic text) until its block's geometry resolves — entering focus deep
+  // in a large, mostly-unfetched document could visually compress
+  // everything above the clicked block down to a few placeholder lines,
+  // making the newly-focused block appear to jump back near the top the
+  // instant it's focused (not actually "page 1", just wherever the
+  // artificially-compressed layout put it), and then jump *again* every
+  // time an earlier sibling above it resolves and grows. Re-running this on
+  // every `otherBlocksYRanges` update (not just the initial focus) corrects
+  // each of those growth-driven shifts as they happen, instead of only the
+  // first one. `"nearest"` is a no-op once the element is already in view,
+  // so this doesn't fight the user's own subsequent scrolling.
+  // Entering or leaving split mode replaces `.typst-live-view`'s entire
+  // child content (the combined SVG <-> the per-block textarea/crop list) —
+  // the same kind of full content replacement the effect above already
+  // fixes for `svg` updates, and the browser resets `scrollTop` to 0 for it
+  // exactly the same way. Found live (2026-09-14): clicking to focus a
+  // block while a scroll gesture's own momentum/inertia was still settling
+  // made this land right in the middle of that reset, orphaning the
+  // in-flight momentum entirely (confirmed via a temporary `scroll` event
+  // listener: several consecutive events fired with no valid `target` at
+  // all right as the swap happened) — reproduced as "focusing a block deep
+  // in the document jumps back to the top."
+  //
+  // Restoring from `lastScrollRef` the same way the effect above does
+  // *looked* right but still lost the position live: the reset itself
+  // fires a native `scroll` event on `.typst-live-view` (scrollTop actually
+  // changing, even if the browser — not the user — is what changed it),
+  // which `handleContainerScroll` dutifully records into `lastScrollRef`
+  // *before* this effect gets a chance to read the real, pre-reset value.
+  // `pendingScrollRestoreRef` sidesteps that entirely: it's captured
+  // synchronously in `enterFocus`/`switchFocusTo`, strictly before anything
+  // that could trigger the swap, so there's no window for the reset to
+  // corrupt it first. Falls back to `lastScrollRef` for any other path that
+  // ends up changing `focusedBlock` without going through that capture.
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const pending = pendingScrollRestoreRef.current;
+    pendingScrollRestoreRef.current = null;
+    el.scrollTop = pending ? pending.top : lastScrollRef.current.top;
+    el.scrollLeft = pending ? pending.left : lastScrollRef.current.left;
+  }, [focusedBlock]);
+
+  // Keeps the focused block's textarea in view as sibling "Compiling…"
+  // placeholders resolve to their real (often much taller) height and push
+  // it around in normal document flow — a finer-grained correction on top
+  // of the raw scrollTop restore above, which only gets back to roughly the
+  // right neighborhood, not necessarily the focused block's own exact
+  // position once its preceding siblings' estimated heights settle. Found
+  // live (2026-09-14): a placeholder reserves no real height of its own
+  // (just one line of italic text, or now an estimate — see
+  // `estimatePlaceholderHeightPt` — that's still only approximate) until
+  // its block's geometry resolves, so an earlier sibling resolving and
+  // growing/shrinking after the initial restore could still nudge the
+  // focused block out of view. Re-running this on every `otherBlocksYRanges`
+  // update (not just the initial focus) corrects each of those growth-driven
+  // shifts as they happen. `"nearest"` is a no-op once the element is
+  // already in view, so this doesn't fight the user's own subsequent
+  // scrolling.
+  useLayoutEffect(() => {
+    if (focusedBlock === null) return;
+    focusedTextareaRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [focusedBlock, otherBlocksYRanges]);
 
   // Resolves where a drag that continued out of a focused block's textarea
   // and was released in combined-mode territory should land — once every
@@ -571,7 +695,9 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     // resulting cross-block selection is supposed to support — arrow-key
     // collapse, typing/Backspace to replace or delete it — silently went
     // nowhere, since `handleKeyDown` is wired to this element specifically.
-    hiddenInputRef.current?.focus();
+    // `preventScroll` — see `handleMouseDown`'s own call to this same
+    // element for why (2026-09-14).
+    hiddenInputRef.current?.focus({ preventScroll: true });
   }
 
   const pendingHandoffResolutionRef = useRef<{
@@ -842,7 +968,23 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     // event (typing, arrow keys) ever reaches it, even though this handler
     // itself runs fine (which is why click-to-position still worked).
     event.preventDefault();
-    hiddenInputRef.current?.focus();
+    // `preventScroll` — found live (2026-09-14) to be the *actual* root
+    // cause of "clicking deep in a long, scrolled document snaps back to
+    // the top": `.typst-live-hidden-input` is `position: absolute; top: 0;
+    // left: 0` relative to `.typst-live-stage` (the *entire* tall combined-
+    // mode content, not the viewport) — i.e. it always sits at the very top
+    // of the whole document, regardless of current scroll position. Without
+    // `preventScroll`, the browser's default "scroll the newly-focused
+    // element into view" behavior fired on *every* mousedown, snapping
+    // `.typst-live-view` back to scrollTop 0 before `offsetAtClient` below
+    // even reads the click's coordinates — which is also why a click made
+    // while scrolled down could resolve to the wrong (much earlier) offset
+    // entirely: by the time `getBoundingClientRect()` ran, the container had
+    // already jumped back to the top underneath it. Chased through several
+    // wrong hypotheses (a split-mode placeholder-height/DOM-swap scroll
+    // reset, momentum-scroll timing) before direct instrumentation traced it
+    // to this specific unguarded `.focus()` call.
+    hiddenInputRef.current?.focus({ preventScroll: true });
     // Set synchronously, not inside the `.then()` below — `offsetAtClient`
     // is async (an `invoke` round-trip, doubled when it falls back to the
     // blank-space snap), so a fast click's `mouseup` can fire and clear
@@ -1230,6 +1372,25 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     // pixels at that point, and `yRange` (fetched fresh against the current
     // source) would cut the wrong band out of them.
     const cropped = !isPending && svg && yRange ? cropSvgVertically(svg, yRange.yTopPt, yRange.heightPt) : null;
+
+    // A placeholder's `min-height`, estimated from this block's own byte
+    // length against whatever real ink-to-byte ratio other already-resolved
+    // blocks establish — see `estimatePlaceholderHeightPt`'s own doc comment
+    // for why a plain one-line placeholder isn't good enough on its own.
+    let placeholderMinHeightPx: number | undefined;
+    if (!cropped) {
+      const ranges = blockByteRanges(source);
+      const [start, end] = ranges[idx] ?? [0, 0];
+      const known = [...blockInkRangesRef.current.entries()].map(([i, r]) => {
+        const [s, e] = ranges[i] ?? [0, 0];
+        return { byteLength: e - s, heightPt: r.heightPt };
+      });
+      const estimatedPt = estimatePlaceholderHeightPt(end - start, known);
+      const pageDims = pageDimsFromSvg(svg);
+      const scale = pageDims ? (lockedWidthPxRef.current ?? pageDims.widthPt) / pageDims.widthPt : 1;
+      placeholderMinHeightPx = estimatedPt * scale;
+    }
+
     return (
       <div
         key={idx}
@@ -1242,7 +1403,9 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
         {cropped ? (
           <div className="typst-live-block-rendered-svg" dangerouslySetInnerHTML={{ __html: cropped }} />
         ) : (
-          <p className="typst-live-block-placeholder">Compiling…</p>
+          <p className="typst-live-block-placeholder" style={{ minHeight: placeholderMinHeightPx }}>
+            Compiling…
+          </p>
         )}
       </div>
     );

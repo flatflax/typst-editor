@@ -3,6 +3,7 @@ import type { RawRangeBox } from "./typstCursor";
 import {
   computeSplitLayoutFromBoxes,
   cropSvgVertically,
+  estimatePlaceholderHeightPt,
   fairShareBoundsForIndex,
   fairShareBoundsFromInk,
   focusedLayoutPxFromInk,
@@ -88,6 +89,36 @@ describe("cropSvgVertically", () => {
   });
 });
 
+describe("estimatePlaceholderHeightPt", () => {
+  it("scales linearly with byte length once a real ink-to-byte ratio is known", () => {
+    // One known block: 100 bytes -> 20pt tall, i.e. 0.2pt/byte.
+    const known = [{ byteLength: 100, heightPt: 20 }];
+    expect(estimatePlaceholderHeightPt(50, known)).toBeCloseTo(10);
+    expect(estimatePlaceholderHeightPt(200, known)).toBeCloseTo(40);
+  });
+
+  it("averages the ratio across every known block, not just the first", () => {
+    const known = [
+      { byteLength: 100, heightPt: 20 }, // 0.2 pt/byte
+      { byteLength: 100, heightPt: 40 }, // 0.4 pt/byte
+    ];
+    // Combined: 200 bytes -> 60pt, i.e. 0.3 pt/byte average.
+    expect(estimatePlaceholderHeightPt(100, known)).toBeCloseTo(30);
+  });
+
+  it("falls back to a fixed rough guess when nothing is known yet, instead of collapsing to zero", () => {
+    const estimate = estimatePlaceholderHeightPt(80, []);
+    expect(estimate).toBeGreaterThan(0);
+    // Matches the documented fallback constant (14pt line height / 80 bytes).
+    expect(estimate).toBeCloseTo(14);
+  });
+
+  it("ignores blocks with zero byte length in the known set rather than producing NaN", () => {
+    const known = [{ byteLength: 0, heightPt: 0 }];
+    expect(Number.isFinite(estimatePlaceholderHeightPt(50, known))).toBe(true);
+  });
+});
+
 describe("computeSplitLayoutFromBoxes", () => {
   const pageDims = { widthPt: 600, heightPt: 800 };
   const pageOffsetsPt = [0];
@@ -161,9 +192,11 @@ describe("computeSplitLayoutFromBoxes", () => {
 describe("fairShareBoundsFromInk", () => {
   const pageHeightPt = 800;
 
+  const noEmptyBlocks: ReadonlySet<number> = new Set();
+
   it("returns null when the block's own ink isn't known yet", () => {
     const inkRanges = new Map([[1, { yTopPt: 200, heightPt: 40 }]]);
-    expect(fairShareBoundsFromInk(0, inkRanges, 3, pageHeightPt)).toBeNull();
+    expect(fairShareBoundsFromInk(0, inkRanges, noEmptyBlocks, 3, pageHeightPt)).toBeNull();
   });
 
   it("returns null when a neighbor that genuinely exists hasn't been fetched yet", () => {
@@ -172,7 +205,7 @@ describe("fairShareBoundsFromInk", () => {
       [0, { yTopPt: 100, heightPt: 40 }],
       [1, { yTopPt: 200, heightPt: 40 }],
     ]);
-    expect(fairShareBoundsFromInk(1, inkRanges, 3, pageHeightPt)).toBeNull();
+    expect(fairShareBoundsFromInk(1, inkRanges, noEmptyBlocks, 3, pageHeightPt)).toBeNull();
   });
 
   it("does not wait for a neighbor that doesn't exist (first/last block)", () => {
@@ -181,11 +214,11 @@ describe("fairShareBoundsFromInk", () => {
       [1, { yTopPt: 200, heightPt: 40 }],
     ]);
     // block 0 is first (no prev needed) but still needs block 1 (its only neighbor).
-    const first = fairShareBoundsFromInk(0, inkRanges, 2, pageHeightPt);
+    const first = fairShareBoundsFromInk(0, inkRanges, noEmptyBlocks, 2, pageHeightPt);
     expect(first).not.toBeNull();
     expect(first!.yTopPt).toBe(0);
     // block 1 is last (no next needed) and has its only neighbor (block 0).
-    const last = fairShareBoundsFromInk(1, inkRanges, 2, pageHeightPt);
+    const last = fairShareBoundsFromInk(1, inkRanges, noEmptyBlocks, 2, pageHeightPt);
     expect(last).not.toBeNull();
     expect(last!.yTopPt + last!.heightPt).toBe(pageHeightPt);
   });
@@ -198,10 +231,74 @@ describe("fairShareBoundsFromInk", () => {
     ];
     const inkRanges = new Map(dense.map((r, i) => [i, r] as const));
     for (let i = 0; i < dense.length; i++) {
-      expect(fairShareBoundsFromInk(i, inkRanges, dense.length, pageHeightPt)).toEqual(
+      expect(fairShareBoundsFromInk(i, inkRanges, noEmptyBlocks, dense.length, pageHeightPt)).toEqual(
         fairShareBoundsForIndex(i, dense, pageHeightPt),
       );
     }
+  });
+
+  // Regression guard for a bug found live (2026-09-14): a block that renders
+  // literally nothing (e.g. a `#set text(...)` line — a real block boundary,
+  // but zero glyphs, so its own ink can never arrive) used to be
+  // indistinguishable from "not fetched yet", which meant it could never
+  // resolve out of its own placeholder *and* permanently blocked its
+  // neighbor's fair share too, since the neighbor's own midpoint math needs
+  // to know where this block sits.
+  describe("with a confirmed-empty block (e.g. a #set line)", () => {
+    it("gives the empty block itself a zero-height share at the midpoint of its real neighbors", () => {
+      // Document: [real block 0] [empty block 1] [real block 2].
+      const inkRanges = new Map([
+        [0, { yTopPt: 100, heightPt: 40 }],
+        [2, { yTopPt: 300, heightPt: 40 }],
+      ]);
+      const emptyBlocks = new Set([1]);
+      const result = fairShareBoundsFromInk(1, inkRanges, emptyBlocks, 3, pageHeightPt);
+      expect(result).not.toBeNull();
+      expect(result!.heightPt).toBe(0);
+      // Midpoint between block 0's bottom edge (140) and block 2's top edge (300).
+      expect(result!.yTopPt).toBe((140 + 300) / 2);
+    });
+
+    it("does not block its neighbor from resolving — the empty block is skipped, not waited on", () => {
+      // Document: [empty block 0] [real block 1] [real block 2]. Block 1's
+      // own fair share needs a "previous neighbor" position, but block 0
+      // will never have real ink — it must resolve by walking past block 0
+      // to the page edge instead of returning null forever.
+      const inkRanges = new Map([
+        [1, { yTopPt: 200, heightPt: 40 }],
+        [2, { yTopPt: 300, heightPt: 40 }],
+      ]);
+      const emptyBlocks = new Set([0]);
+      const result = fairShareBoundsFromInk(1, inkRanges, emptyBlocks, 3, pageHeightPt);
+      expect(result).not.toBeNull();
+      expect(result!.yTopPt).toBe(0); // no real block before it -> page top, not stuck waiting on block 0
+    });
+
+    it("skips past multiple consecutive empty blocks to find real ink on either side", () => {
+      // [real 0] [empty 1] [empty 2] [real 3].
+      const inkRanges = new Map([
+        [0, { yTopPt: 100, heightPt: 40 }],
+        [3, { yTopPt: 400, heightPt: 40 }],
+      ]);
+      const emptyBlocks = new Set([1, 2]);
+      const resultForBlock1 = fairShareBoundsFromInk(1, inkRanges, emptyBlocks, 4, pageHeightPt);
+      expect(resultForBlock1).not.toBeNull();
+      expect(resultForBlock1!.heightPt).toBe(0);
+      const resultForBlock0 = fairShareBoundsFromInk(0, inkRanges, emptyBlocks, 4, pageHeightPt);
+      // block 0's next real neighbor is block 3, skipping over 1 and 2.
+      expect(resultForBlock0).not.toBeNull();
+      expect(resultForBlock0!.yTopPt + resultForBlock0!.heightPt).toBe((140 + 400) / 2);
+    });
+
+    it("still waits (returns null) for a genuinely not-yet-fetched neighbor, not confusing it with an empty one", () => {
+      // Document: [real 0] [unknown 1, neither ink nor confirmed empty] [real 2].
+      const inkRanges = new Map([
+        [0, { yTopPt: 100, heightPt: 40 }],
+        [2, { yTopPt: 300, heightPt: 40 }],
+      ]);
+      const emptyBlocks: ReadonlySet<number> = new Set(); // block 1 is neither known nor empty
+      expect(fairShareBoundsFromInk(0, inkRanges, emptyBlocks, 3, pageHeightPt)).toBeNull();
+    });
   });
 });
 

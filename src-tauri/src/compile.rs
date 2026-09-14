@@ -195,9 +195,15 @@ pub fn compile_typst(
 /// `block_geometry` are typically called back-to-back for the same source,
 /// so this second `typst::compile` call is effectively free — `comemo`'s
 /// full cache hit on unchanged content, per M14's persistent-`World`
-/// benchmark — not a second real recompile. A failed compile returns one
-/// empty `Vec` per requested range rather than erroring, matching
-/// `geometry_for_range`'s own "no match" behavior for an unmatched range.
+/// benchmark — not a second real recompile. Delegates to
+/// `geometry::geometry_for_ranges`, which walks the document's frame tree
+/// once for every range requested here together, not once per range — see
+/// its own doc comment; this is the fix promoted from "someday" once
+/// real-machine testing on a genuinely long multi-page document (Phase 4,
+/// phase4-product-validation.md) showed the old one-tree-walk-per-range cost
+/// scaling badly with document size. A failed compile returns one empty
+/// `Vec` per requested range rather than erroring, matching
+/// `geometry_for_ranges`'s own "no match" behavior for an unmatched range.
 fn block_geometry_with_world(
     world: &mut TauriWorld,
     source: String,
@@ -207,16 +213,17 @@ fn block_geometry_with_world(
     sync_session(world, source, base_dir);
 
     match typst::compile::<PagedDocument>(&*world).output {
-        Ok(document) => ranges
-            .into_iter()
-            .map(|(start, end)| geometry::geometry_for_range(&*world, &document, start..end))
-            .collect(),
+        Ok(document) => {
+            let ranges: Vec<Range<usize>> =
+                ranges.into_iter().map(|(start, end)| start..end).collect();
+            geometry::geometry_for_ranges(&*world, &document, &ranges)
+        }
         Err(_) => ranges.iter().map(|_| Vec::new()).collect(),
     }
 }
 
 /// Batched (one round trip covering every range the frontend needs
-/// positioned, not one call per range) — M14A's `geometry_for_range`, wired
+/// positioned, not one call per range) — M14A's `geometry_for_ranges`, wired
 /// to the frontend for M20's cursor/selection/hit-testing work.
 #[tauri::command]
 pub fn block_geometry(
@@ -377,7 +384,7 @@ mod tests {
 
     /// `block_geometry`'s underlying logic returns real page-1 boxes for a
     /// range that actually renders — the same span-matching
-    /// `geometry_for_range` (geometry.rs) already proved, exercised here
+    /// `geometry_for_ranges` (geometry.rs) already proved, exercised here
     /// through the session-held `TauriWorld` path the real command uses.
     #[test]
     fn block_geometry_returns_boxes_for_a_range_that_renders() {
@@ -396,7 +403,7 @@ mod tests {
 
     /// A range with nothing rendered at it (out of bounds, or pointing at a
     /// compiler directive with no visual output) comes back as an empty
-    /// `Vec`, not an error — matching `geometry_for_range`'s own "no match"
+    /// `Vec`, not an error — matching `geometry_for_ranges`'s own "no match"
     /// behavior, so the frontend can treat "no geometry yet" uniformly.
     #[test]
     fn block_geometry_returns_an_empty_vec_for_a_range_with_no_rendered_content() {
@@ -855,4 +862,5 @@ $ x^2 $
         assert_eq!(diagnostic.line, Some(3), "message: {}", diagnostic.message);
         assert_eq!(diagnostic.column, Some(2), "message: {}", diagnostic.message);
     }
+
 }
