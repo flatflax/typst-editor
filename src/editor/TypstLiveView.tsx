@@ -592,6 +592,45 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     setFocusedBlock(newIdx);
   }
 
+  // Up/Down crossing a focused block's own first/last line into the
+  // adjacent block — the one direction `handleMouseUp`'s "a collapsed
+  // position is always a focused block" rule never reached on its own,
+  // since a native `<textarea>`'s own Up/Down handling has no notion of
+  // "there's another block above/below me" (M23's deferred item, phase4-
+  // product-validation.md). Mirrors `switchFocusTo`'s own commit-then-
+  // relocate-by-byte-position logic exactly (not a fresh reimplementation):
+  // committing this block's own draft can change how many blocks exist
+  // before/after it (typing a blank line splits it), so the target is
+  // resolved by where its *byte position* now lands, not by trusting
+  // `focusedBlock ± 1` as a still-valid array index.
+  async function crossBlockBoundary(direction: "up" | "down") {
+    if (focusedBlock === null) return;
+    const oldRanges = blockByteRanges(source);
+    const targetIdx = focusedBlock + (direction === "up" ? -1 : 1);
+    if (targetIdx < 0 || targetIdx >= oldRanges.length) return;
+    captureScrollForFocusTransition();
+    const [s, e] = oldRanges[focusedBlock];
+    let targetByte = oldRanges[targetIdx][0];
+    const spliced = spliceSource(source, s, e, draftRef.current);
+    const effectiveSource = spliced.source;
+    const oldLenBytes = e - s;
+    const newLenBytes = utf16ToByteOffset(draftRef.current, draftRef.current.length);
+    if (targetByte > s) targetByte += newLenBytes - oldLenBytes;
+    const newRanges = blockByteRanges(effectiveSource);
+    const newIdx = blockAt(newRanges, targetByte) ?? Math.min(Math.max(targetIdx, 0), newRanges.length - 1);
+    const focusedLayoutPx = await ensureBlockGeometry(effectiveSource, newIdx, [newIdx - 1, newIdx, newIdx + 1]);
+    draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
+    // Lands at the far end of the target block from the direction of
+    // approach — the same "enter where you'd expect, given which edge you
+    // crossed" convention Home/End-style navigation uses elsewhere.
+    pendingCursorUtf16Ref.current = direction === "up" ? draftRef.current.length : 0;
+    handedOffRef.current = false;
+    setFocusedBlockLayoutPx(focusedLayoutPx);
+    if (effectiveSource !== source) onChange(effectiveSource);
+    setFocusGeneration((g) => g + 1);
+    setFocusedBlock(newIdx);
+  }
+
   function autosizeTextarea(el: HTMLTextAreaElement) {
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
@@ -1381,7 +1420,33 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
         }}
         onBlur={commitFocusedDraft}
         onKeyDown={(event) => {
-          if (event.key === "Escape") event.currentTarget.blur();
+          if (event.key === "Escape") {
+            event.currentTarget.blur();
+            return;
+          }
+          // A plain `<textarea>` has no public API for "which visual (post-
+          // wrap) line is the caret on" — so rather than reimplementing line-
+          // wrap measurement, let the browser's own native Up/Down handling
+          // run first, then check on the next frame whether it actually
+          // moved the caret. No movement means there was nowhere further for
+          // it to go *within this block* — the standard technique for this
+          // exact plain-textarea limitation. Only fires for a collapsed
+          // caret (extending a selection with Shift+Up/Down stays exactly as
+          // native behavior already handles it — crossing into ANOTHER
+          // block's worth of selection isn't part of this pass's scope,
+          // matching M23's own deferred-item note in phase4-product-
+          // validation.md).
+          if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !event.shiftKey) {
+            const el = event.currentTarget;
+            const beforeStart = el.selectionStart;
+            const beforeEnd = el.selectionEnd;
+            const direction = event.key === "ArrowUp" ? "up" : "down";
+            requestAnimationFrame(() => {
+              if (el.selectionStart === beforeStart && el.selectionEnd === beforeEnd) {
+                void crossBlockBoundary(direction);
+              }
+            });
+          }
         }}
       />
     );

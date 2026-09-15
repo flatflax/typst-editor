@@ -53,10 +53,10 @@ Full rationale in [interaction-design.md](interaction-design.md) §10.
    selection, a UTF-16-vs-UTF-8-byte-offset bug in the shared PM-position map
    (`spokes/typstAst.ts`, pre-existing, not introduced by this pass) that misapplied the
    command to a shifted range whenever a multi-byte character appeared earlier in the
-   document. Still deliberately deferred, not silently dropped: Up/Down navigation across a
-   block boundary; reference-chain navigation UI for `#set`/`#let`/labels
-   (interaction-design.md §10 item 14 — the interaction is designed, nothing is
-   implemented).
+   document. Deferred at the time, not silently dropped: Up/Down navigation across a block
+   boundary (done 2026-09-15, see Milestones below); reference-chain navigation UI for
+   `#set`/`#let`/labels (interaction-design.md §10 item 14 — the interaction is designed,
+   nothing is implemented — still the one item left from this list).
 7. ~~**Backend algorithmic fix for `geometry_for_range`**~~ — done (2026-09-14, promoted
    from "someday" given real-machine testing on a multi-page document, 2026-09-11): added
    `geometry_for_ranges`, which walks each page's frame tree once for every requested range
@@ -932,3 +932,22 @@ issuing their `ensureBlockGeometry` calls — each call is independently async a
 but issuing the nearest one first still gets it processed (and painted) first in practice,
 since the backend handles one IPC call at a time. Confirmed live: placeholders now visibly
 settle outward from the focused block instead of in arbitrary index order.
+
+**Up/Down cross-block navigation (2026-09-15)** — the last of M23's deliberately-deferred
+items, alongside reference-chain navigation UI (still not started). A native `<textarea>` has
+no public API for "which visual (post-wrap) line is the caret on," so reimplementing line-wrap
+measurement was avoided in favor of the standard technique for this exact limitation: let the
+browser's own Up/Down handling run first, then check on the next animation frame whether it
+actually moved the caret. No movement means there was nowhere further to go *within this
+block* — only then does `crossBlockBoundary` fire, focusing the adjacent block and landing the
+caret at the far end from the direction of approach (its end for Up, its start for Down).
+Deliberately mirrors `switchFocusTo`'s own commit-then-relocate-by-byte-position logic exactly,
+not a fresh reimplementation: committing the currently-focused block's draft as part of
+crossing can change how many blocks exist before/after it (typing a blank line splits one in
+two), so the target is resolved by where its byte position now lands, not by trusting
+`focusedBlock ± 1` as a still-valid array index — the same class of bug `switchFocusTo` itself
+was fixed for earlier in this doc. Only fires for a collapsed caret; Shift+Up/Down (extending a
+selection across the block boundary) is out of scope for this pass, same as it was for M23's
+mark-toggle work. Verified live: pressing Up on a focused block's first line lands in the
+previous block; Down on the last line lands in the next block; both feel immediate, no visible
+lag or wrong-block flicker.
