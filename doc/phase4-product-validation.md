@@ -53,15 +53,22 @@ Full rationale in [interaction-design.md](interaction-design.md) §10.
    selection, a UTF-16-vs-UTF-8-byte-offset bug in the shared PM-position map
    (`spokes/typstAst.ts`, pre-existing, not introduced by this pass) that misapplied the
    command to a shifted range whenever a multi-byte character appeared earlier in the
-   document. Deferred at the time, not silently dropped: Up/Down navigation across a block
-   boundary (done 2026-09-15, see Milestones below); reference-chain navigation UI for
-   `#set`/`#let`/labels (interaction-design.md §10 item 14 — the interaction is designed,
-   nothing is implemented — still the one item left from this list).
+   document. Deferred at the time, not silently dropped, both now done (2026-09-15, see
+   Milestones below): Up/Down navigation across a block boundary; reference-chain navigation
+   UI for `#let`/`#import` bindings and `<label>`/`@ref` cross-references (interaction-design.md
+   §10 结论 14) — `#set` rule influence tracking specifically stays out of scope, a genuinely
+   different, harder problem (see Milestones). This closes out every item from this list.
 7. ~~**Backend algorithmic fix for `geometry_for_range`**~~ — done (2026-09-14, promoted
    from "someday" given real-machine testing on a multi-page document, 2026-09-11): added
    `geometry_for_ranges`, which walks each page's frame tree once for every requested range
    together and buckets glyphs into whichever target range they fall in, instead of walking
    the whole tree once per requested range. See Milestones below.
+8. ~~**Cross-block undo/redo**~~ — implemented (2026-09-15), the P0 gap
+   interaction-design.md §8 called out (Live cursor had no app-level history at all — Ctrl+Z
+   only worked via native per-textarea history for one focused block's one visit). See
+   Milestones below. Type-check/unit tests/backend `cargo test`+`clippy` all pass; real-machine
+   interactive verification (the seamless native→app handoff, cross-block restore, coalescing
+   feel) is still pending at time of writing — noted as an open item, not silently skipped.
 
 ## Milestones
 
@@ -1076,5 +1083,95 @@ reduced (didn't eliminate) the reported frequency:
    captured before any newer mousedown can reassign the ref — before reading the offsets;
    mirrors `resolveNextDragPoint`'s own existing use of the same ref, just applied to the
    plain-click path too, which had been missing it.
+
+### Cross-block undo/redo (interaction-design.md §8, P0)
+
+The one remaining P0 gap from that document: no app-level undo/redo history anywhere.
+Ctrl+Z worked only by accident, via the browser's own per-`<textarea>` history for a
+focused block, scoped to that one visit — exiting focus, switching blocks, or running a
+toolbar command threw it away with no way back.
+
+**Design** (worked out over several rounds of pushback — a first pass asserted an
+unjustified `MAX_HISTORY = 200` full-snapshot cap; landed instead on a delta-based
+design with real prior art behind it, read directly out of
+`node_modules/@codemirror/commands/dist/index.js` — the `history()` extension this repo
+already vendors and `SourceEditor.tsx` already uses for the Typst-source/Markdown tabs,
+not recalled from memory):
+
+- History lives entirely inside `TypstLiveView.tsx` (a ref, `historyRef`) — `App.tsx`'s
+  `source`/`onChange` interface doesn't need to know undo exists.
+- Two commit wrappers replace all 8 of this file's `onChange(...)` call sites
+  (`commitFocusedDraft`, `switchFocusTo`×2, `crossBlockBoundary`, `jumpToReference`,
+  `resolveHandoffDrop`, `commitEdit`, `runToolbarCommand`×2): `commitChange` for the 7
+  splice-based sites, `commitSnapshot` for `runToolbarCommand`'s 2 (a structural
+  transform's old/new source aren't one contiguous byte-range replacement). Each call
+  site constructs its own `beforeFocus` from already-correct local/closure state — a
+  generic "read current React state" helper would be wrong, since whether
+  `focusedBlock`/etc. reflect "before" or "after" this commit at the moment `onChange`
+  fires differs per call site (e.g. `resolveHandoffDrop` calls `setFocusedBlock(null)`
+  *before* `onChange`; most others call their state setters *after*).
+- **Entries store a delta (`{ start, removed, inserted }`), not a full document
+  snapshot**, for the 7 splice-based sites — `spliceSource` already knows exactly what
+  changed at commit time, so this costs nothing extra and scales with edit size, not
+  document size. Only `runToolbarCommand`'s 2 sites (whole-document
+  parse→PM-transform→serialize round trips) keep full-snapshot entries.
+- Combined-mode per-keystroke coalescing (`commitEdit`, the one call site that fires on
+  every keystroke) needs two conditions to merge into one undo entry, not just a time
+  window: within `COALESCE_MS` (500ms, CodeMirror's own default) **and** the new edit's
+  range is adjacent to where the previous one left off (`deltasAdjacent`,
+  `editHistory.ts`) — mirrors CodeMirror's own `isAdjacent` check; a time window alone
+  would wrongly merge two edits in unrelated parts of the document if they happened to
+  land within 500ms of each other. A coalesced run stores a `Delta[]` array (each
+  keystroke's own delta), not one merged delta — undo/redo applies each individually in
+  sequence, sidestepping the real correctness problems a general insert/delete-mixing
+  merge algorithm would have.
+- Seamless native→app handoff: Ctrl+Z while a block is focused doesn't `preventDefault`
+  — native undo runs first, checked on the next animation frame (the same "let native
+  run, check if it moved" technique already used for Up/Down cross-block navigation);
+  no change means native history for this visit is exhausted, and control hands off to
+  the app-level `undo()`.
+- Focus restoration lands at the target block's content end, not a precisely-tracked
+  prior cursor position — a deliberate v1 simplification (CodeMirror itself restores
+  exact selection via `ChangeSet`-mapped positions, which this project's split
+  block/combined coordinate systems don't support without solving a bigger "map a
+  position across coordinate systems" problem first). Block-count changes (a commit
+  that splits/merges blocks) don't break restoration, since each entry's `focus.blockIdx`
+  and its associated source are captured as a matched pair — restoration recomputes
+  `blockByteRanges` on the entry's *own* reconstructed source, never the live/current one.
+- No stack-depth cap for v1 — checked that CodeMirror's own `minDepth` (default 100)
+  exists mainly to bound the cost of remapping *every* stored entry's positions on
+  *every* subsequent edit (`addMappingToBranch`), a cost this design doesn't have since
+  entries are inert until actually popped; only raw memory remains as a concern, and
+  delta storage already keeps that small. Left as a known, disclosed, deliberately
+  deferred follow-up (a byte-budget eviction, if ever needed).
+
+**Implementation**: `src/editor/editHistory.ts` (new) — pure logic (`Delta`,
+`HistoryEntry`, `recordChange`, `popUndo`/`popRedo`, `deltasAdjacent`,
+`applyDeltaForward`/`applyDeltaInverse`, `undoDeltas`/`redoDeltas`), 17 unit tests
+covering coalescing (including the adjacency-vs-time-window distinction, and a
+regression case for chained backspaces — a naive "new delta's start must be ≥ the
+previous one's" adjacency check breaks for the *second* backspace in a chain, since each
+subsequent one's start is strictly *before* the last; fixed with a symmetric check
+against where the previous delta's own edit left off). `TypstLiveView.tsx`: `historyRef`,
+`commitChange`/`commitSnapshot`/`applyFocus`/`currentFocusSnapshot`/`undo`/`redo`, a
+`handleGlobalKeyDown` bound once on the outer `.typst-live-view` container (catches
+Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z / Ctrl/Cmd+Y bubbling up from either the hidden input or
+a focused block's own textarea), and all 8 call sites updated. `undo()`/`redo()`
+deliberately do the stack pop and `onChange` *synchronously*, before any `await` —
+unlike `switchFocusTo`/`crossBlockBoundary`/`jumpToReference`'s own async-gated
+`onChange` (safe there since their `effectiveSource` is cheaply recomputable by a
+superseding call), a stack pop is a one-shot, non-idempotent mutation; gating it behind
+`applyFocus`'s async geometry fetch would risk `historyRef` and `source` silently
+diverging if a second Ctrl+Z fired before the first one's fetch resolved. Only the
+focus-layout part is async (mirrors `enterFocus`).
+
+`npx tsc --noEmit`, `npx vitest run` (302 tests, up from 286), `cargo test` (98,
+unaffected — no backend changes) and `cargo clippy --all-targets` all clean. **Not yet
+confirmed on real hardware** — `pnpm tauri dev` launches cleanly with no compile/runtime
+errors, but the actual interactive scenarios (seamless handoff feel, cross-block restore
+landing on the right block, coalescing granularity, redo symmetry, the line-added/removed
+edge cases) still need a real click-and-type pass before this is considered fully done,
+per this doc's own standing rule that type-checking and test suites verify correctness,
+not feel.
 
 All three confirmed live. `tsc --noEmit` clean; full suite still 286 tests, all passing.

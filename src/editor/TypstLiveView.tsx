@@ -94,6 +94,18 @@ import {
 } from "./wysiwygCommands";
 import { blockAt, blockByteRanges } from "./blockSplit";
 import {
+  emptyHistory,
+  popRedo,
+  popUndo,
+  pushEntry,
+  recordChange,
+  redoDeltas,
+  undoDeltas,
+  type Delta,
+  type FocusSnapshot,
+  type HistoryEntry,
+} from "./editHistory";
+import {
   cropSvgVertically,
   estimatePlaceholderHeightPt,
   fairShareBoundsFromInk,
@@ -355,6 +367,13 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // the textarea back out for rendered content) re-triggering the same
   // commit a second time.
   const handedOffRef = useRef(false);
+  // Cross-block undo/redo history (interaction-design.md §8, editHistory.ts —
+  // see the plan file "跨块撤销/重做" for the full design rationale). A ref,
+  // not state: history changes don't need to trigger a render on their own,
+  // only `commitChange`/`commitSnapshot`/`undo`/`redo` ever touch it, and all
+  // of those already go on to call `onChange`, which re-renders this
+  // component anyway once `source` updates.
+  const historyRef = useRef(emptyHistory);
 
   // Incremental replacement for the original "fetch every block's geometry
   // in one `block_geometry` call" approach (still what the throwaway spike
@@ -580,6 +599,120 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     setFocusedBlock(idx);
   }
 
+  // Cross-block undo/redo (interaction-design.md §8, editHistory.ts — see
+  // the plan file "跨块撤销/重做" for the full design rationale). Every
+  // direct `onChange(...)` call below is replaced by one of these two:
+  //
+  // - `commitChange` for the splice-based commit points — `beforeFocus`
+  //   must be constructed explicitly by each call site from its own
+  //   already-correct local/closure state, never read from a generic
+  //   "current state" helper: whether React state reflects "before" or
+  //   "after" this commit at the moment each call fires differs per call
+  //   site (决策 4 works through all 8 of them).
+  // - `commitSnapshot` for `runToolbarCommand`'s two call sites only — a
+  //   structural transform's old/new source aren't one contiguous
+  //   byte-range replacement, so it stores the *previous* `source`
+  //   (closure — i.e. the state from before the whole command ran, not
+  //   `effectiveSource`/`current.source`) as a full snapshot instead.
+  function commitChange(newSource: string, beforeFocus: FocusSnapshot, delta: Delta, coalesce: boolean) {
+    historyRef.current = recordChange(historyRef.current, beforeFocus, { kind: "delta", delta }, coalesce, Date.now());
+    onChange(newSource);
+  }
+
+  function commitSnapshot(newSource: string, beforeFocus: FocusSnapshot) {
+    historyRef.current = recordChange(historyRef.current, beforeFocus, { kind: "snapshot", source }, false, Date.now());
+    onChange(newSource);
+  }
+
+  // Moves focus to `focus` on a document that is now `newSource` — shared by
+  // `undo()`/`redo()`. Mirrors `enterFocus`'s own block-focusing sequence
+  // (geometry fetch, draft/caret setup) for the "block" case; "combined"
+  // restores the stored offsets and hands DOM focus back to the hidden
+  // input, mirroring `resolveHandoffDrop`. `pendingCursorUtf16Ref` is left
+  // at its default (`null`, "land at the end") — the simplification 决策 4
+  // settled on, since a precise pre-edit cursor position isn't tracked.
+  async function applyFocus(newSource: string, focus: FocusSnapshot) {
+    if (focus.kind === "combined") {
+      handedOffRef.current = true;
+      setFocusedBlock(null);
+      cursorOffsetRef.current = focus.cursorOffset;
+      anchorOffsetRef.current = focus.anchorOffset;
+      setCursorOffset(focus.cursorOffset);
+      setAnchorOffset(focus.anchorOffset);
+      hiddenInputRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    const requestId = ++focusRequestIdRef.current;
+    captureScrollForFocusTransition();
+    handedOffRef.current = true;
+    const ranges = blockByteRanges(newSource);
+    const idx = Math.min(Math.max(focus.blockIdx, 0), ranges.length - 1);
+    const focusedLayoutPx = await ensureBlockGeometry(newSource, idx, [idx - 1, idx, idx + 1]);
+    if (focusRequestIdRef.current !== requestId) return;
+    draftRef.current = sliceByBytes(newSource, ranges[idx][0], ranges[idx][1]);
+    handedOffRef.current = false;
+    setFocusedBlockLayoutPx(focusedLayoutPx);
+    setFocusGeneration((g) => g + 1);
+    setFocusedBlock(idx);
+  }
+
+  // Where focus currently is, captured synchronously — used to build the
+  // entry `undo()`/`redo()` push onto the *opposite* stack (the only focus
+  // ever captured at commit time is the "before" one, so there's nothing
+  // else to reuse for the reverse direction). Safe to read directly here,
+  // unlike the general "8 call sites" problem 决策 4 covers: this always
+  // runs at the very top of `undo()`/`redo()`, strictly before anything in
+  // this render has touched focus/cursor state, so there's no "before vs
+  // after" ambiguity the way there is mid-way through those other functions.
+  function currentFocusSnapshot(): FocusSnapshot {
+    return focusedBlock !== null
+      ? { kind: "block", blockIdx: focusedBlock }
+      : { kind: "combined", cursorOffset: cursorOffsetRef.current, anchorOffset: anchorOffsetRef.current };
+  }
+
+  // The critical part — popping the stack and committing the resulting
+  // `source` — runs synchronously, before any `await`: unlike
+  // `switchFocusTo`/`crossBlockBoundary`/`jumpToReference`'s own async
+  // geometry fetch gating their `onChange` (safe there because their
+  // `effectiveSource` is cheaply recomputable, so a superseded call losing
+  // its own `onChange` just means the next call redundantly redoes the same
+  // work), a stack pop here is a one-shot, non-idempotent mutation — gating
+  // it behind an `await` would risk `historyRef` and `source` silently
+  // diverging if a second Ctrl+Z fires before the first one's geometry
+  // fetch resolves. Only `applyFocus` (which block to land in / its crop
+  // geometry) is async below, same as `enterFocus`.
+  async function undo() {
+    const popped = popUndo(historyRef.current);
+    if (!popped) return;
+    const { entry } = popped;
+    const beforeSource = source;
+    const afterSource = entry.kind === "snapshot" ? entry.source : undoDeltas(beforeSource, entry.deltas);
+    const redoFocus = currentFocusSnapshot();
+    const redoEntry: HistoryEntry =
+      entry.kind === "snapshot"
+        ? { kind: "snapshot", source: beforeSource, focus: redoFocus, timestampMs: entry.timestampMs }
+        : { kind: "deltas", deltas: entry.deltas, focus: redoFocus, timestampMs: entry.timestampMs };
+    historyRef.current = { undo: popped.state.undo, redo: pushEntry(popped.state.redo, redoEntry) };
+    onChange(afterSource);
+    await applyFocus(afterSource, entry.focus);
+  }
+
+  async function redo() {
+    const popped = popRedo(historyRef.current);
+    if (!popped) return;
+    const { entry } = popped;
+    const beforeSource = source;
+    const afterSource = entry.kind === "snapshot" ? entry.source : redoDeltas(beforeSource, entry.deltas);
+    const undoFocus = currentFocusSnapshot();
+    const undoEntry: HistoryEntry =
+      entry.kind === "snapshot"
+        ? { kind: "snapshot", source: beforeSource, focus: undoFocus, timestampMs: entry.timestampMs }
+        : { kind: "deltas", deltas: entry.deltas, focus: undoFocus, timestampMs: entry.timestampMs };
+    historyRef.current = { undo: pushEntry(popped.state.undo, undoEntry), redo: popped.state.redo };
+    onChange(afterSource);
+    await applyFocus(afterSource, entry.focus);
+  }
+
   // Native blur — the focused block's draft (which may now contain its own
   // blank line(s)) is reparsed only at this point ("lazy" split, the
   // winning half of Spike 3's lazy-vs-eager comparison —
@@ -589,8 +722,9 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     if (handedOffRef.current || focusedBlock === null) return;
     const ranges = blockByteRanges(source);
     const [start, end] = ranges[focusedBlock];
+    const removed = sliceByBytes(source, start, end);
     const result = spliceSource(source, start, end, draftRef.current);
-    onChange(result.source);
+    commitChange(result.source, { kind: "block", blockIdx: focusedBlock }, { start, removed, inserted: draftRef.current }, false);
     setFocusedBlock(null);
   }
 
@@ -606,11 +740,16 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     const oldRanges = blockByteRanges(source);
     let effectiveSource = source;
     let targetByte = oldRanges[oldIdx][0];
+    let commit: { delta: Delta; beforeFocus: FocusSnapshot } | null = null;
     if (focusedBlock !== null) {
       const [s, e] = oldRanges[focusedBlock];
       const oldLenBytes = e - s;
       const spliced = spliceSource(source, s, e, draftRef.current);
       effectiveSource = spliced.source;
+      commit = {
+        delta: { start: s, removed: sliceByBytes(source, s, e), inserted: draftRef.current },
+        beforeFocus: { kind: "block", blockIdx: focusedBlock },
+      };
       const newLenBytes = utf16ToByteOffset(draftRef.current, draftRef.current.length);
       if (targetByte > s) targetByte += newLenBytes - oldLenBytes;
     }
@@ -624,7 +763,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
     handedOffRef.current = false;
     setFocusedBlockLayoutPx(focusedLayoutPx);
-    if (effectiveSource !== source) onChange(effectiveSource);
+    if (commit) commitChange(effectiveSource, commit.beforeFocus, commit.delta, false);
     setFocusGeneration((g) => g + 1);
     setFocusedBlock(newIdx);
   }
@@ -649,10 +788,12 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     captureScrollForFocusTransition();
     const [s, e] = oldRanges[focusedBlock];
     let targetByte = oldRanges[targetIdx][0];
-    const spliced = spliceSource(source, s, e, draftRef.current);
+    const removed = sliceByBytes(source, s, e);
+    const insertedText = draftRef.current;
+    const spliced = spliceSource(source, s, e, insertedText);
     const effectiveSource = spliced.source;
     const oldLenBytes = e - s;
-    const newLenBytes = utf16ToByteOffset(draftRef.current, draftRef.current.length);
+    const newLenBytes = utf16ToByteOffset(insertedText, insertedText.length);
     if (targetByte > s) targetByte += newLenBytes - oldLenBytes;
     const newRanges = blockByteRanges(effectiveSource);
     const newIdx = blockAt(newRanges, targetByte) ?? Math.min(Math.max(targetIdx, 0), newRanges.length - 1);
@@ -665,7 +806,9 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     pendingCursorUtf16Ref.current = direction === "up" ? draftRef.current.length : 0;
     handedOffRef.current = false;
     setFocusedBlockLayoutPx(focusedLayoutPx);
-    if (effectiveSource !== source) onChange(effectiveSource);
+    if (effectiveSource !== source) {
+      commitChange(effectiveSource, { kind: "block", blockIdx: focusedBlock }, { start: s, removed, inserted: insertedText }, false);
+    }
     setFocusGeneration((g) => g + 1);
     setFocusedBlock(newIdx);
   }
@@ -697,6 +840,32 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     pendingCursorUtf16Ref.current = null;
     el.setSelectionRange(pos, pos);
     autosizeTextarea(el);
+    // `focusGeneration`, not just `focusedBlock` — found live (2026-09-15)
+    // testing undo/redo: re-focusing the *same* block index (e.g. `undo()`
+    // landing back on the block that's already focused) bumps
+    // `focusGeneration` and remounts a fresh `<textarea>` (its own `key`
+    // includes it, see `focusGeneration`'s own comment), but `setFocusedBlock`
+    // with an unchanged value is a no-op as far as React state is concerned
+    // — this effect never re-ran, leaving the new element rendered but never
+    // focused. `focusGeneration` is exactly the signal for "a (re-)focus
+    // happened, even without an index change," so it belongs in this
+    // dependency list too, not just `focusedBlock`.
+  }, [focusedBlock, focusGeneration]);
+
+  // Combined mode always has *some* element focused — the hidden input —
+  // so keyboard shortcuts (Ctrl+Z included) always have somewhere to route
+  // through. `resolveHandoffDrop` already had to solve this exact problem
+  // for one specific transition into combined mode ("nothing else claims
+  // DOM focus once combined mode renders in place of the blurred textarea
+  // — found live, every keyboard interaction silently went nowhere without
+  // it"); this is the same fix applied generally, for *every* path that can
+  // land on `focusedBlock === null` (a plain native blur via
+  // `commitFocusedDraft`, e.g. pressing Escape, included) rather than
+  // requiring each one to remember to call `hiddenInputRef.current?.focus()`
+  // itself. Redundant (and harmless) for the paths that already do.
+  useLayoutEffect(() => {
+    if (focusedBlock !== null) return;
+    hiddenInputRef.current?.focus({ preventScroll: true });
   }, [focusedBlock]);
 
   // Fetches "which variables/labels this block references"
@@ -749,10 +918,12 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     captureScrollForFocusTransition();
     const [s, e] = oldRanges[focusedBlock];
     let targetByte = defStart;
-    const spliced = spliceSource(source, s, e, draftRef.current);
+    const removed = sliceByBytes(source, s, e);
+    const insertedText = draftRef.current;
+    const spliced = spliceSource(source, s, e, insertedText);
     const effectiveSource = spliced.source;
     const oldLenBytes = e - s;
-    const newLenBytes = utf16ToByteOffset(draftRef.current, draftRef.current.length);
+    const newLenBytes = utf16ToByteOffset(insertedText, insertedText.length);
     if (targetByte > s) targetByte += newLenBytes - oldLenBytes;
     const newRanges = blockByteRanges(effectiveSource);
     const newIdx = blockAt(newRanges, targetByte) ?? Math.min(focusedBlock, newRanges.length - 1);
@@ -762,7 +933,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     pendingCursorUtf16Ref.current = byteToUtf16Offset(draftRef.current, targetByte - newRanges[newIdx][0]);
     handedOffRef.current = false;
     setFocusedBlockLayoutPx(focusedLayoutPx);
-    onChange(effectiveSource);
+    commitChange(effectiveSource, { kind: "block", blockIdx: focusedBlock }, { start: s, removed, inserted: insertedText }, false);
     setFocusGeneration((g) => g + 1);
     setFocusedBlock(newIdx);
   }
@@ -930,12 +1101,18 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
       handedOffRef.current = true;
       const ranges = blockByteRanges(source);
       const [blockStart, blockEnd] = ranges[thisBlock];
+      const removed = sliceByBytes(source, blockStart, blockEnd);
       const result = spliceSource(source, blockStart, blockEnd, draftRef.current);
       const anchorByte =
         blockStart + utf16ToByteOffset(draftRef.current, nativeDragAnchorUtf16Ref.current ?? draftRef.current.length);
 
       setFocusedBlock(null);
-      onChange(result.source);
+      commitChange(
+        result.source,
+        { kind: "block", blockIdx: thisBlock },
+        { start: blockStart, removed, inserted: draftRef.current },
+        false,
+      );
       // Always deferred to the effect above — even when the committed
       // source is unchanged (nothing typed, just a plain drag) this still
       // needs at least one render for `focusedBlock` to actually reach the
@@ -1268,8 +1445,14 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // `insertText`, then collapse the cursor to just after it. Every other
   // handler below only has to compute the right range.
   function commitEdit(start: number, end: number, insertText: string) {
+    const removed = sliceByBytes(source, start, end);
     const result = spliceSource(source, start, end, insertText);
-    onChange(result.source);
+    // `coalesce: true` — the only call site that needs it (决策 2/5): every
+    // other commit is already "one meaningful action" on its own, but this
+    // fires once per keystroke, so consecutive adjacent edits within
+    // `COALESCE_MS` merge into a single undo step (see recordChange's own
+    // adjacency check, editHistory.ts).
+    commitChange(result.source, { kind: "combined", cursorOffset, anchorOffset }, { start, removed, inserted: insertText }, true);
     setCursorOffset(result.cursorOffset);
     setAnchorOffset(result.cursorOffset);
   }
@@ -1342,12 +1525,17 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
       draftRef.current = sliceByBytes(current.source, newRanges[newIdx][0], newRanges[newIdx][1]);
       pendingCursorUtf16Ref.current = byteToUtf16Offset(draftRef.current, current.cursorOffset - newRanges[newIdx][0]);
       const focusedLayoutPx = await ensureBlockGeometry(current.source, newIdx, [newIdx - 1, newIdx, newIdx + 1]);
-      onChange(current.source);
+      // `commitSnapshot`, not `commitChange` (决策 5): a structural
+      // transform's old/new source aren't one contiguous byte-range
+      // replacement, and `wasFocused` (not `newIdx`) is the focus from
+      // *before* this command ran, captured at the very top of this
+      // function, before any `await`.
+      commitSnapshot(current.source, { kind: "block", blockIdx: wasFocused });
       setFocusedBlockLayoutPx(focusedLayoutPx);
       setFocusGeneration((g) => g + 1);
       setFocusedBlock(newIdx);
     } else {
-      onChange(current.source);
+      commitSnapshot(current.source, { kind: "combined", cursorOffset, anchorOffset });
       setCursorOffset(current.cursorOffset);
       setAnchorOffset(current.anchorOffset);
     }
@@ -1655,8 +1843,53 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     );
   }
 
+  // Ctrl/Cmd+Z (undo) and Ctrl/Cmd+Shift+Z / Ctrl/Cmd+Y (redo) — bound once
+  // on the outer container rather than duplicated on the hidden input and
+  // the focused block's own textarea, since a keydown on either bubbles up
+  // to it (决策 3). While a block is focused, deliberately does *not*
+  // `preventDefault` up front — the browser's own undo/redo for this
+  // textarea's own (uncommitted) edit history is left to run first, exactly
+  // as it would without any of this handling; only once a next-frame check
+  // finds it was a no-op (native history for this visit already exhausted)
+  // does this hand off to the app-level `undo()`/`redo()`. Combined mode has
+  // no native undo of its own to defer to (the hidden input's value is
+  // always cleared right after every commit), so it calls straight through.
+  function handleGlobalKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (!event.ctrlKey && !event.metaKey) return;
+    const key = event.key.toLowerCase();
+    const isUndo = key === "z" && !event.shiftKey;
+    const isRedo = (key === "z" && event.shiftKey) || key === "y";
+    if (!isUndo && !isRedo) return;
+
+    if (focusedBlock !== null) {
+      const el = focusedTextareaRef.current;
+      if (el) {
+        const beforeValue = el.value;
+        const beforeStart = el.selectionStart;
+        const beforeEnd = el.selectionEnd;
+        requestAnimationFrame(() => {
+          const unchanged = el.value === beforeValue && el.selectionStart === beforeStart && el.selectionEnd === beforeEnd;
+          if (unchanged) {
+            if (isUndo) void undo();
+            else void redo();
+          } else {
+            // Native handled it — keep `draftRef` in sync, the same as the
+            // textarea's own `onChange` does for a typed keystroke, since
+            // native undo/redo changes `.value` without necessarily
+            // routing through that handler on every browser.
+            draftRef.current = el.value;
+          }
+        });
+        return;
+      }
+    }
+    event.preventDefault();
+    if (isUndo) void undo();
+    else void redo();
+  }
+
   return (
-    <div className="typst-live-view" ref={scrollContainerRef} onScroll={handleContainerScroll}>
+    <div className="typst-live-view" ref={scrollContainerRef} onScroll={handleContainerScroll} onKeyDown={handleGlobalKeyDown}>
       <p className="scope-note">
         Focus-reveals-source (interaction-design.md §6): click a paragraph to edit its real source in a native
         textarea (free undo/redo, IME, copy/paste); every other paragraph stays fully rendered. Drag across a
