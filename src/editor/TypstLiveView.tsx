@@ -107,6 +107,19 @@ import {
   type FocusedLayoutPx,
 } from "./splitLayout";
 
+// The raw shape `find_block_references` returns per reference — snake_case
+// straight off the wire, matching `RawRangeBox`'s own convention
+// (typstCursor.ts). `ref_start`/`ref_end` are where the reference itself
+// sits (within the focused block); `def_start`/`def_end` are where it
+// resolves to — the byte offset `jumpToReference` jumps to on click.
+type RawBlockReference = {
+  name: string;
+  ref_start: number;
+  ref_end: number;
+  def_start: number;
+  def_end: number;
+};
+
 // M23: the toolbar buttons ported from the WYSIWYG view's own toolbar
 // (wysiwygCommands.ts) — the slash menu comes in a later slice of this
 // milestone, once block-type/mark/table toggles are confirmed working end
@@ -308,6 +321,26 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   const [focusGeneration, setFocusGeneration] = useState(0);
   const [otherBlocksYRanges, setOtherBlocksYRanges] = useState<Map<number, BlockYRange>>(new Map());
   const [focusedBlockLayoutPx, setFocusedBlockLayoutPx] = useState<FocusedLayoutPx | null>(null);
+  // "Which variables/labels this block references" (interaction-design.md
+  // §10 结论 14) — refetched whenever the focused block or the committed
+  // `source` changes, *not* on every keystroke within the still-open draft:
+  // `find_block_references` needs a real parse/compile, and running that
+  // per-keystroke would reintroduce exactly the input-path latency §5D
+  // warns against. Empty while nothing is focused.
+  const [blockReferences, setBlockReferences] = useState<RawBlockReference[]>([]);
+  // `enterFocus`/`switchFocusTo`/`crossBlockBoundary`/`jumpToReference` are
+  // all async (each awaits an `ensureBlockGeometry` round trip) and none of
+  // them previously guarded against a *newer* one finishing first — found
+  // live (2026-09-15): clicking rapidly across several blocks could resolve
+  // out of order, leaving an *earlier*-clicked block focused instead of the
+  // last one actually clicked, because whichever call's `await` happened to
+  // settle last always won regardless of click order. Bumped at the start
+  // of each of those four functions; each captures its own value and checks
+  // it's still current right after its `await`, before touching any state —
+  // the same "is this result still for the request that's still relevant"
+  // discipline `blockInkSourceRef`/`isPending` already use elsewhere in this
+  // file, applied to focus changes specifically.
+  const focusRequestIdRef = useRef(0);
   const lockedWidthPxRef = useRef<number | null>(null);
   const draftRef = useRef("");
   const focusedTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -533,10 +566,12 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // shown as a native textarea (a plain click, or landing back on a single
   // block after a cross-block drag collapses to one — see `handleMouseUp`).
   async function enterFocus(idx: number, widthSourceSvg: SVGSVGElement | null) {
+    const requestId = ++focusRequestIdRef.current;
     captureScrollForFocusTransition();
     const ranges = blockByteRanges(source);
     lockedWidthPxRef.current = widthSourceSvg?.getBoundingClientRect().width ?? null;
     const focusedLayoutPx = await ensureBlockGeometry(source, idx, [idx - 1, idx, idx + 1]);
+    if (focusRequestIdRef.current !== requestId) return;
     draftRef.current = sliceByBytes(source, ranges[idx][0], ranges[idx][1]);
     handedOffRef.current = false;
     setFocusedBlockLayoutPx(focusedLayoutPx);
@@ -566,6 +601,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // rather than trusting its old array index, which the commit can shift
   // out from under it.
   async function switchFocusTo(oldIdx: number, event: React.MouseEvent<HTMLDivElement>) {
+    const requestId = ++focusRequestIdRef.current;
     captureScrollForFocusTransition();
     const oldRanges = blockByteRanges(source);
     let effectiveSource = source;
@@ -584,6 +620,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     // synthetic event once its handler returns synchronously.
     lockedWidthPxRef.current = event.currentTarget.querySelector("svg")?.getBoundingClientRect().width ?? null;
     const focusedLayoutPx = await ensureBlockGeometry(effectiveSource, newIdx, [newIdx - 1, newIdx, newIdx + 1]);
+    if (focusRequestIdRef.current !== requestId) return;
     draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
     handedOffRef.current = false;
     setFocusedBlockLayoutPx(focusedLayoutPx);
@@ -608,6 +645,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     const oldRanges = blockByteRanges(source);
     const targetIdx = focusedBlock + (direction === "up" ? -1 : 1);
     if (targetIdx < 0 || targetIdx >= oldRanges.length) return;
+    const requestId = ++focusRequestIdRef.current;
     captureScrollForFocusTransition();
     const [s, e] = oldRanges[focusedBlock];
     let targetByte = oldRanges[targetIdx][0];
@@ -619,6 +657,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     const newRanges = blockByteRanges(effectiveSource);
     const newIdx = blockAt(newRanges, targetByte) ?? Math.min(Math.max(targetIdx, 0), newRanges.length - 1);
     const focusedLayoutPx = await ensureBlockGeometry(effectiveSource, newIdx, [newIdx - 1, newIdx, newIdx + 1]);
+    if (focusRequestIdRef.current !== requestId) return;
     draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
     // Lands at the far end of the target block from the direction of
     // approach — the same "enter where you'd expect, given which edge you
@@ -659,6 +698,74 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     el.setSelectionRange(pos, pos);
     autosizeTextarea(el);
   }, [focusedBlock]);
+
+  // Fetches "which variables/labels this block references"
+  // (interaction-design.md §10 结论 14) for whichever block is currently
+  // focused. Keyed on `[focusedBlock, source, documentDir]` — refetches when
+  // focus moves to a different block, or when `source` changes (a commit
+  // elsewhere, e.g. the toolbar), but *not* on every keystroke inside the
+  // still-open draft (see `blockReferences`'s own comment for why).
+  useEffect(() => {
+    if (focusedBlock === null) {
+      setBlockReferences([]);
+      return;
+    }
+    const ranges = blockByteRanges(source);
+    const range = ranges[focusedBlock];
+    if (!range) {
+      setBlockReferences([]);
+      return;
+    }
+    let cancelled = false;
+    const [blockStart, blockEnd] = range;
+    invoke<RawBlockReference[]>("find_block_references", {
+      source,
+      baseDir: documentDir,
+      blockStart,
+      blockEnd,
+    })
+      .then((refs) => {
+        if (!cancelled) setBlockReferences(refs);
+      })
+      .catch(() => {
+        if (!cancelled) setBlockReferences([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [focusedBlock, source, documentDir]);
+
+  // Clicking a reference-navigation list item — jump to wherever it resolved
+  // to. Mirrors `crossBlockBoundary`'s own commit-then-relocate-by-byte-
+  // position logic exactly: committing the currently-focused block's draft
+  // can shift where the target definition now sits, the same way it can
+  // shift an adjacent block's start byte, so the target is resolved by byte
+  // position in the freshly-committed source, not trusted as a stale offset
+  // into the *old* one.
+  async function jumpToReference(defStart: number) {
+    if (focusedBlock === null) return;
+    const oldRanges = blockByteRanges(source);
+    const requestId = ++focusRequestIdRef.current;
+    captureScrollForFocusTransition();
+    const [s, e] = oldRanges[focusedBlock];
+    let targetByte = defStart;
+    const spliced = spliceSource(source, s, e, draftRef.current);
+    const effectiveSource = spliced.source;
+    const oldLenBytes = e - s;
+    const newLenBytes = utf16ToByteOffset(draftRef.current, draftRef.current.length);
+    if (targetByte > s) targetByte += newLenBytes - oldLenBytes;
+    const newRanges = blockByteRanges(effectiveSource);
+    const newIdx = blockAt(newRanges, targetByte) ?? Math.min(focusedBlock, newRanges.length - 1);
+    const focusedLayoutPx = await ensureBlockGeometry(effectiveSource, newIdx, [newIdx - 1, newIdx, newIdx + 1]);
+    if (focusRequestIdRef.current !== requestId) return;
+    draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
+    pendingCursorUtf16Ref.current = byteToUtf16Offset(draftRef.current, targetByte - newRanges[newIdx][0]);
+    handedOffRef.current = false;
+    setFocusedBlockLayoutPx(focusedLayoutPx);
+    onChange(effectiveSource);
+    setFocusGeneration((g) => g + 1);
+    setFocusedBlock(newIdx);
+  }
 
   // Keeps the focused block's textarea in view as sibling "Compiling…"
   // placeholders resolve to their real (often much taller) height and push
@@ -1098,9 +1205,24 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // caret there. A real drag whose two ends land in *different* blocks
   // stays exactly as before — a cross-block selection on the self-drawn
   // overlay, `focusedBlock` untouched.
-  function handleMouseUp() {
+  //
+  // Found live (2026-09-15): reading `anchorOffsetRef`/`cursorOffsetRef`
+  // synchronously here was a race in its own right, one layer upstream of
+  // the `focusRequestIdRef` guard on `enterFocus` et al. — `handleMouseDown`
+  // sets those refs only inside its own async `offsetAtClient(...).then(...)`
+  // (an `invoke` round trip), and mouseup fired *before that resolved* would
+  // read whatever stale values were left over from an earlier click, or from
+  // init. In practice a real click's mousedown→mouseup gap is usually just
+  // wide enough for the round trip to finish first, which is why this only
+  // showed up "occasionally" rather than every time. Awaiting
+  // `mouseDownResolvedRef.current` — the exact promise *this* click's own
+  // mousedown produced, captured before any newer mousedown can reassign the
+  // ref — mirrors `resolveNextDragPoint`'s own comment on the same ref, just
+  // applied to the plain-click path too.
+  async function handleMouseUp() {
     if (!draggingRef.current) return;
     draggingRef.current = false;
+    await mouseDownResolvedRef.current;
     const anchor = anchorOffsetRef.current;
     const cursor = cursorOffsetRef.current;
     if (anchor === cursor) {
@@ -1395,60 +1517,96 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
 
   function renderFocusedTextarea(idx: number) {
     return (
-      <textarea
-        key={`${idx}-${focusGeneration}`}
-        ref={focusedTextareaRef}
-        className="typst-live-block-textarea"
-        style={
-          focusedBlockLayoutPx
-            ? {
-                width: focusedBlockLayoutPx.width,
-                marginTop: focusedBlockLayoutPx.marginTop,
-                marginBottom: focusedBlockLayoutPx.marginBottom,
-                marginLeft: focusedBlockLayoutPx.marginLeft,
-                marginRight: focusedBlockLayoutPx.marginRight,
-              }
-            : lockedWidthPxRef.current != null
-              ? { width: lockedWidthPxRef.current }
-              : undefined
-        }
-        defaultValue={draftRef.current}
-        onMouseDown={handleTextareaMouseDown}
-        onChange={(event) => {
-          draftRef.current = event.currentTarget.value;
-          autosizeTextarea(event.currentTarget);
-        }}
-        onBlur={commitFocusedDraft}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.currentTarget.blur();
-            return;
+      <>
+        {blockReferences.length > 0 && (
+          <div
+            className="typst-live-reference-list"
+            key={`refs-${idx}-${focusGeneration}`}
+            style={
+              focusedBlockLayoutPx
+                ? { marginLeft: focusedBlockLayoutPx.marginLeft, width: focusedBlockLayoutPx.width }
+                : lockedWidthPxRef.current != null
+                  ? { width: lockedWidthPxRef.current }
+                  : undefined
+            }
+          >
+            {blockReferences.map((ref) => (
+              <button
+                key={`${ref.def_start}-${ref.def_end}`}
+                type="button"
+                className="typst-live-reference-item"
+                // Clicking this naturally steals DOM focus from the focused
+                // textarea — without preventing that default, the resulting
+                // blur commits the draft and (since it sets `focusedBlock`
+                // to `null`) unmounts this whole fragment, button included,
+                // before the click event it's still in the middle of
+                // dispatching ever reaches `onClick` — the click silently
+                // never fires, reading as "clicking just exits the
+                // textarea." Same fix, same root cause, as the M23 toolbar
+                // buttons below.
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => void jumpToReference(ref.def_start)}
+              >
+                {ref.name}
+              </button>
+            ))}
+          </div>
+        )}
+        <textarea
+          key={`${idx}-${focusGeneration}`}
+          ref={focusedTextareaRef}
+          className="typst-live-block-textarea"
+          style={
+            focusedBlockLayoutPx
+              ? {
+                  width: focusedBlockLayoutPx.width,
+                  marginTop: focusedBlockLayoutPx.marginTop,
+                  marginBottom: focusedBlockLayoutPx.marginBottom,
+                  marginLeft: focusedBlockLayoutPx.marginLeft,
+                  marginRight: focusedBlockLayoutPx.marginRight,
+                }
+              : lockedWidthPxRef.current != null
+                ? { width: lockedWidthPxRef.current }
+                : undefined
           }
-          // A plain `<textarea>` has no public API for "which visual (post-
-          // wrap) line is the caret on" — so rather than reimplementing line-
-          // wrap measurement, let the browser's own native Up/Down handling
-          // run first, then check on the next frame whether it actually
-          // moved the caret. No movement means there was nowhere further for
-          // it to go *within this block* — the standard technique for this
-          // exact plain-textarea limitation. Only fires for a collapsed
-          // caret (extending a selection with Shift+Up/Down stays exactly as
-          // native behavior already handles it — crossing into ANOTHER
-          // block's worth of selection isn't part of this pass's scope,
-          // matching M23's own deferred-item note in phase4-product-
-          // validation.md).
-          if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !event.shiftKey) {
-            const el = event.currentTarget;
-            const beforeStart = el.selectionStart;
-            const beforeEnd = el.selectionEnd;
-            const direction = event.key === "ArrowUp" ? "up" : "down";
-            requestAnimationFrame(() => {
-              if (el.selectionStart === beforeStart && el.selectionEnd === beforeEnd) {
-                void crossBlockBoundary(direction);
-              }
-            });
-          }
-        }}
-      />
+          defaultValue={draftRef.current}
+          onMouseDown={handleTextareaMouseDown}
+          onChange={(event) => {
+            draftRef.current = event.currentTarget.value;
+            autosizeTextarea(event.currentTarget);
+          }}
+          onBlur={commitFocusedDraft}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.currentTarget.blur();
+              return;
+            }
+            // A plain `<textarea>` has no public API for "which visual
+            // (post-wrap) line is the caret on" — so rather than
+            // reimplementing line-wrap measurement, let the browser's own
+            // native Up/Down handling run first, then check on the next
+            // frame whether it actually moved the caret. No movement means
+            // there was nowhere further for it to go *within this block* —
+            // the standard technique for this exact plain-textarea
+            // limitation. Only fires for a collapsed caret (extending a
+            // selection with Shift+Up/Down stays exactly as native behavior
+            // already handles it — crossing into ANOTHER block's worth of
+            // selection isn't part of this pass's scope, matching M23's own
+            // deferred-item note in phase4-product-validation.md).
+            if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !event.shiftKey) {
+              const el = event.currentTarget;
+              const beforeStart = el.selectionStart;
+              const beforeEnd = el.selectionEnd;
+              const direction = event.key === "ArrowUp" ? "up" : "down";
+              requestAnimationFrame(() => {
+                if (el.selectionStart === beforeStart && el.selectionEnd === beforeEnd) {
+                  void crossBlockBoundary(direction);
+                }
+              });
+            }
+          }}
+        />
+      </>
     );
   }
 

@@ -132,8 +132,11 @@ fn common_suffix_len(a: &str, b: &str, max: usize) -> usize {
 /// diffed incremental `Source::edit` rather than a reconstruction (see this
 /// module's doc comment) — shared by `compile_with_world` and
 /// `block_geometry_with_world` so both commands see the same session state
-/// without duplicating the diff-and-edit logic.
-fn sync_session(world: &mut TauriWorld, source: String, base_dir: Option<PathBuf>) {
+/// without duplicating the diff-and-edit logic. `pub(crate)` so
+/// `references.rs`'s own command can reuse the same session-World + comemo
+/// caching this module already established (M14), rather than reintroducing
+/// a fresh-`TauriWorld`-per-call cost the way `jump.rs`'s commands still do.
+pub(crate) fn sync_session(world: &mut TauriWorld, source: String, base_dir: Option<PathBuf>) {
     world.set_base_dir(base_dir);
 
     let old_text = world.text();

@@ -4,6 +4,7 @@ mod compile;
 mod export;
 mod geometry;
 mod jump;
+mod references;
 mod typst_world;
 
 use std::sync::Mutex;
@@ -13,6 +14,7 @@ use asset::read_image_as_data_url;
 use compile::{block_geometry, compile_typst};
 use export::export_pdf;
 use jump::{jump_from_click, jump_from_cursor};
+use references::find_block_references;
 use typst_world::TauriWorld;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -31,6 +33,7 @@ pub fn run() {
             block_geometry,
             compile_typst,
             export_pdf,
+            find_block_references,
             jump_from_click,
             jump_from_cursor,
             parse_typst_ast,

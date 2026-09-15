@@ -951,3 +951,130 @@ selection across the block boundary) is out of scope for this pass, same as it w
 mark-toggle work. Verified live: pressing Up on a focused block's first line lands in the
 previous block; Down on the last line lands in the next block; both feel immediate, no visible
 lag or wrong-block flicker.
+
+**Reference-chain navigation implemented (2026-09-15)** — the last item on M23's own deferred
+list (§10 结论 14: a list above the focused textarea of "which variables/labels this block
+references," click an item to jump to its declaration; only the usage→definition direction,
+the reverse — definition→all usages — stays deferred to §5A/§5C's future citation picker).
+
+Before implementing, went back and re-checked the requirement and existing design for gaps,
+and thought through performance for both small and large documents specifically — the
+starting assumption (hand-roll a Typst syntax-tree walker for `#let`/`<label>`/`@ref`) would
+have needed real scope resolution to get `#let` right (the same name can be bound differently
+in different scopes; getting this wrong silently sends the user to the wrong declaration), which
+was going to push `#let` support to a later pass and ship only labels/refs first. Checking
+`typst-ide` (already a dependency — `jump.rs` already uses it for click/cursor sync) before
+building any of that changed the plan: it already exports exactly this "go to definition"
+capability, built for the same reason real language servers need it —
+`typst_ide::deref_target(leaf) -> Option<DerefTarget>` classifies a syntax node as a reference
+site (variable access, callee, label, ref, import/include path); `typst_ide::definition(world,
+output, source, cursor, side) -> Option<Definition>` resolves a cursor position to where it's
+declared — for `#let`/`#import` via `named_items` (a real ancestor/preceding-sibling scope
+walk, not a name-text match), for `@ref`/`<label>` via the compiled document's `Introspector`.
+Both are already covered by `typst-ide`'s own test suite. This meant v1 could cover `#let`/
+`#import` bindings *and* `<label>`/`@ref` cross-references together, without the scope-
+resolution risk that would have justified cutting `#let` for a later pass.
+
+**`#set` rule influence tracking is explicitly not covered, and this is a real scope boundary,
+not an oversight**: `#set text(size: 11pt)` doesn't bind a name later content can reference by
+identity — its effect is implicit and positional (applies to everything after it in scope).
+`deref_target`/`definition` have no query for "which `#set` affects this cursor" at all;
+supporting it needs a different analysis (walk backward from the block for the nearest
+preceding `#set` of each relevant target) and stays a distinct, deferred item.
+
+**Performance, worked through explicitly for both a short document and a long one**: parsing
+(`typst_syntax::parse`) is O(document length) but is lexing/parsing only, already paid
+elsewhere (`parse_typst_ast`) and cheap regardless. Finding the block's own syntax subtree
+descends from the root only into children whose span covers the block's byte range —
+O(tree depth), not O(document length). Enumerating candidate reference sites and resolving
+each one is bounded by that one block's own size, not the document's: `#let`/`#import`
+resolution via `named_items` costs however deep the local scope chain is at that specific
+reference site, unrelated to how many other `#let`s exist elsewhere in the document; label/ref
+resolution goes through the compiled document's `Introspector`, which indexes labels in a real
+hash map (`labels: MultiMap<Label, usize>`) built once as part of normal compilation — an
+amortized O(1) lookup, not a scan. The one genuinely required cost — a compiled `PagedDocument`
+(label resolution needs it; `#let` resolution doesn't) — reuses the session's persistent
+`TauriWorld` + comemo caching `block_geometry` already established (M14): a cache hit, not a
+second real compile, when `source` is unchanged. Net: cost tracks the focused block's own size
+and how many references it makes, not total document size — a long document costs the same as
+a short one for this specific operation. (Found along the way, unrelated to this task: `jump.rs`'s
+`jump_from_click`/`jump_from_cursor` still build a fresh `TauriWorld` per call rather than
+reusing the session one — a pre-existing gap from before M14's optimization landed, left as-is.)
+
+**Implementation**: `src-tauri/src/references.rs` (new), `find_block_references(source,
+base_dir, block_start, block_end)` — descends to the smallest syntax subtree covering
+`[block_start, block_end)`, collects its leaf nodes, calls `deref_target` on each, and for every
+`VarAccess`/`Callee`/`Ref` hit calls `definition` once. Keeps only `Definition::Span` results
+that resolve inside the same file (`Definition::Std` — standard-library symbols — and
+`Definition::File` — cross-file, not applicable to this single-document editor — are filtered
+out, since neither has anywhere real to jump to); filters out a `#let`'s own declared name
+resolving to itself (`deref_target` classifies a binding's own `Ident` as `VarAccess` too, same
+as any other identifier); deduplicates by definition position, so the same binding referenced
+twice in one block shows once. `sync_session` (compile.rs) made `pub(crate)` so this module
+reuses the exact same session-World pattern `block_geometry` already uses, instead of
+introducing a second one. `TypstLiveView.tsx`: fetches on focus change/source change (not
+per-keystroke, matching the performance analysis above), renders a pill-button list
+(`.typst-live-reference-list`) directly above the focused textarea, hidden entirely when a
+block has no references. Clicking an item calls `jumpToReference`, modeled directly on
+`crossBlockBoundary`'s own commit-then-relocate-by-byte-position logic (committing the
+currently-focused block's draft can shift where the target definition now sits, the same way
+it can shift an adjacent block's start byte).
+
+Eight new Rust unit tests (`references.rs`): a `#let` binding resolves correctly; the same name
+bound in two different scopes resolves to whichever is locally visible (proves this goes
+through real scope resolution, not a first-match name search); a label reference resolves to
+its labelled element (matches `typst-ide`'s own convention of pointing at the element, not the
+bare `<label>` token — acceptable at this project's block-level jump granularity, since the
+label sits in the same block as what it names); a reference to a nonexistent label is silently
+omitted, not an error; a standard-library function reference is filtered out; a `#let`'s own
+name doesn't reference itself; the same binding referenced twice in one block dedupes to one
+entry; and — the direct check on the performance claim above — a synthetic ~50-section
+document confirms only the queried block's own subtree gets processed, not the whole document.
+`cargo test` (98 total) and `cargo clippy --all-targets` clean; frontend `tsc`/`vitest`
+(286 tests) unaffected. Not yet confirmed on real hardware — next step.
+
+**Real-machine testing (2026-09-15) found three real bugs, all fixed the same day.**
+
+**Misaligned with the textarea below it**: the reference list had no margin of its own, while
+the textarea gets `marginLeft`/`width` from `focusedBlockLayoutPx` to line up with the page's
+real content edge (the "sixth pass" fix earlier in this doc). Fixed by giving
+`.typst-live-reference-list` the same `marginLeft`/`width` the textarea already computes.
+
+**Clicking a reference item didn't jump — it just exited the textarea.** Same root cause as an
+M23 toolbar bug fixed earlier in this doc: the reference-list `<button>`s live inside the same
+conditionally-rendered fragment as the focused textarea. Clicking one first fires a native blur
+(the button is stealing DOM focus), which commits the draft and — since that sets
+`focusedBlock` to `null` — unmounts the whole fragment, button included, before the click event
+it's still in the middle of dispatching ever reaches `onClick`. The click silently never fires;
+it just reads as "clicking exits the textarea." **Fixed** with the same
+`onMouseDown={(event) => event.preventDefault()}` the toolbar buttons already use, which keeps
+the textarea focused through mousedown so the blur/unmount never happens in the first place —
+`jumpToReference`'s own explicit commit-and-relocate logic handles the transition instead.
+
+**Found via the same testing pass, unrelated to reference navigation itself: exiting focus and
+quickly clicking other blocks could reopen an earlier-clicked block instead of the last one
+actually clicked.** Two distinct async races, found and fixed in sequence as the first fix only
+reduced (didn't eliminate) the reported frequency:
+1. `enterFocus`/`switchFocusTo`/`crossBlockBoundary`/`jumpToReference` are all async (each
+   awaits an `ensureBlockGeometry` round trip) and none of them guarded against a *newer* one
+   finishing first — rapid clicks across several blocks could resolve out of order, since
+   whichever call's `await` happened to settle last always won, regardless of click order.
+   **Fixed** with a shared `focusRequestIdRef` counter, bumped at the start of each of the four
+   functions; each captures its own value and checks it's still current right after its
+   `await`, before touching any state — the same "is this result still for the request that's
+   still relevant" discipline `blockInkSourceRef`/`isPending` already use elsewhere in this
+   file, applied to focus changes specifically.
+2. One layer further upstream, in the plain-click path itself: `handleMouseUp` read
+   `anchorOffsetRef`/`cursorOffsetRef` *synchronously*, but those refs are only written inside
+   `handleMouseDown`'s own async `offsetAtClient(...).then(...)` (an `invoke` round trip) — a
+   mouseup firing before that resolved would read stale values left over from an earlier click,
+   or from init. A real click's mousedown→mouseup gap is normally just wide enough for the
+   round trip to finish first, which is why this only showed up "occasionally" rather than
+   every time, and why fix 1 alone visibly reduced (without eliminating) the frequency — it's a
+   genuinely separate race, one step earlier than anything fix 1 guards. **Fixed** by awaiting
+   `mouseDownResolvedRef.current` — the exact promise *this* click's own mousedown produced,
+   captured before any newer mousedown can reassign the ref — before reading the offsets;
+   mirrors `resolveNextDragPoint`'s own existing use of the same ref, just applied to the
+   plain-click path too, which had been missing it.
+
+All three confirmed live. `tsc --noEmit` clean; full suite still 286 tests, all passing.

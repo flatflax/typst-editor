@@ -528,6 +528,33 @@
   font-style: italic;
 }
 
+/* interaction-design.md §10 结论 14 — "which variables/labels this block
+   references," sitting directly above the focused textarea it belongs to.
+   Absent (not rendered at all) when the block has none, so blocks without
+   any references don't reserve empty space for it. */
+.typst-live-reference-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+
+.typst-live-reference-item {
+  font-size: 0.8em;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid #c9b65a;
+  border-radius: 999px;
+  background: #fff8dc;
+  color: #6b5a1e;
+  cursor: pointer;
+}
+
+.typst-live-reference-item:hover,
+.typst-live-reference-item:focus-visible {
+  background: #f0e0a0;
+}
+
 .typst-live-block-textarea {
   display: block;
   width: 100%;
@@ -571,6 +598,17 @@
     background: #3a341a;
     color: #f6f6f6;
     border-color: #8a7420;
+  }
+
+  .typst-live-reference-item {
+    background: #3a341a;
+    color: #e0d090;
+    border-color: #8a7420;
+  }
+
+  .typst-live-reference-item:hover,
+  .typst-live-reference-item:focus-visible {
+    background: #4a4020;
   }
 }
 
