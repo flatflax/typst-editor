@@ -724,7 +724,12 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     const [start, end] = ranges[focusedBlock];
     const removed = sliceByBytes(source, start, end);
     const result = spliceSource(source, start, end, draftRef.current);
-    commitChange(result.source, { kind: "block", blockIdx: focusedBlock }, { start, removed, inserted: draftRef.current }, false);
+    // Focusing a block and blurring without typing anything is not a
+    // meaningful edit — recording it would waste an undo step and, worse,
+    // land a later Ctrl+Z back on this block for no visible effect.
+    if (result.source !== source) {
+      commitChange(result.source, { kind: "block", blockIdx: focusedBlock }, { start, removed, inserted: draftRef.current }, false);
+    }
     setFocusedBlock(null);
   }
 
@@ -763,7 +768,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
     handedOffRef.current = false;
     setFocusedBlockLayoutPx(focusedLayoutPx);
-    if (commit) commitChange(effectiveSource, commit.beforeFocus, commit.delta, false);
+    if (commit && effectiveSource !== source) commitChange(effectiveSource, commit.beforeFocus, commit.delta, false);
     setFocusGeneration((g) => g + 1);
     setFocusedBlock(newIdx);
   }
@@ -933,7 +938,9 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     pendingCursorUtf16Ref.current = byteToUtf16Offset(draftRef.current, targetByte - newRanges[newIdx][0]);
     handedOffRef.current = false;
     setFocusedBlockLayoutPx(focusedLayoutPx);
-    commitChange(effectiveSource, { kind: "block", blockIdx: focusedBlock }, { start: s, removed, inserted: insertedText }, false);
+    if (effectiveSource !== source) {
+      commitChange(effectiveSource, { kind: "block", blockIdx: focusedBlock }, { start: s, removed, inserted: insertedText }, false);
+    }
     setFocusGeneration((g) => g + 1);
     setFocusedBlock(newIdx);
   }
@@ -1107,12 +1114,16 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
         blockStart + utf16ToByteOffset(draftRef.current, nativeDragAnchorUtf16Ref.current ?? draftRef.current.length);
 
       setFocusedBlock(null);
-      commitChange(
-        result.source,
-        { kind: "block", blockIdx: thisBlock },
-        { start: blockStart, removed, inserted: draftRef.current },
-        false,
-      );
+      // "Nothing typed, just a plain drag" (see the comment below) is
+      // exactly the no-op case that shouldn't cost an undo step.
+      if (result.source !== source) {
+        commitChange(
+          result.source,
+          { kind: "block", blockIdx: thisBlock },
+          { start: blockStart, removed, inserted: draftRef.current },
+          false,
+        );
+      }
       // Always deferred to the effect above — even when the committed
       // source is unchanged (nothing typed, just a plain drag) this still
       // needs at least one render for `focusedBlock` to actually reach the
@@ -1452,7 +1463,12 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     // fires once per keystroke, so consecutive adjacent edits within
     // `COALESCE_MS` merge into a single undo step (see recordChange's own
     // adjacency check, editHistory.ts).
-    commitChange(result.source, { kind: "combined", cursorOffset, anchorOffset }, { start, removed, inserted: insertText }, true);
+    // Guards a real no-op: Backspace at byte offset 0 (or Delete at the
+    // document's end) calls this with `start === end`, an empty
+    // `insertText` — nothing to undo.
+    if (result.source !== source) {
+      commitChange(result.source, { kind: "combined", cursorOffset, anchorOffset }, { start, removed, inserted: insertText }, true);
+    }
     setCursorOffset(result.cursorOffset);
     setAnchorOffset(result.cursorOffset);
   }

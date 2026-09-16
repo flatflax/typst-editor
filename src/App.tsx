@@ -128,6 +128,19 @@ function App() {
   const [lastSavedTypstText, setLastSavedTypstText] = useState(() => pmDocToTypst(INITIAL_DOC));
   const [lastSavedMarkdownText, setLastSavedMarkdownText] = useState(() => docToMarkdown(INITIAL_DOC));
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
+  // Bumped on every `loadFile` — passed as part of `TypstLiveView`'s `key`
+  // below so opening a different document forces a full remount instead of
+  // just feeding it new `source`/`onChange` props. Necessary because that
+  // component owns per-document local state internally (cross-block undo/
+  // redo history, which block is focused, in-progress draft text) that has
+  // no business surviving a *different* document being loaded — without
+  // this, the previous document's undo entries (byte offsets and literal
+  // text captured against its own content) would stay on the stack and get
+  // applied against the newly-loaded, unrelated document on the next
+  // Ctrl+Z, up to and including a structural-command entry silently
+  // replacing the new document's entire content with an old snapshot of the
+  // previous one.
+  const [docGeneration, setDocGeneration] = useState(0);
 
   // The open file's directory (plan.md M11) — `#image("relative/path")`
   // resolves against this on every compile/export/asset-read call.
@@ -237,6 +250,7 @@ function App() {
     setTypstText(nextTypstText);
     setMarkdownText(nextMarkdownText);
     setLiveTypstText(nextTypstText);
+    setDocGeneration((g) => g + 1);
     wysiwygRef.current?.setDoc(nextDoc);
     typstEditorRef.current?.setValue(nextTypstText);
     markdownEditorRef.current?.setValue(nextMarkdownText);
@@ -509,6 +523,7 @@ function App() {
           </div>
           <div hidden={viewMode !== "typst-live"} className="view-panel">
             <TypstLiveView
+              key={docGeneration}
               source={derived.source}
               svg={result?.svg ?? null}
               pageOffsetsPt={result?.page_offsets_pt ?? []}

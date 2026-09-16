@@ -65,10 +65,11 @@ Full rationale in [interaction-design.md](interaction-design.md) §10.
    the whole tree once per requested range. See Milestones below.
 8. ~~**Cross-block undo/redo**~~ — implemented (2026-09-15), the P0 gap
    interaction-design.md §8 called out (Live cursor had no app-level history at all — Ctrl+Z
-   only worked via native per-textarea history for one focused block's one visit). See
-   Milestones below. Type-check/unit tests/backend `cargo test`+`clippy` all pass; real-machine
-   interactive verification (the seamless native→app handoff, cross-block restore, coalescing
-   feel) is still pending at time of writing — noted as an open item, not silently skipped.
+   only worked via native per-textarea history for one focused block's one visit). Real-machine
+   testing across two rounds (2026-09-15/16) found and fixed four real bugs — two focus-loss
+   bugs, unwanted no-op history entries, and stale history surviving a File → Open onto a
+   different document. See Milestones below. A final re-verification pass on the latest fixes
+   is still pending at time of writing.
 
 ## Milestones
 
@@ -1084,6 +1085,8 @@ reduced (didn't eliminate) the reported frequency:
    mirrors `resolveNextDragPoint`'s own existing use of the same ref, just applied to the
    plain-click path too, which had been missing it.
 
+All three confirmed live. `tsc --noEmit` clean; full suite still 286 tests, all passing.
+
 ### Cross-block undo/redo (interaction-design.md §8, P0)
 
 The one remaining P0 gap from that document: no app-level undo/redo history anywhere.
@@ -1166,12 +1169,47 @@ diverging if a second Ctrl+Z fired before the first one's fetch resolved. Only t
 focus-layout part is async (mirrors `enterFocus`).
 
 `npx tsc --noEmit`, `npx vitest run` (302 tests, up from 286), `cargo test` (98,
-unaffected — no backend changes) and `cargo clippy --all-targets` all clean. **Not yet
-confirmed on real hardware** — `pnpm tauri dev` launches cleanly with no compile/runtime
-errors, but the actual interactive scenarios (seamless handoff feel, cross-block restore
-landing on the right block, coalescing granularity, redo symmetry, the line-added/removed
-edge cases) still need a real click-and-type pass before this is considered fully done,
-per this doc's own standing rule that type-checking and test suites verify correctness,
-not feel.
+unaffected — no backend changes) and `cargo clippy --all-targets` all clean.
 
-All three confirmed live. `tsc --noEmit` clean; full suite still 286 tests, all passing.
+**Real-machine testing (2026-09-15) found two focus-loss bugs, both fixed the same day.**
+
+**Undoing back onto an already-focused block left the new textarea rendered but not
+actually focused** (needed a click before typing would go anywhere again). The block-focus
+effect (`useLayoutEffect` that calls `.focus()`/positions the caret) was keyed only on
+`[focusedBlock]` — landing `undo()` back on the *same* block index is a no-op as far as
+that state value is concerned, so the effect never re-ran, even though a genuinely new
+`<textarea>` had just been mounted (its `key` folds in `focusGeneration`, which *did*
+bump). **Fixed** by adding `focusGeneration` to that effect's dependency array — it's
+exactly the signal for "a (re-)focus happened," independent of whether the index changed.
+
+**Ctrl+Z did nothing at all after leaving a focused block (e.g. via Escape) without
+clicking anywhere else first.** `commitFocusedDraft`'s blur path set `focusedBlock` to
+`null` but never gave DOM focus to anything else, so combined mode had *nothing* focused
+— no element for the keydown to bubble through. `resolveHandoffDrop` had already hit and
+fixed this exact problem for one specific transition into combined mode; **fixed**
+generally with a `useLayoutEffect` that focuses the hidden input whenever
+`focusedBlock` becomes `null`, covering every path that can land there, not just that one.
+
+**Follow-up testing (2026-09-16) found two more real gaps, both fixed the same day.**
+
+**Focusing a block, typing nothing, and blurring (or dragging out of one without typing,
+or Backspace/Delete at a document boundary) still recorded a history entry.** Four commit
+sites (`commitFocusedDraft`, `switchFocusTo`, `jumpToReference`, the native-drag handoff,
+plus `commitEdit`) called `commitChange`/`commitSnapshot` unconditionally instead of only
+when the content actually changed, unlike `crossBlockBoundary`, which already guarded on
+it correctly. **Fixed** by adding the same `newSource !== source` guard to all of them —
+a no-op interaction no longer costs an undo step or risks landing a later Ctrl+Z back on
+a block for no visible effect.
+
+**Opening a different document (File → Open / a recent file) left the previous
+document's entire undo/redo history intact**, since `App.tsx` never remounted
+`TypstLiveView` — it only fed the same component instance new `source`/`onChange` props.
+The old document's delta entries (byte offsets and literal text captured against *its*
+content) would stay on the stack; the next Ctrl+Z would apply them against the
+newly-loaded, unrelated document instead — for a `runToolbarCommand`-style snapshot entry,
+that means silently replacing the new document's entire content with a stale snapshot of
+the previous one. **Fixed** with a `docGeneration` counter in `App.tsx`, bumped inside
+`loadFile` and passed as `<TypstLiveView key={docGeneration}>` — forces a full remount on
+every document load, discarding not just undo history but every other piece of
+`TypstLiveView`-local state that has no business surviving a document switch either
+(which block was focused, in-progress draft text, cursor position).
