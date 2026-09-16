@@ -67,15 +67,23 @@ The bridge is still `editor position ⇄ source range ⇄ Typst layout geometry`
 M14A/M20) — the editing system holds and moves the position; geometry only answers
 where it currently renders.
 
-## Pending revision (not yet adopted)
+## Revision: adopted for the Live cursor view (focus-reveals-source)
 
-[interaction-design.md](interaction-design.md) §6 (2026-09-09) proposes collapsing
-this rule's yes/no geometry test into one: **focused → source text, unfocused →
-rendered according to geometry.** This does not supersede the rule above yet — it's
-pending the Spike validation tracked in that document's §10 (see
-[phase3-single-view.md](phase3-single-view.md)'s Closed section and
-[plan.md](../plan.md)'s Phase 4). Even if validated, it wouldn't cover every case on
-its own: `#set`/`#let`/tag-style references need reference-chain navigation beyond a
-placeholder, and comments need a fidelity guarantee regardless of focus state —
-interaction-design.md §5A treats those as two separate requirements, not instances of
-this simplified rule.
+[interaction-design.md](interaction-design.md) §6 (2026-09-09) proposed collapsing this
+rule's yes/no geometry test into one: **focused → source text, unfocused → rendered
+according to geometry.** Spikes 1–3 (2026-09-10) validated this, and it has since landed
+as the Live cursor view's real editing mechanism (`TypstLiveView.tsx`, phase4-product-
+validation.md) — not a pending idea anymore. This *does* supersede the geometry test
+above for that view's own editability question: a focused block is always directly
+editable as raw source, even a `#set`/`#let`/complex-`#show` construct the geometry test
+above would have left inspector-only — the geometry test still describes how the
+*un*focused WYSIWYG view (the original PM-schema-based one, still a separate view) draws
+the line for permanent on-surface representation, but it no longer gates what's directly
+editable in Live cursor.
+
+The gap this revision's own proposal flagged — `#set`/`#let`/tag-style references
+needing reference-chain navigation beyond a placeholder — has since been built (jump to
+where a variable/label was declared, interaction-design.md §10 结论 14), so it's no
+longer an open caveat on adopting this rule. The other one — comments needing a fidelity
+guarantee regardless of focus state — was already covered by the lossless-fallback
+primitive (rule 1, above) rather than needing anything specific to focus state.

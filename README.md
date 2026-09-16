@@ -6,34 +6,41 @@ This project targets writers who already know Typst syntax and want faster every
 input, not a syntax-free editor. The direction it's working toward is **true WYSIWYG**
 — editing without a gap between what's on screen and what the real Typst compiler would
 actually produce (see [doc/interaction-design.md](doc/interaction-design.md) §4 for the
-term and its use by comparable LaTeX editors). Today it's a work in progress: the
-WYSIWYG view is a regular rich-text editor (ProseMirror + CSS) kept in sync with a
-separate live preview pane rendered by the real compiler, alongside raw Typst/Markdown
-source views and an experimental "Live cursor" view (a real caret/selection drawn
-directly on the live-compiled document, no separate preview pane — see Features below)
-that's the current step toward closing that gap. The target end state, per the
-**focus-reveals-source** design, collapses these into one surface where every block
-renders normally except the one currently focused, which shows its native editable
-source — see [plan.md](plan.md) and [doc/interaction-design.md](doc/interaction-design.md)
-for the detailed roadmap and rationale.
+term and its use by comparable LaTeX editors).
+
+Today it's a work in progress, with four views of the same document: a regular
+rich-text WYSIWYG editor (ProseMirror + CSS) kept in sync with a separate live preview
+pane; raw Typst and Markdown source views; and **Live cursor**, built around
+**focus-reveals-source** — every paragraph renders normally except the one currently
+focused, which becomes its own native, editable source-text region (free undo/redo,
+IME, copy/paste), with no separate preview pane at all. Live cursor is the current step
+toward closing the WYSIWYG gap; the other three views are expected to eventually be
+absorbed into it, but it isn't the default view yet. See [plan.md](plan.md) and
+[doc/interaction-design.md](doc/interaction-design.md) for the roadmap and what's still
+open before that happens.
 
 ## Features
 
 - **WYSIWYG, Typst source, Markdown, and Live cursor views** of the same document —
-  switch freely, content and formatting survive the round trip. Live cursor is
-  experimental: a self-drawn caret/selection with click-to-position, drag-to-select,
-  and typing (including CJK IME) directly on the live-compiled render.
+  switch freely, content and formatting survive the round trip.
+- **Live cursor** (see above): cross-block undo/redo, Ctrl/Cmd+B/I, Up/Down navigation
+  across a block boundary, and reference-chain navigation (jump to where a
+  variable/label was declared) — all work across the whole document, not just within
+  one focused block. A persistent toolbar covers headings/lists/tables/marks.
 - **Rich content**: headings, lists, tables, images/figures, and links, all directly
-  editable in the WYSIWYG view.
+  editable in the WYSIWYG view (and, via its own toolbar, in Live cursor).
 - **Live preview** rendered by the real `typst::compile`, not a reimplementation —
   recompiled as you type.
 - **Click-to-source / cursor-to-preview sync** — click the preview to jump the editor
   cursor there, and vice versa.
 - **Inline diagnostics** — compiler errors and warnings surface next to the preview
   instead of crashing the app.
-- **Floating toolbar and `/` slash-command menu** for formatting and inserting blocks.
-- **Open / Save / Save As** (native File menu), a recent-files list, and an
-  unsaved-changes guard.
+- **Floating toolbar and `/` slash-command menu** for formatting and inserting blocks
+  in the WYSIWYG view (Live cursor has its own toolbar instead, no slash menu yet).
+- **Open / Save / Save As** (native File menu), a recent-files list, an
+  unsaved-changes guard, and autosave (once a file has been saved at least once,
+  further edits are written to it automatically a couple of seconds after you pause —
+  manual save always still works).
 - **Export to PDF.**
 - Embedded fonts, including CJK support.
 

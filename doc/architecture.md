@@ -18,10 +18,12 @@ Typst source  <---parse/serialize--->  Editor Model (ProseMirror doc)  <---parse
 - **Preview always goes through real Typst source + the real Typst compiler.** On every
   debounced change, the current model serializes to Typst source and compiles, regardless
   of which view is active.
-- **The Live cursor view (Phase 3 M20–M23) is a second, source-first editing path, not
-  routed through the Editor Model** — it edits Typst source text directly and
-  self-draws a cursor/selection layer against the compiled `Frame`'s own geometry
-  instead. See Key technical decisions below and
+- **The Live cursor view (Phase 3 M20–M23, Phase 4's focus-reveals-source) is a second,
+  source-first editing path, not routed through the Editor Model.** A focused block
+  becomes a real, native `<textarea>` on its own raw Typst source; every other block
+  stays rendered. Only a genuine cross-block selection falls back to M20's original
+  mechanism, a self-drawn cursor/selection layer on the compiled `Frame`'s own
+  geometry. See Key technical decisions below and
   [phase3-single-view.md](phase3-single-view.md) M15 for why.
 
 ## Process split
@@ -60,9 +62,12 @@ Reorganized 2026-09-04 into five folders mirroring the architecture:
   `wysiwygCommands.ts`, `SourceEditor.tsx`. Also, since M20 (Phase 3's
   revised mechanism — see below): `TypstLiveView.tsx` (the "Live cursor"
   view, no PM involved), `typstCursor.ts` (its pure geometry/offset
-  math, tested independently of React/Tauri), and `structuralCommand.ts`
+  math, tested independently of React/Tauri), `structuralCommand.ts`
   (M23 — runs a `wysiwygCommands.ts` PM command against a throwaway
-  `EditorState` for the Live cursor view's block-level toolbar).
+  `EditorState` for the Live cursor view's block-level toolbar), and
+  `editHistory.ts` (Phase 4 — cross-block undo/redo history: delta-based
+  entries, coalescing, pure and tested independently, same split as
+  `typstCursor.ts`).
 - `shell/` — app-level, non-editing concerns: `fileIO.ts`, `recentFiles.ts`,
   `appMenu.ts`.
 - `util/` — small pure helpers: `offsets.ts`, `diagnosticPosition.ts`,
