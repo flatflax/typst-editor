@@ -85,6 +85,17 @@ const INITIAL_AST: AstDocument = {
 };
 const INITIAL_DOC = typstAstToDoc(INITIAL_AST);
 
+// How long to wait, after an edit, before autosaving (interaction-design.md
+// §7) — much longer than `COMPILE_DEBOUNCE_MS` on purpose: unlike the
+// preview recompile, a save round-trips through `commitCurrentView()`,
+// which for the Typst-source-backed views is a real Rust parse
+// (`parse_typst_ast`), not something to repeat on every 150ms compile tick.
+// 2000ms matches Obsidian's own published behavior for the closest
+// comparable product (local, single-file, no-cloud editor) — see the plan
+// file's research for why this project ended up in that reference class
+// rather than Typora's (its own closest interaction-design reference,
+// which instead uses a separate recovery file on Windows/Linux).
+const AUTOSAVE_DEBOUNCE_MS = 2000;
 
 type ViewMode = "wysiwyg" | "typst" | "markdown" | "typst-live";
 
@@ -193,6 +204,29 @@ function App() {
 
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+
+  // Autosave (interaction-design.md §7, P1) — writes straight to the real
+  // file via the same path manual save uses (`writeCurrentDoc`), not a
+  // separate recovery/draft file; see the plan file's own "关键设计决策" for
+  // why (no user data to prefer one over the other, chose the cheaper,
+  // more-reversible option). Mirrors the compile-debounce effect just above
+  // (`useEffect` + `setTimeout` + cleanup, keyed on whatever should restart
+  // the wait) rather than `setInterval` — this project has no interval-based
+  // timer anywhere and this isn't the place to introduce one.
+  useEffect(() => {
+    if (!filePath || !dirty) return;
+    const timer = setTimeout(() => {
+      // Re-checked at fire time, not just at arm time: a manual Ctrl+S
+      // during this window already cleared it, making this trigger a no-op
+      // — `dirtyRef` (above) exists exactly for reading the current value
+      // from inside a timer callback without a stale closure.
+      if (!dirtyRef.current) return;
+      writeCurrentDoc(filePath, fileSpoke)
+        .then(() => setInvokeError(null))
+        .catch((err) => setInvokeError(String(err)));
+    }, AUTOSAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [filePath, fileSpoke, dirty, derived.source, markdownText]);
 
   // Native window title mirrors the in-app `.file-title` label (`titleFor`
   // was already written as a "title-bar label" — this is the actual title

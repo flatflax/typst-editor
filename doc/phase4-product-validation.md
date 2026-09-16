@@ -1229,3 +1229,40 @@ browser behavior worth deferring to on a plain `<textarea>` here (unlike undo/re
 this always `preventDefault`s and dispatches immediately. `tsc`/`vitest` (302 tests)
 clean; other toolbar buttons (headings, lists, tables, code, link) remain button-only,
 matching this session's scope (B/I specifically, not full toolbar keymap coverage).
+
+### Autosave
+
+The last open P1 item from interaction-design.md §7 ("autosave + manual save coexist" —
+decided in principle back on 2026-09-09, mechanism never specified). Implemented
+(2026-09-16) as a straight write to the real file, reusing the existing manual-save path
+verbatim rather than introducing a separate recovery/draft-file concept — see
+interaction-design.md §10 结论 21 for the full reasoning (researched Obsidian/Typora/
+VSCode/Word first; the two closest comparable products disagree, so this was a
+no-user-data-available, pick-the-cheaper-and-more-reversible-option call, explicitly
+logged as unvalidated rather than presented as a settled preference).
+
+`App.tsx`: a new `AUTOSAVE_DEBOUNCE_MS` (2000ms) constant and a `useEffect` mirroring the
+existing compile-debounce effect's own shape (`setTimeout` + cleanup, not `setInterval` —
+confirmed this project has no interval-based timer anywhere to date) — on a 2s pause with
+`filePath` set and `dirty` true, calls the existing `writeCurrentDoc(filePath, fileSpoke)`
+directly (not `handleSave()`, to skip its no-path→Save-As redirect and its recent-files-
+list bump, neither of which belongs in a silent background write). Re-checks `dirtyRef.
+current` (already existed) at fire time, not just at arm time, so a manual Ctrl+S landing
+inside the debounce window correctly turns the pending autosave into a no-op instead of a
+redundant write. Zero changes to `writeCurrentDoc`, `dirty`'s own computation, `titleFor`,
+or either unsaved-changes prompt (`confirmDiscardIfDirty`, `onCloseRequested`) — all four
+already read only the `dirty` boolean, so they automatically get more accurate once
+autosave exists (the "you have unsaved changes" window shrinks from "however long since
+you last remembered to save" to "the last ≤2s of edits"), without needing any code of
+their own to change.
+
+Known, deliberately-unsolved limitation carried over from the existing "focus reveals
+source" commit model, not something autosave introduces: `derived.source` (Live cursor's
+contribution to the autosave effect's own dependencies) only changes at an actual commit
+point (blur, block switch, toolbar command) — continuous typing inside a still-focused,
+not-yet-blurred block doesn't re-arm the autosave debounce, the same way it doesn't move
+the dirty indicator either. `tsc`/`vitest` (302 tests) clean; no backend changes. Real-
+machine verification (each view mode actually writes to disk unprompted, an unsaved-as
+document never autosaves, a manual save mid-debounce doesn't double-write, the discard
+prompts fire/don't-fire at the right moments) is the next step, not yet done at time of
+writing.
