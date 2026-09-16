@@ -1873,6 +1873,19 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   function handleGlobalKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (!event.ctrlKey && !event.metaKey) return;
     const key = event.key.toLowerCase();
+
+    // Ctrl/Cmd+B/I — no native browser behavior worth deferring to on a
+    // plain `<textarea>` (unlike undo/redo), so this dispatches straight to
+    // `runToolbarCommand` with the same steps the B/I toolbar buttons
+    // already use, rather than reimplementing anything. Works in both
+    // combined and focused-block mode, since `runToolbarCommand` already
+    // handles both.
+    if (key === "b" || key === "i") {
+      event.preventDefault();
+      void runToolbarCommand([key === "b" ? toggleStrong : toggleEm]);
+      return;
+    }
+
     const isUndo = key === "z" && !event.shiftKey;
     const isRedo = (key === "z" && event.shiftKey) || key === "y";
     if (!isUndo && !isRedo) return;

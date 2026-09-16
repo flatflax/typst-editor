@@ -1213,3 +1213,19 @@ the previous one. **Fixed** with a `docGeneration` counter in `App.tsx`, bumped 
 every document load, discarding not just undo history but every other piece of
 `TypstLiveView`-local state that has no business surviving a document switch either
 (which block was focused, in-progress draft text, cursor position).
+
+### Ctrl/Cmd+B and Ctrl/Cmd+I keyboard shortcuts
+
+Live cursor's persistent toolbar (M23 slice 1) was button-only — Ctrl+S already worked
+app-wide via the native File menu (`appMenu.ts`), but bold/italic had no keyboard path,
+one of the P0 "basic keyboard shortcuts" gaps interaction-design.md §8 calls for.
+Implemented (2026-09-16) in `handleGlobalKeyDown` (`TypstLiveView.tsx`, the same handler
+undo/redo already bound on the outer container): Ctrl/Cmd+B/I dispatch straight to
+`runToolbarCommand([toggleStrong])`/`runToolbarCommand([toggleEm])` — the exact same
+steps the B/I toolbar buttons already run, not a parallel implementation — so it works
+in both combined and focused-block mode for free, and (since `runToolbarCommand` already
+calls `commitSnapshot`) is undoable the same way a button click already is. No native
+browser behavior worth deferring to on a plain `<textarea>` here (unlike undo/redo), so
+this always `preventDefault`s and dispatches immediately. `tsc`/`vitest` (302 tests)
+clean; other toolbar buttons (headings, lists, tables, code, link) remain button-only,
+matching this session's scope (B/I specifically, not full toolbar keymap coverage).
