@@ -42,8 +42,8 @@ Typst source  <---parse/serialize--->  Editor Model (ProseMirror doc)  <---parse
 - `geometry_for_range`/`block_geometry` (`geometry.rs`, Phase 3 M14A/M20) — walk the
   compiled `Frame` tree for a source byte range and return rendered geometry (page,
   x/y, width/height, baseline), generalizing `jump_from_click`/`jump_from_cursor`'s
-  span-matching from a point to a range. Backs the Live cursor view's self-drawn
-  cursor/selection.
+  span-matching from a point to a range. Backs the Live cursor view's block layout and
+  cursor/selection positioning.
 
 **TypeScript frontend** owns the Editor Model and both source-format conversions —
 ProseMirror already lives there, and Markdown parsing has mature TS-typed libraries:
@@ -88,39 +88,23 @@ structure of its own.
   (font/file/date helpers), `typst-render`/`typst-svg`, `typst-ide` (click/cursor
   position mapping).
 
-- **Bidirectional position mapping via `typst-ide`**: `jump_from_click_in_frame(world,
-  doc, frame, click_point) -> Option<Jump>` and `jump_from_cursor(doc, source,
-  cursor_byte_offset) -> Vec<PagedPosition>` give a direct, library-backed link between
-  Typst source and the rendered preview. Requires a small `IdeWorld` impl on
-  `TauriWorld`.
-  - **Risk**: `typst-ide` is pre-1.0 and versioned in lockstep with core `typst`;
-    `tinymist` (the most mature real-world consumer) hand-rolls its own equivalent in
-    `tinymist-query` instead of depending on it. Treat the API as tested but not
-    production-validated by prior art — pin tightly, expect signature churn on `typst`
-    upgrades.
-  - **Precision**: sync precision comes from these Rust-side functions on the compiled
-    `Frame`, not the output format. SVG is resolution-independent (pt↔pixel ratio from
-    `viewBox`, no re-render on zoom) and just as easy to overlay a caret/highlight on as
-    canvas — canvas was rejected (adds DPI/zoom-tracking costs, no precision gain, since
-    neither format carries per-glyph source-span metadata). `jump_from_cursor` returns a
-    single `Point`; range/word highlighting would need separate bounding-box extraction
-    work regardless of format.
-  - **Extended to WYSIWYG in M5**: `pmDocToTypstWithPositions` records a PM-position ⇄
-    Typst-byte-offset range per inline leaf and interpolates proportionally within a run
-    for both lookup directions. Still approximate *inside* a marked-up run — Typst's
-    `*`/`_`/`` ` `` wrapper chars and text escaping make a run's Typst byte length
-    diverge from its PM character length. Accepted as an MVP limitation.
-  - **Scope, since Phase 3's M15 (see [phase3-single-view.md](phase3-single-view.md)
-    and [design-principles.md](design-principles.md)'s revised rule 2)**: this PM-position
-    mapping stays load-bearing for Phase 1/2's split-pane WYSIWYG ⇄ preview click/cursor
-    sync (`App.tsx`'s `handlePreviewClick`/`highlightFromCursor`), but is *not* what the
-    Phase 3 "Live cursor" view (M20, `TypstLiveView.tsx`) uses. M15 found that
-    cursor/selection can't be split across two independently-laid-out systems rendering
-    the same region (PM/CSS vs. Typst) — M20's cursor is addressed purely in Typst byte
-    offsets, positioned from real rendered geometry (`geometry_for_range`/
-    `block_geometry`, M14A), with no PM position map in the loop at all. Two coexisting
-    position-mapping mechanisms, serving two different views, not one being upgraded into
-    the other.
+- **Bidirectional position mapping via `typst-ide`**: `jump_from_click_in_frame`/
+  `jump_from_cursor` give a direct, library-backed link between Typst source and the
+  rendered preview (a small `IdeWorld` impl on `TauriWorld`). This backs the WYSIWYG
+  view's split-pane click/cursor sync only — Live cursor uses a different mechanism
+  entirely (`geometry_for_range`/`block_geometry`, no PM position map involved); see
+  Hub-and-spoke above and [design-principles.md](design-principles.md)'s M15 revision
+  for why they don't share one.
+  - **Risk**: `typst-ide` is pre-1.0, versioned in lockstep with core `typst` — even
+    `tinymist` hand-rolls its own equivalent rather than depending on it. Pin tightly,
+    expect signature churn on `typst` upgrades.
+  - **Precision** comes from these Rust-side functions running on the compiled
+    `Frame`, not the output format — SVG was chosen over canvas for being
+    resolution-independent, not for any precision difference between them.
+  - **WYSIWYG-specific approximation** (M5): `pmDocToTypstWithPositions` maps PM
+    positions to Typst byte ranges per inline leaf, interpolating within a run — still
+    approximate *inside* a run, since marks/escaping make a run's Typst byte length
+    diverge from its PM character length. Accepted MVP limitation.
 
 - **No WASM.** Tauri gives a native Rust backend; embed Typst natively (same pattern as
   `typst-cli`/`tinymist`), not compiled to WASM (that's for browser-only apps).
@@ -143,14 +127,9 @@ structure of its own.
   originating block instead of a raw generated-source line number.
 
 - **Editor**: raw ProseMirror (`prosemirror-model`/`-view`/`-state`/`-commands`/
-  `-keymap`), custom schema — not Milkdown (its parser/serializer is markdown-first and
-  would fight a second Typst source format on the same schema). Source-mode views use
-  CodeMirror 6 in plain-text mode.
-  - **Fixed post-M6**: `basicSetup`'s `closeBrackets()` auto-closes `(`/`[`/`{`, which
-    Typst/Markdown source uses freely as plain syntax (e.g.
-    `#table(columns: (1fr, 2fr), [a], [b])`) — typing or pasting a complete snippet left
-    extra auto-inserted closing brackets, unbalancing delimiters and corrupting content
-    on view switch. Fixed in `SourceEditor.tsx` by using `basicSetup`'s extension list
-    minus `closeBrackets()`/`closeBracketsKeymap`.
+  `-keymap`), custom schema — not Milkdown (markdown-first, would fight a second Typst
+  source format on the same schema). Source-mode views use CodeMirror 6 in plain-text
+  mode, `basicSetup` minus `closeBrackets()` (its auto-closing of `(`/`[`/`{` corrupted
+  content that uses them as plain syntax, e.g. `#table(columns: (1fr, 2fr), [a], [b])`).
 
 - **React + TypeScript + Vite** frontend, **Tauri v2** shell.
