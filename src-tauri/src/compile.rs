@@ -39,6 +39,12 @@ pub struct CompileDiagnostic {
     /// marker at the exact failing line instead of just listing text.
     line: Option<usize>,
     column: Option<usize>,
+    /// Byte range the diagnostic's span resolves to, when it resolves at
+    /// all (absent for detached spans, same cases as `line`/`column` being
+    /// `None`) — the Live cursor view's fallback for locating which block to
+    /// show an error placeholder on, when it has no better "where was the
+    /// user just editing" signal of its own (doc/interaction-design.md §10).
+    range: Option<[usize; 2]>,
 }
 
 #[derive(Serialize)]
@@ -54,7 +60,8 @@ pub struct CompileResult {
 }
 
 fn to_diagnostic(world: &TauriWorld, diag: &SourceDiagnostic) -> CompileDiagnostic {
-    let position = world.range(diag.span).and_then(|range| {
+    let range = world.range(diag.span);
+    let position = range.clone().and_then(|range| {
         let source = world.source(world.main()).ok()?;
         source.lines().byte_to_line_column(range.start)
     });
@@ -67,6 +74,7 @@ fn to_diagnostic(world: &TauriWorld, diag: &SourceDiagnostic) -> CompileDiagnost
         message: diag.message.to_string(),
         line: position.map(|(line, _)| line + 1),
         column: position.map(|(_, column)| column + 1),
+        range: range.map(|r| [r.start, r.end]),
     }
 }
 

@@ -125,6 +125,19 @@ function App() {
   // some other view is active.
   const [liveTypstText, setLiveTypstText] = useState(() => pmDocToTypst(INITIAL_DOC));
   const [result, setResult] = useState<CompileResult | null>(null);
+  // Diagnostics from the *latest* compile attempt, success or failure —
+  // unlike `result` (below), this always reflects the most recent source,
+  // never frozen. Split out from `result` for the Live cursor view's
+  // compile-failure fallback (interaction-design.md §10): a failing compile
+  // must not blank last-known-good rendering, but must still surface fresh
+  // error text.
+  const [diagnostics, setDiagnostics] = useState<EditorDiagnostic[]>([]);
+  // The source `result.svg`/`result.page_offsets_pt` actually correspond to
+  // — only advances alongside `result`, i.e. only on a *successful* compile.
+  // Lets the Live cursor view keep rendering everything except the block
+  // that's currently failing to compile, against a source guaranteed to
+  // match what's on screen, instead of `derived.source` racing ahead of it.
+  const [lastGoodSource, setLastGoodSource] = useState<string | null>(null);
   const [invokeError, setInvokeError] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<{ clientX: number; clientY: number } | null>(null);
 
@@ -187,10 +200,23 @@ function App() {
 
   // Debounced derived-Typst-source -> compile_typst -> SVG preview loop,
   // active regardless of which view is being edited (plan.md M5).
+  //
+  // `diagnostics` always updates, but `result`/`lastGoodSource` only advance
+  // on success — a failing compile freezes the Live cursor view's rendering
+  // at its last good state instead of blanking it (interaction-design.md
+  // §10's "冻结上次编译成功的结果" decision), while still surfacing fresh
+  // error text everywhere diagnostics are shown.
   useEffect(() => {
+    const source = derived.source;
     const timer = setTimeout(() => {
-      invoke<CompileResult>("compile_typst", { source: derived.source, baseDir: documentDirRef.current })
-        .then(setResult)
+      invoke<CompileResult>("compile_typst", { source, baseDir: documentDirRef.current })
+        .then((next) => {
+          setDiagnostics(next.diagnostics);
+          if (next.svg != null) {
+            setResult(next);
+            setLastGoodSource(source);
+          }
+        })
         .catch((err) => setInvokeError(String(err)));
     }, COMPILE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
@@ -549,7 +575,7 @@ function App() {
               initialValue={typstText}
               onChange={setTypstText}
               onCursorChange={handleTypstCursorChange}
-              diagnostics={viewMode === "typst" ? result?.diagnostics : undefined}
+              diagnostics={viewMode === "typst" ? diagnostics : undefined}
             />
           </div>
           <div hidden={viewMode !== "markdown"} className="view-panel">
@@ -559,17 +585,18 @@ function App() {
             <TypstLiveView
               key={docGeneration}
               source={derived.source}
+              renderSource={lastGoodSource ?? derived.source}
               svg={result?.svg ?? null}
               pageOffsetsPt={result?.page_offsets_pt ?? []}
               documentDir={documentDir}
-              diagnostics={result?.diagnostics ?? []}
+              diagnostics={diagnostics}
               onChange={setLiveTypstText}
             />
           </div>
         </div>
 
         <div className="preview-pane">
-          {result?.diagnostics.map((d, i) => (
+          {diagnostics.map((d, i) => (
             <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
               {d.severity}
               {d.line != null ? ` at ${d.line}:${d.column}` : ""}: {d.message}

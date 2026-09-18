@@ -6,8 +6,8 @@
 |---|---|---|---|
 | 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
 | 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG (engineering validation) | M13–M22 | Validate that single-view editing is technically feasible: perf ceiling, rendered geometry, CJK IME, a working edit loop | Closed 2026-09-09 — feasibility validated (M14/M14A/M18/M20/M21/M22 positive, M15 negative but superseded); M23 deprioritized to backlog |
-| 4 — Product Validation | Spikes 1–3, then real implementation | Validate the "focus-reveals-source" interaction model, then build it out as the Live cursor view's real editing mechanism | In progress — spikes validated (2026-09-10) and landed as Live cursor's real editing mechanism; several P0/P1 items shipped since (see below); currently designing a fallback for a confirmed whole-document compile-failure bug; independent user validation still not started |
+| 3 — Single-View WYSIWYG (engineering validation) | M13–M22 | Validate that single-view editing is technically feasible: perf ceiling, rendered geometry, CJK IME, a working edit loop | Closed 2026-09-09 — feasibility validated (M14/M14A/M18/M20/M21/M22 positive, M15 negative but superseded); M23 backlogged at closing, later picked back up under Phase 4 (see below) |
+| 4 — Product Validation | Spikes 1–3, then real implementation | Validate the "focus-reveals-source" interaction model, then build it out as the Live cursor view's real editing mechanism | In progress — spikes validated (2026-09-10) and landed as Live cursor's real editing mechanism; several P0/P1 items shipped since (see below); shipped a whole-document compile-failure fallback (freeze last good render, red error placeholder — 2026-09-17/18); independent user validation still not started |
 
 Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Phase 4 — Product Validation](doc/phase4-product-validation.md) · [Interaction Design](doc/interaction-design.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
 
@@ -50,7 +50,9 @@ Two standing rules govern all future work, not just one phase — see
    directly authored; otherwise it stays inspector-only, addressed by source range.
    Revised after M15 (below): Typst owns visual geometry only; the editing system
    owns cursor/selection state and navigation, rendered against that geometry —
-   never a second, independently-laid-out system.
+   never a second, independently-laid-out system. Superseded again, for the Live
+   cursor view specifically, once focus-reveals-source was adopted: a focused block is
+   always directly editable, geometry or not.
 
 ## Phase 3 — closed (engineering validation)
 

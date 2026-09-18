@@ -129,3 +129,35 @@ export function blockAt(ranges: [number, number][], byteOffset: number): number 
   }
   return null;
 }
+
+type ErrorDiagnostic = { severity: "error" | "warning"; range?: [number, number] };
+
+// Which block should show the "compile failed" red placeholder (see
+// interaction-design.md §10's "冻结上次编译成功的结果" decision). Typst's
+// error-recovering parser doesn't always report a broken construct's span at
+// the construct itself — recovery can swallow everything after the real
+// mistake and report the span much later (even at EOF) — so a byte offset the
+// caller *knows* was just edited (`lastEditByte`) is a more reliable signal
+// than trusting the diagnostic's own span, when available. Falls back to the
+// first error diagnostic with a resolvable range when there's no such offset
+// (e.g. a file that was already broken before this session touched it).
+export function selectErrorBlock(
+  ranges: [number, number][],
+  diagnostics: ErrorDiagnostic[],
+  lastEditByte: number | null,
+): number | null {
+  if (!diagnostics.some((d) => d.severity === "error")) return null;
+
+  if (lastEditByte != null) {
+    const idx = blockAt(ranges, lastEditByte);
+    if (idx != null) return idx;
+  }
+
+  for (const d of diagnostics) {
+    if (d.severity !== "error" || !d.range) continue;
+    const idx = blockAt(ranges, d.range[0]);
+    if (idx != null) return idx;
+  }
+
+  return null;
+}

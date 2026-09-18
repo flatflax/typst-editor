@@ -55,7 +55,7 @@
 // wired to it yet); Up/Down navigation across a block boundary; multi-page
 // documents specifically in split mode (untested risk, not just undone);
 // reference-chain navigation UI for `#set`/`#let`/labels.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Command } from "prosemirror-state";
 import type { EditorDiagnostic } from "./SourceEditor";
@@ -92,7 +92,7 @@ import {
   toggleOrderedList,
   toggleStrong,
 } from "./wysiwygCommands";
-import { blockAt, blockByteRanges } from "./blockSplit";
+import { blockAt, blockByteRanges, selectErrorBlock } from "./blockSplit";
 import {
   emptyHistory,
   popRedo,
@@ -174,6 +174,13 @@ const TOOLBAR_ITEMS: { label: string; steps: Command[] }[] = [
 
 type Props = {
   source: string;
+  // The source `svg`/`pageOffsetsPt` actually correspond to — only advances
+  // on a successful compile (App.tsx), so it lags behind `source` exactly
+  // while the live document fails to compile. Used only by the passive,
+  // non-focused-block rendering paths (see `ensureFrozenBlockGeometry`) so
+  // an unrelated compile error elsewhere doesn't blank every other block —
+  // interaction-design.md §10's "冻结上次编译成功的结果" decision.
+  renderSource: string;
   svg: string | null;
   pageOffsetsPt: number[];
   documentDir: string | null;
@@ -197,7 +204,7 @@ function sliceByBytes(source: string, startByte: number, endByte: number): strin
   return source.slice(byteToUtf16Offset(source, startByte), byteToUtf16Offset(source, endByte));
 }
 
-const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, onChange }: Props) => {
+const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, diagnostics, onChange }: Props) => {
   // Replacing `.typst-live-svg`'s `innerHTML` on every recompile (below)
   // reset this scroll container back to the top on a long, actually-
   // scrolled document — found live-testing a 20-section multi-page
@@ -296,21 +303,31 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   const anchorOffsetRef = useRef(anchorOffset);
   anchorOffsetRef.current = anchorOffset;
 
-  // M22: whether the currently-typed `source` is reflected by the
-  // currently-*displayed* `svg` yet. Two explicit effects, not one derived
+  // M22: whether the currently-typed `source` has a compile attempt (success
+  // *or* failure) resolved for it yet. Two explicit effects, not one derived
   // from a ref: mutating a ref alone doesn't trigger a re-render, so
   // clearing "pending" that way would only take visible effect once
   // *something else* (e.g. the geometry-refetch effect below) happened to
   // also re-render around the same time — true in practice since both
   // debounces share a timing constant, but incidental, not guaranteed.
   // Explicit `setIsPending` calls make hiding the badge not depend on that.
+  //
+  // Cleared on `diagnostics` changing, not just `svg` — `svg` only advances
+  // on a *successful* compile now (interaction-design.md §10's freeze
+  // decision), so a failing compile would otherwise never clear this at
+  // all, permanently stuck `true`: clicks in combined mode would stop
+  // resolving (`offsetAtClient`'s own `isPending` guard) and every other
+  // block's crop would stay on "Compiling…" forever — defeating the freeze
+  // fallback's entire point the moment any error exists. `diagnostics`
+  // (App.tsx) updates on every compile attempt regardless of outcome, so it
+  // correctly signals "resolved" in both cases.
   const [isPending, setIsPending] = useState(false);
   useEffect(() => {
     setIsPending(true);
   }, [source]);
   useEffect(() => {
     setIsPending(false);
-  }, [svg]);
+  }, [svg, diagnostics]);
 
   // Block model (interaction-design.md §6, validated in Phase 4's spikes —
   // phase4-product-validation.md): when the cursor/selection falls entirely
@@ -520,8 +537,107 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   const elementToBlockIndexRef = useRef<WeakMap<Element, number>>(new WeakMap());
   const sourceRef = useRef(source);
   sourceRef.current = source;
+  const renderSourceRef = useRef(renderSource);
+  renderSourceRef.current = renderSource;
   const focusedBlockRef = useRef(focusedBlock);
   focusedBlockRef.current = focusedBlock;
+
+  // Backfills an "other" block's crop from `renderSource` (the last
+  // successfully-compiled source, matching what `svg` currently shows)
+  // instead of the live, currently-failing `source` — only relevant while
+  // `source !== renderSource` (a compile is currently failing). Kept as its
+  // own small cache, entirely independent from `blockInkRangesRef` above
+  // (which always tracks live `source`, for `enterFocus`/`switchFocusTo`'s
+  // own focused-block-margin precision): sharing one cache between "the
+  // source that's currently failing" and "the source that last rendered
+  // successfully" would thrash — every active-path call keyed to live
+  // `source` would invalidate whatever this just resolved against
+  // `renderSource`, and vice versa, each wiping `otherBlocksYRanges` back to
+  // placeholders the other had just filled in.
+  //
+  // Guarded by a block-*count* match between `source` and `renderSource`:
+  // this function's whole premise is "block index `i` in `source` is still
+  // the same paragraph as block index `i` in `renderSource`," which only
+  // holds when the edit that broke compilation didn't also add/remove a
+  // block boundary (the common case — a syntax typo inside one paragraph).
+  // When counts differ, this deliberately does nothing rather than risk
+  // silently cropping the *wrong* paragraph out of the frozen `svg` under
+  // the right one's label — degrading to the placeholder is always safe;
+  // showing misattributed content never is.
+  const frozenInkRangesRef = useRef<Map<number, BlockYRange>>(new Map());
+  const frozenEmptyIndicesRef = useRef<Set<number>>(new Set());
+  const frozenInkSourceRef = useRef<string | null>(null);
+  const frozenPendingFetchRef = useRef<Set<number>>(new Set());
+
+  async function ensureFrozenBlockGeometry(indices: number[]): Promise<void> {
+    const renderSrc = renderSourceRef.current;
+    if (renderSrc === sourceRef.current) return;
+    if (blockByteRanges(sourceRef.current).length !== blockByteRanges(renderSrc).length) return;
+
+    if (frozenInkSourceRef.current !== renderSrc) {
+      frozenInkRangesRef.current = new Map();
+      frozenEmptyIndicesRef.current = new Set();
+      frozenPendingFetchRef.current = new Set();
+      frozenInkSourceRef.current = renderSrc;
+    }
+
+    const totalBlocks = blockByteRanges(renderSrc).length;
+    const validIndices = indices.filter((i) => i >= 0 && i < totalBlocks);
+    const toFetch = validIndices.filter(
+      (i) =>
+        !frozenInkRangesRef.current.has(i) &&
+        !frozenEmptyIndicesRef.current.has(i) &&
+        !frozenPendingFetchRef.current.has(i),
+    );
+    if (toFetch.length === 0) return;
+
+    for (const i of toFetch) frozenPendingFetchRef.current.add(i);
+    const allRanges = blockByteRanges(renderSrc);
+    let results: RawRangeBox[][] | null = null;
+    try {
+      results = await invoke<RawRangeBox[][]>("block_geometry", {
+        source: renderSrc,
+        baseDir: documentDir,
+        ranges: toFetch.map((i) => allRanges[i]),
+      });
+    } catch {
+      results = null;
+    }
+    for (const i of toFetch) frozenPendingFetchRef.current.delete(i);
+    // A newer `renderSource` landed (compile succeeded) while this was in
+    // flight — these results are for a document that's no longer the frozen
+    // one, discard rather than merge.
+    if (frozenInkSourceRef.current !== renderSrc) return;
+    if (!results) return;
+
+    const pageDims = pageDimsFromSvg(svg);
+    if (pageDims == null) return;
+    results.forEach((boxes, n) => {
+      const i = toFetch[n];
+      const ink = unionYRange(selectionRectsFromBoxes(pageOffsetsPt, boxes));
+      if (ink) frozenInkRangesRef.current.set(i, ink);
+      else frozenEmptyIndicesRef.current.add(i);
+    });
+
+    const otherUpdates = new Map<number, BlockYRange>();
+    for (const i of validIndices) {
+      const bounds = fairShareBoundsFromInk(
+        i,
+        frozenInkRangesRef.current,
+        frozenEmptyIndicesRef.current,
+        totalBlocks,
+        pageDims.heightPt,
+      );
+      if (bounds) otherUpdates.set(i, bounds);
+    }
+    if (otherUpdates.size > 0) {
+      setOtherBlocksYRanges((prev) => {
+        const next = new Map(prev);
+        for (const [i, r] of otherUpdates) next.set(i, r);
+        return next;
+      });
+    }
+  }
 
   function ensureBlockObserver(): IntersectionObserver {
     if (!blockObserverRef.current) {
@@ -552,6 +668,20 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
               return Math.abs(a.idx - focused) - Math.abs(b.idx - focused);
             });
           for (const { idx } of toProcess) {
+            // While the live document is failing to compile (`source !==
+            // renderSource`), fetching against `source` itself would just
+            // come back empty (a whole-document compile failure degrades
+            // every requested range uniformly, compile.rs) — backfill this
+            // block's crop from the last-known-good `renderSource` instead,
+            // so an error elsewhere doesn't blank an unrelated, already-fine
+            // paragraph (interaction-design.md §10).
+            if (sourceRef.current !== renderSourceRef.current) {
+              const alreadyResolved =
+                frozenInkSourceRef.current === renderSourceRef.current &&
+                (frozenInkRangesRef.current.has(idx) || frozenEmptyIndicesRef.current.has(idx));
+              if (!alreadyResolved) void ensureFrozenBlockGeometry([idx - 1, idx, idx + 1]);
+              continue;
+            }
             if (
               blockInkSourceRef.current === sourceRef.current &&
               (blockInkRangesRef.current.has(idx) || blockEmptyIndicesRef.current.has(idx))
@@ -614,13 +744,26 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   //   byte-range replacement, so it stores the *previous* `source`
   //   (closure — i.e. the state from before the whole command ran, not
   //   `effectiveSource`/`current.source`) as a full snapshot instead.
+  // Where the red compile-error placeholder (`errorBlockIdx` below) should
+  // look first — the byte offset this component itself last committed an
+  // edit at, preferred over trusting a diagnostic's own span (Typst's
+  // error-recovering parser can report a broken construct's span somewhere
+  // unhelpful, e.g. at EOF if recovery swallowed everything after the real
+  // mistake — interaction-design.md §10). `null` means "no edit this
+  // session has a specific byte position for" (e.g. undo/redo landing on a
+  // whole-document snapshot) — `selectErrorBlock` falls back to the
+  // diagnostic's own range in that case.
+  const lastEditByteRef = useRef<number | null>(null);
+
   function commitChange(newSource: string, beforeFocus: FocusSnapshot, delta: Delta, coalesce: boolean) {
     historyRef.current = recordChange(historyRef.current, beforeFocus, { kind: "delta", delta }, coalesce, Date.now());
+    lastEditByteRef.current = delta.start;
     onChange(newSource);
   }
 
-  function commitSnapshot(newSource: string, beforeFocus: FocusSnapshot) {
+  function commitSnapshot(newSource: string, beforeFocus: FocusSnapshot, editByte: number) {
     historyRef.current = recordChange(historyRef.current, beforeFocus, { kind: "snapshot", source }, false, Date.now());
+    lastEditByteRef.current = editByte;
     onChange(newSource);
   }
 
@@ -693,6 +836,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
         ? { kind: "snapshot", source: beforeSource, focus: redoFocus, timestampMs: entry.timestampMs }
         : { kind: "deltas", deltas: entry.deltas, focus: redoFocus, timestampMs: entry.timestampMs };
     historyRef.current = { undo: popped.state.undo, redo: pushEntry(popped.state.redo, redoEntry) };
+    lastEditByteRef.current = entry.kind === "deltas" ? (entry.deltas[0]?.start ?? null) : null;
     onChange(afterSource);
     await applyFocus(afterSource, entry.focus);
   }
@@ -709,6 +853,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
         ? { kind: "snapshot", source: beforeSource, focus: undoFocus, timestampMs: entry.timestampMs }
         : { kind: "deltas", deltas: entry.deltas, focus: undoFocus, timestampMs: entry.timestampMs };
     historyRef.current = { undo: pushEntry(popped.state.undo, undoEntry), redo: popped.state.redo };
+    lastEditByteRef.current = entry.kind === "deltas" ? (entry.deltas[0]?.start ?? null) : null;
     onChange(afterSource);
     await applyFocus(afterSource, entry.focus);
   }
@@ -739,7 +884,12 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
   // before the commit, shifted by the focused block's own length delta)
   // rather than trusting its old array index, which the commit can shift
   // out from under it.
-  async function switchFocusTo(oldIdx: number, event: React.MouseEvent<HTMLDivElement>) {
+  // `lockedWidthPx` is read by the caller *before* calling this (rather than
+  // this function taking the click event itself) so a non-click caller (the
+  // diagnostics panel's "locate" button below, which has no rendered SVG of
+  // its own to measure) can just pass `null` and fall back to whatever
+  // `ensureBlockGeometry` resolves instead.
+  async function switchFocusTo(oldIdx: number, lockedWidthPx: number | null) {
     const requestId = ++focusRequestIdRef.current;
     captureScrollForFocusTransition();
     const oldRanges = blockByteRanges(source);
@@ -760,9 +910,7 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     }
     const newRanges = blockByteRanges(effectiveSource);
     const newIdx = blockAt(newRanges, targetByte) ?? Math.min(oldIdx, newRanges.length - 1);
-    // Read before the `await` below — React nulls out `currentTarget` on a
-    // synthetic event once its handler returns synchronously.
-    lockedWidthPxRef.current = event.currentTarget.querySelector("svg")?.getBoundingClientRect().width ?? null;
+    lockedWidthPxRef.current = lockedWidthPx;
     const focusedLayoutPx = await ensureBlockGeometry(effectiveSource, newIdx, [newIdx - 1, newIdx, newIdx + 1]);
     if (focusRequestIdRef.current !== requestId) return;
     draftRef.current = sliceByBytes(effectiveSource, newRanges[newIdx][0], newRanges[newIdx][1]);
@@ -1546,12 +1694,12 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
       // replacement, and `wasFocused` (not `newIdx`) is the focus from
       // *before* this command ran, captured at the very top of this
       // function, before any `await`.
-      commitSnapshot(current.source, { kind: "block", blockIdx: wasFocused });
+      commitSnapshot(current.source, { kind: "block", blockIdx: wasFocused }, current.cursorOffset);
       setFocusedBlockLayoutPx(focusedLayoutPx);
       setFocusGeneration((g) => g + 1);
       setFocusedBlock(newIdx);
     } else {
-      commitSnapshot(current.source, { kind: "combined", cursorOffset, anchorOffset });
+      commitSnapshot(current.source, { kind: "combined", cursorOffset, anchorOffset }, current.cursorOffset);
       setCursorOffset(current.cursorOffset);
       setAnchorOffset(current.anchorOffset);
     }
@@ -1814,7 +1962,44 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
     );
   }
 
+  // Which block (if any) should show the red compile-error placeholder
+  // instead of its normal rendered/placeholder state (interaction-design.md
+  // §10, decision 5) — reads `lastEditByteRef` at the moment `diagnostics`
+  // actually changed, since that's exactly when a fresh compile attempt
+  // (success or failure) just landed.
+  const errorBlockIdx = useMemo(
+    () => selectErrorBlock(blockByteRanges(source), diagnostics, lastEditByteRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [source, diagnostics],
+  );
+
   function renderOtherBlock(idx: number) {
+    if (idx === errorBlockIdx) {
+      const ranges = blockByteRanges(source);
+      const [start, end] = ranges[idx] ?? [0, 0];
+      const text = sliceByBytes(source, start, end);
+      const errorMessages = diagnostics.filter((d) => d.severity === "error");
+      return (
+        <div
+          key={idx}
+          ref={(el) => registerBlockElement(idx, el)}
+          className="typst-live-block-error"
+          tabIndex={0}
+          onClick={(event) =>
+            void switchFocusTo(idx, event.currentTarget.querySelector("svg")?.getBoundingClientRect().width ?? null)
+          }
+          aria-label="Focus to edit source (compile error)"
+        >
+          <pre className="typst-live-block-error-text">{text}</pre>
+          {errorMessages.map((d, i) => (
+            <p key={i} className="typst-live-block-error-message">
+              {d.message}
+            </p>
+          ))}
+        </div>
+      );
+    }
+
     const yRange = otherBlocksYRanges.get(idx);
     // NOT cropped while `isPending` — `svg` is still the *previous* commit's
     // pixels at that point, and `yRange` (fetched fresh against the current
@@ -1845,7 +2030,9 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
         ref={(el) => registerBlockElement(idx, el)}
         className="typst-live-block-rendered"
         tabIndex={0}
-        onClick={(event) => void switchFocusTo(idx, event)}
+        onClick={(event) =>
+          void switchFocusTo(idx, event.currentTarget.querySelector("svg")?.getBoundingClientRect().width ?? null)
+        }
         aria-label="Focus to edit source"
       >
         {cropped ? (
@@ -1927,8 +2114,32 @@ const TypstLiveView = ({ source, svg, pageOffsetsPt, documentDir, diagnostics, o
       </p>
       {diagnostics.map((d, i) => (
         <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
-          {d.severity}
-          {d.line != null ? ` at ${d.line}:${d.column}` : ""}: {d.message}
+          <span>
+            {d.severity}: {d.message}
+          </span>
+          {/* A line:column pair means nothing here the way it does in the
+              Typst-source tab's CodeMirror gutter — Live cursor has no
+              visible line numbers, since most of the document is rendered
+              typeset content, not raw text. `errorBlockIdx` already answers
+              "where," precisely — jump straight there instead of making the
+              user translate a line number into a location by hand. */}
+          {d.severity === "error" && errorBlockIdx != null && focusedBlock !== errorBlockIdx && (
+            <button
+              type="button"
+              className="diagnostic-locate-button"
+              // Prevents the browser's default focus-shift on mousedown —
+              // without it, clicking this button (outside whatever's
+              // currently focused) would blur it first, letting native blur
+              // fire `commitFocusedDraft` *before* this handler runs and
+              // `switchFocusTo` does its own, already-correct commit —
+              // same double-commit risk the toolbar buttons already guard
+              // against for the same reason.
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => void switchFocusTo(errorBlockIdx, null)}
+            >
+              Locate
+            </button>
+          )}
         </p>
       ))}
       {/* Shown regardless of `focusedBlock` — `runToolbarCommand` now handles

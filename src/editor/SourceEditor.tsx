@@ -69,6 +69,8 @@ export type EditorDiagnostic = {
   /** 1-indexed; absent when the diagnostic has no resolvable source position. */
   line?: number;
   column?: number;
+  /** Byte range, when the diagnostic's span resolves to one — see compile.rs's `CompileDiagnostic.range`. */
+  range?: [number, number];
 };
 
 type Props = {

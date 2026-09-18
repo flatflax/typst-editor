@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { utf16ToByteOffset } from "../util/offsets";
-import { blockAt, blockByteRanges } from "./blockSplit";
+import { blockAt, blockByteRanges, selectErrorBlock } from "./blockSplit";
 
 // Reads a byte range back out as a UTF-16 substring, for readable assertions.
 function textOf(source: string, range: [number, number]): string {
@@ -115,3 +115,48 @@ describe("blockAt", () => {
     expect(blockAt(ranges, 999)).toBeNull();
   });
 });
+
+describe("selectErrorBlock", () => {
+  const ranges: [number, number][] = [
+    [0, 4], // "AAAA"
+    [6, 10], // "BBBB"
+  ];
+
+  it("returns null when there are no error-severity diagnostics", () => {
+    expect(selectErrorBlock(ranges, [], 2)).toBeNull();
+    expect(selectErrorBlock(ranges, [{ severity: "warning", range: [0, 1] }], 2)).toBeNull();
+  });
+
+  it("prefers the last-edited byte offset over the diagnostic's own range", () => {
+    // The diagnostic claims block 0 (range [0, 1]), but the edit that
+    // actually triggered it happened in block 1 — matching how a
+    // recovering parser can report a span far from the real mistake.
+    const diagnostics: ErrorDiagnosticLike[] = [{ severity: "error", range: [0, 1] }];
+    expect(selectErrorBlock(ranges, diagnostics, 8)).toBe(1);
+  });
+
+  it("falls back to the diagnostic's range when the edit offset doesn't resolve to a block", () => {
+    const diagnostics: ErrorDiagnosticLike[] = [{ severity: "error", range: [6, 7] }];
+    expect(selectErrorBlock(ranges, diagnostics, 999)).toBe(1);
+  });
+
+  it("falls back to the diagnostic's range when there is no edit offset at all", () => {
+    const diagnostics: ErrorDiagnosticLike[] = [{ severity: "error", range: [6, 7] }];
+    expect(selectErrorBlock(ranges, diagnostics, null)).toBe(1);
+  });
+
+  it("skips error diagnostics with no resolvable range in favor of one that has it", () => {
+    const diagnostics: ErrorDiagnosticLike[] = [
+      { severity: "error" },
+      { severity: "error", range: [6, 7] },
+    ];
+    expect(selectErrorBlock(ranges, diagnostics, null)).toBe(1);
+  });
+
+  it("returns null when nothing resolves to a block", () => {
+    const diagnostics: ErrorDiagnosticLike[] = [{ severity: "error" }];
+    expect(selectErrorBlock(ranges, diagnostics, null)).toBeNull();
+  });
+});
+
+type ErrorDiagnosticLike = { severity: "error" | "warning"; range?: [number, number] };

@@ -335,10 +335,34 @@
 }
 
 .diagnostic {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
   padding: 0.5em 1em;
   margin-bottom: 0.5em;
   border-radius: 6px;
   text-align: left;
+}
+
+/* Live cursor's diagnostics list (TypstLiveView.tsx) has no line-numbered
+   source view to point a "line:column" hint at, so an error diagnostic gets
+   a direct "jump to the block" action instead — `errorBlockIdx` already
+   knows exactly where, precisely, this just acts on it. */
+.diagnostic-locate-button {
+  flex-shrink: 0;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.diagnostic-locate-button:hover,
+.diagnostic-locate-button:focus-visible {
+  background: rgba(161, 0, 0, 0.1);
 }
 
 .diagnostic-error {
@@ -526,6 +550,33 @@
 .typst-live-block-placeholder {
   opacity: 0.5;
   font-style: italic;
+}
+
+/* The compile-error placeholder (interaction-design.md §10, decision 5) —
+   shown on the block whose edit is currently keeping the whole document
+   from compiling, in place of its normal rendered/"Compiling…" state. Reuses
+   `.diagnostic-error`'s own colors rather than inventing a second red. */
+.typst-live-block-error {
+  cursor: text;
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  outline: none;
+  background: #ffe3e3;
+  flex-shrink: 0;
+}
+
+.typst-live-block-error-text {
+  margin: 0 0 0.35rem;
+  color: #a10000;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.typst-live-block-error-message {
+  margin: 0;
+  color: #a10000;
+  font-size: 0.85em;
 }
 
 /* interaction-design.md §10 结论 14 — "which variables/labels this block

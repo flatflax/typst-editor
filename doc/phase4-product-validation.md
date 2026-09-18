@@ -1266,3 +1266,117 @@ machine verification (each view mode actually writes to disk unprompted, an unsa
 document never autosaves, a manual save mid-debounce doesn't double-write, the discard
 prompts fire/don't-fire at the right moments) is the next step, not yet done at time of
 writing.
+
+### Compile-failure fallback for the Live cursor view
+
+interaction-design.md §10 结论 22 records the full option comparison (patch-and-retry,
+auto-fix, freeze-last-good, raw-source fallback, modifying the Typst compiler itself) and
+why "freeze the last successful result" won. Implemented 2026-09-17.
+
+**`src-tauri/src/compile.rs`**: `CompileDiagnostic` gained a `range: Option<[usize; 2]>`
+field (`to_diagnostic` already computed `world.range(diag.span)` for line/column — reused,
+not a second lookup). `compile_typst` itself is unchanged; the freeze happens entirely on
+the frontend.
+
+**`App.tsx`**: the single `result` state split into three, updated on different schedules
+— `result` (`svg`/`page_offsets_pt`) and `lastGoodSource` (which source `result` actually
+corresponds to) only advance on a successful compile; `diagnostics` updates on every
+attempt, success or failure. `TypstLiveView` gets a new `renderSource` prop
+(`lastGoodSource ?? derived.source`) alongside the always-live `source`.
+
+**`src/editor/blockSplit.ts`**: new pure function `selectErrorBlock(ranges, diagnostics,
+lastEditByte)` — which block should show the red error placeholder. Prefers a
+caller-supplied "last edited byte" over trusting a diagnostic's own span, since Typst's
+error-recovering parser can report a broken construct's span somewhere unhelpful (observed
+pattern, not hypothetical: recovery can swallow everything after the real mistake and
+report it near EOF). Falls back to the first error diagnostic with a resolvable range when
+there's no such offset (e.g. a file that was already broken before this session edited it).
+5 new unit tests.
+
+**`TypstLiveView.tsx`**: a new `lastEditByteRef`, updated at every existing commit point
+(`commitChange` from `delta.start`; `commitSnapshot` from a new `editByte` parameter each
+of its two call sites in `runToolbarCommand` already had on hand; `undo`/`redo` from the
+entry being (re)applied — `entry.deltas[0]?.start` for a delta entry, `null` for a
+whole-document snapshot entry, where no single byte position means anything). `errorBlockIdx`
+(`useMemo` on `[source, diagnostics]`) feeds a new branch in `renderOtherBlock`: the block
+at that index renders its own real (unpatched) source text plus the active error
+diagnostics, styled via new `.typst-live-block-error*` classes (`App.css`) reusing
+`.diagnostic-error`'s own red rather than a second color.
+
+A new, independent geometry-fetch path (`ensureFrozenBlockGeometry` + its own small
+`frozenInkRangesRef`/`frozenEmptyIndicesRef`/`frozenInkSourceRef` cache) backfills an
+*other* block's crop from `renderSource` specifically while `source !== renderSource` (a
+compile is currently failing) — wired into the `IntersectionObserver` callback only, not
+`enterFocus`/`switchFocusTo`/`crossBlockBoundary`/`jumpToReference` (matching the plan's
+own "被动渲染路径" scoping: those active call sites keep resolving the *focused* block's own
+margin against live `source`, an already-documented, unchanged precision limitation while a
+compile is failing). Deliberately **not** sharing `ensureBlockGeometry`'s existing
+`blockInkRangesRef`/`blockInkSourceRef` cache: reasoned through before writing any code that
+sharing one cache keyed on "whichever source was passed most recently" would thrash between
+the two callers (an active focus-change against live `source`, the observer against
+`renderSource`) every time they diverge, each invalidation wiping out crops the *other* had
+just resolved — a real regression a shared cache would have introduced silently. Also
+guarded on `blockByteRanges(source).length === blockByteRanges(renderSource).length`
+before trusting index alignment between the two sources at all: this whole mechanism's
+premise is "block index `i` in `source` is still the same paragraph as block index `i` in
+`renderSource`," which only holds when the edit that broke compilation didn't also add/
+remove a block boundary (the common case — a syntax typo inside one paragraph). When counts
+differ, it does nothing rather than risk cropping the wrong paragraph out of the frozen
+`svg` under the right one's label.
+
+**Found and fixed while verifying, not a pre-existing bug**: `isPending` (M22) used to
+clear only when `svg` changed — correct under the *old* behavior, where `svg` always
+changed on every compile attempt (going to `null` on failure). Freezing `svg` on failure
+broke that assumption silently: `isPending` would flip `true` on every edit but never flip
+back once a compile actually failed, since `svg`'s identity then never changes. Two direct
+consequences, both real: `offsetAtClient`'s own `isPending` guard would refuse to resolve
+any click in combined mode forever after the first error; `renderOtherBlock`'s crop
+condition (`!isPending && svg && yRange`) would keep every other block on its "Compiling…"
+placeholder forever too — silently defeating this feature's entire point the moment any
+compile error existed anywhere in the document. Caught by the Playwright check below, not
+by inspection. **Fixed** by clearing `isPending` on `[svg, diagnostics]` instead of `[svg]`
+alone — `diagnostics` (from `App.tsx`) updates on every compile attempt regardless of
+outcome, so it correctly signals "resolved" for the failure case too.
+
+**Verified**: `npx tsc --noEmit`, `npx vitest run` (313 tests, up from 308), `cargo test`
+(98, unaffected) and `cargo clippy --all-targets` all clean. Two throwaway Playwright
+checks against the live dev server with a mocked Tauri IPC layer (same pattern as every
+other Playwright check in this doc) — not real-machine testing, see below:
+
+- Combined mode: an initial successful compile renders; typing content that trips the
+  mock's "broken" marker keeps the same SVG on screen (frozen, not blanked) while the
+  diagnostics list updates to the new error text.
+- Split mode: focusing a block, typing broken content into it, blurring (Escape, back to
+  combined — deliberately not a direct sibling-block click, which hits an unrelated,
+  pre-existing blur/click ordering quirk in `switchFocusTo` this pass didn't investigate),
+  then focusing a *different* block — confirms the first block renders via the new red
+  placeholder (its own raw broken text + the diagnostic message) while other, unrelated
+  blocks keep rendering (not stuck on "Compiling…", confirming the `isPending` fix);
+  fixing the content and reconfirming clears the placeholder.
+
+**Not yet done, and important**: real-machine testing in `pnpm tauri dev` against the real
+Typst compiler (not a mock) — specifically, a genuine syntax error (unclosed bracket, bad
+function call) introduced mid-document while other blocks are visible on screen, confirming
+the frozen crops/red placeholder read correctly against *real* rendered content and real
+margins, not just the mocked geometry this pass's automated checks used. The blur/click
+ordering quirk noted above (clicking directly from one focused block to a sibling's
+rendered div, without an intermediate blur) is flagged here as an open question worth a
+closer look, not confirmed as an actual bug — this pass's checks routed around it rather
+than diagnosing it, since it's unrelated to this feature's own scope.
+
+**Follow-up (2026-09-18): the diagnostics list's own line:column text was unactionable.**
+Live cursor has no line-numbered source view (most of the document is rendered typeset
+content), so `to_diagnostic`'s "at {line}:{column}" — still correct and still used as-is in
+`App.tsx`'s own list and the Typst-source tab, where a CodeMirror gutter makes it meaningful
+— gave a user nothing to act on here. `errorBlockIdx` already knows exactly which block, so
+the fix is a "Locate" button on each error entry that calls `switchFocusTo(errorBlockIdx,
+null)` directly (`switchFocusTo` refactored to take its locked-width value as a plain
+argument instead of a click event, since a diagnostics-list button has no block SVG of its
+own to measure), with the same `onMouseDown` → `preventDefault()` guard the toolbar buttons
+already use, for the same reason: without it, clicking it blurs whatever's focused first,
+letting native blur commit a draft a second time before the button's own click handler runs.
+
+Verified with a throwaway Playwright check: line:column text is gone from Live cursor's own
+diagnostics; the button reliably jumps to the broken block from both combined mode and from
+a different focused block (the case the mousedown guard exists for), with no double-commit.
+`tsc`/`vitest` (308 tests) and `cargo` (unaffected, no backend changes) clean.
