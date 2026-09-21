@@ -16,3 +16,12 @@ multiple pages — e.g. Phase 4's focus-reveals-source split mode, which has sin
 real-machine tested against this exact fixture across several rounds (see
 `doc/phase4-product-validation.md` for the bugs that testing found and fixed — placeholder-
 height estimation, focus-entry/switch performance, scroll-position restore, among others).
+
+## `perf-huge-300-sections.typ`
+
+A 300-section, ~100-page, ~279KB document — same `multi_page_fixture`-style generator as
+above, scaled up. Built for the long-document compile-latency Spike
+(`doc/interaction-design.md` §10 结论 23, `doc/phase4-product-validation.md`): the backend
+`cargo test --release` benchmark measured ~489ms for a single-character-edit recompile at
+this size. Open it to feel that number directly — focus a paragraph, change one character,
+blur — rather than trusting the benchmark number alone.

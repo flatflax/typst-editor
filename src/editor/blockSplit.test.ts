@@ -11,6 +11,26 @@ function textOf(source: string, range: [number, number]): string {
 }
 
 describe("blockByteRanges", () => {
+  // Regression guard for a real perf bug (phase4-product-validation.md, 2026-09-18):
+  // TypstLiveView.tsx calls this repeatedly with the *same* source string within one
+  // render pass (once per block, in `renderOtherBlock`, on top of the top-level block
+  // map) — on a large multi-page document this turned into O(blocks) redundant
+  // full-document scans per render. Asserts the memoization is actually happening (same
+  // array *reference* back), not just that the result is still correct.
+  it("returns the same array reference for repeated calls with the same source", () => {
+    const source = "First paragraph.\n\nSecond paragraph.";
+    const first = blockByteRanges(source);
+    const second = blockByteRanges(source);
+    expect(second).toBe(first);
+  });
+
+  it("recomputes (a different reference) once the source actually changes", () => {
+    const a = blockByteRanges("First.\n\nSecond.");
+    const b = blockByteRanges("Different.\n\nContent.");
+    expect(b).not.toBe(a);
+    expect(b.map((r) => textOf("Different.\n\nContent.", r))).toEqual(["Different.", "Content."]);
+  });
+
   it("splits plain top-level paragraphs on a blank line", () => {
     const source = "First paragraph.\n\nSecond paragraph.";
     const ranges = blockByteRanges(source);

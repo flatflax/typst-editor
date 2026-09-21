@@ -49,6 +49,30 @@ export function pageDimsFromSvg(svg: string | null): { widthPt: number; heightPt
   return parts.length === 4 ? { widthPt: parts[2], heightPt: parts[3] } : null;
 }
 
+// `minX`/`minY` alongside width/height — `pageDimsFromSvg` only ever returns the
+// latter two, but the `<use>`-referenced crop windows (TypstLiveView.tsx) need the
+// full box to build their own `viewBox`, matching `svg_merged`'s own coordinate origin
+// exactly rather than assuming it's `0 0`.
+export function fullViewBoxFromSvg(svg: string | null): { minX: number; minY: number; widthPt: number; heightPt: number } | null {
+  const viewBox = parseViewBox(svg);
+  if (!viewBox) return null;
+  const parts = viewBox.trim().split(/\s+/).map(Number);
+  return parts.length === 4 ? { minX: parts[0], minY: parts[1], widthPt: parts[2], heightPt: parts[3] } : null;
+}
+
+// Strips the outer `<svg ...>`/`</svg>` wrapper, keeping just the inner markup (paths,
+// groups, etc.) — used to mount the compiled document's content *once*, inside a
+// hidden `<g id="...">`, so every visible crop of it (TypstLiveView.tsx's combined view
+// and every unfocused block) can reference it via `<use href="#...">` instead of each
+// holding its own full copy. `cropSvgVertically` above predates this and still crops by
+// duplicating a full copy with a rewritten `viewBox` — kept as-is since the Phase 4
+// spikes (FocusRevealSpike2/3*.tsx) still import it; not used by the real
+// implementation's own rendering path, which is what this is for instead.
+export function svgInnerContent(svg: string): string | null {
+  const match = svg.match(/^<svg[^>]*>([\s\S]*)<\/svg>\s*$/);
+  return match ? match[1] : null;
+}
+
 export function unionYRange(rects: AbsoluteRect[]): BlockYRange | null {
   if (rects.length === 0) return null;
   const yTopPt = Math.min(...rects.map((r) => r.yTopPt));

@@ -71,8 +71,8 @@ implementation work rather than staying backlogged: it's substantially done now 
 mark toggles, toolbar, Ctrl+B/I), tracked going forward in
 [phase4-product-validation.md](doc/phase4-product-validation.md), not as a separate
 Phase 3 item. A slash-command menu was part of M23's original scope but has since been
-downgraded to "待确定" in [interaction-design.md](doc/interaction-design.md) §10 结论 20
-— the reasoning that motivated wanting one (helping users avoid hand-typing syntax)
+downgraded to pending/undecided in [interaction-design.md](doc/interaction-design.md) §10
+conclusion 20 — the reasoning that motivated wanting one (helping users avoid hand-typing syntax)
 doesn't hold now that "zero syntax" was dropped as a goal.
 
 ## Current focus: Phase 4 — Product Validation
@@ -87,12 +87,26 @@ refinement of M20–M22's mechanism rather than a restart. Spikes 1–3 validate
 the right direction, and it has since landed as the Live cursor view's real editing
 mechanism — not just a spike anymore. Since then: cross-block undo/redo, Ctrl+B/I,
 Up/Down cross-block navigation, reference-chain navigation, and M23's table/toolbar
-port are all done and real-machine tested; autosave (§7) is done. Currently designing a
-fallback for a confirmed bug where one compile error anywhere in the document blanks
-Live cursor's entire rendering and navigation, not just the broken block (root cause:
-`compile_typst`/`block_geometry` are both whole-document — see
-[doc/phase4-product-validation.md](doc/phase4-product-validation.md) for the design in
-progress). Still not started: independent user validation of true WYSIWYG as a real
-pain point — the original, oldest item in §10's "待确定" table; two more have joined it
-since (the slash-menu and autosave-mechanism choices), both judgment calls made without
-user data, not yet validated either.
+port are all done and real-machine tested; autosave (§7) is done. A compile-failure
+fallback (2026-09-17/18) is also shipped: one compile error anywhere used to blank Live
+cursor's entire rendering and navigation, not just the broken block (root cause:
+`compile_typst`/`block_geometry` are both whole-document); now the last successful
+render freezes and only the actually-broken block shows an error placeholder — see
+[doc/phase4-product-validation.md](doc/phase4-product-validation.md) for the design and
+[doc/interaction-design.md](doc/interaction-design.md) §10 conclusion 22 for the option
+comparison. Real-machine verification of that fallback against the real compiler (only
+Playwright-against-mock so far) is still open. Separately, real-machine testing on a
+genuinely long document (2026-09-19) found and fixed three frontend performance bugs —
+an offset-conversion helper that re-encoded the whole document on every call, a
+block-splitting function rescanned dozens of times per render, and (the dominant one)
+every unfocused block's rendered crop duplicating the *entire* document's multi-megabyte
+SVG into its own DOM node — see
+[doc/phase4-product-validation.md](doc/phase4-product-validation.md) for the measurements
+and fixes. Still not started: independent user validation of true WYSIWYG as a real pain
+point — the original, oldest item in §10's pending-decisions table; two more have joined
+it since (the slash-menu and autosave-mechanism choices), both judgment calls made
+without user data, not yet validated either. Also newly added to the backlog (2026-09-20,
+see [doc/interaction-design.md](doc/interaction-design.md) §10's next-steps list):
+actually collapsing the four view tabs into one editing surface (previously assumed to happen on its own once
+Live cursor absorbed their functionality — it hasn't), and a not-yet-scoped UI
+visual-polish pass.

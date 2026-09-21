@@ -106,12 +106,13 @@ import {
   type HistoryEntry,
 } from "./editHistory";
 import {
-  cropSvgVertically,
   estimatePlaceholderHeightPt,
   fairShareBoundsFromInk,
   focusedLayoutPxFromInk,
+  fullViewBoxFromSvg,
   pageDimsFromSvg,
   parseViewBox,
+  svgInnerContent,
   unionYRange,
   widenContentBounds,
   type BlockYRange,
@@ -199,6 +200,19 @@ type Props = {
 // navigation, `source` unchanged) skip this delay entirely —
 // `block_geometry`'s compile call is then a comemo cache hit (near-free,
 // M14), and navigation stays instant.
+
+// The compiled document's markup is mounted exactly once, hidden, inside a `<g>` with
+// this id (see the render's own comment on the hidden master below) — every visible
+// view of it (combined mode, and every unfocused block's crop) references it via
+// `<use href="#...">` instead of holding its own copy. Found live (2026-09-18) that the
+// previous approach — each crop was a *full duplicate* of the whole document's SVG
+// string with only its `viewBox` rewritten (`cropSvgVertically`, splitLayout.ts) — was
+// the dominant cost behind "everything feels slow on a real multi-page document":
+// `svg_merged`'s own output measured 3-8MB for a 14-34 page document (every glyph is a
+// `<path>`, not a text node), and split mode could have a dozen-plus blocks visible at
+// once, each holding its own full copy. A single hardcoded id is safe here since this
+// component is only ever mounted once at a time (no need for React's `useId()`).
+const MASTER_SVG_CONTENT_ID = "typst-live-master-svg-content";
 
 function sliceByBytes(source: string, startByte: number, endByte: number): string {
   return source.slice(byteToUtf16Offset(source, startByte), byteToUtf16Offset(source, endByte));
@@ -1295,6 +1309,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   }, [focusedBlock, source]);
 
   const viewBox = parseViewBox(svg);
+  const pageDims = pageDimsFromSvg(svg);
 
   // The caret geometry (before/after a given offset) — shared by the
   // reactive display effect below and by vertical navigation
@@ -2004,14 +2019,15 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
     // NOT cropped while `isPending` — `svg` is still the *previous* commit's
     // pixels at that point, and `yRange` (fetched fresh against the current
     // source) would cut the wrong band out of them.
-    const cropped = !isPending && svg && yRange ? cropSvgVertically(svg, yRange.yTopPt, yRange.heightPt) : null;
+    const fullBox = !isPending ? fullViewBoxFromSvg(svg) : null;
+    const cropBox = fullBox && yRange ? { ...fullBox, minY: yRange.yTopPt, heightPt: yRange.heightPt } : null;
 
     // A placeholder's `min-height`, estimated from this block's own byte
     // length against whatever real ink-to-byte ratio other already-resolved
     // blocks establish — see `estimatePlaceholderHeightPt`'s own doc comment
     // for why a plain one-line placeholder isn't good enough on its own.
     let placeholderMinHeightPx: number | undefined;
-    if (!cropped) {
+    if (!cropBox) {
       const ranges = blockByteRanges(source);
       const [start, end] = ranges[idx] ?? [0, 0];
       const known = [...blockInkRangesRef.current.entries()].map(([i, r]) => {
@@ -2035,8 +2051,16 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
         }
         aria-label="Focus to edit source"
       >
-        {cropped ? (
-          <div className="typst-live-block-rendered-svg" dangerouslySetInnerHTML={{ __html: cropped }} />
+        {cropBox ? (
+          <div className="typst-live-block-rendered-svg">
+            <svg
+              viewBox={`${cropBox.minX} ${cropBox.minY} ${cropBox.widthPt} ${cropBox.heightPt}`}
+              width={cropBox.widthPt}
+              height={`${cropBox.heightPt}pt`}
+            >
+              <use href={`#${MASTER_SVG_CONTENT_ID}`} />
+            </svg>
+          </div>
         ) : (
           <p className="typst-live-block-placeholder" style={{ minHeight: placeholderMinHeightPx }}>
             Compiling…
@@ -2106,6 +2130,15 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
 
   return (
     <div className="typst-live-view" ref={scrollContainerRef} onScroll={handleContainerScroll} onKeyDown={handleGlobalKeyDown}>
+      {/* The compiled document's markup, mounted exactly once — see
+          `MASTER_SVG_CONTENT_ID`'s own comment above for why. Rendered
+          regardless of `focusedBlock`: both combined mode and every
+          unfocused block's crop reference it via `<use>`. */}
+      {svg && (
+        <svg aria-hidden="true" style={{ position: "absolute", width: 0, height: 0, overflow: "hidden" }}>
+          <g id={MASTER_SVG_CONTENT_ID} dangerouslySetInnerHTML={{ __html: svgInnerContent(svg) ?? "" }} />
+        </svg>
+      )}
       <p className="scope-note">
         Focus-reveals-source (interaction-design.md §6): click a paragraph to edit its real source in a native
         textarea (free undo/redo, IME, copy/paste); every other paragraph stays fully rendered. Drag across a
@@ -2182,7 +2215,13 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
           />
-          <div className="typst-live-svg" dangerouslySetInnerHTML={{ __html: svg ?? "" }} />
+          <div className="typst-live-svg">
+            {viewBox && pageDims && (
+              <svg viewBox={viewBox} width={pageDims.widthPt} height={`${pageDims.heightPt}pt`}>
+                <use href={`#${MASTER_SVG_CONTENT_ID}`} />
+              </svg>
+            )}
+          </div>
           {viewBox && (
             <svg className="typst-live-overlay" viewBox={viewBox}>
               {selectionRects.map((r, i) => (

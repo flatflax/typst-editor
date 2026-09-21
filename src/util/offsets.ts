@@ -14,7 +14,16 @@ export function utf16ToByteOffset(text: string, utf16Offset: number): number {
 }
 
 export function byteToUtf16Offset(text: string, byteOffset: number): number {
-  const bytes = utf8Encoder.encode(text);
+  // Every UTF-8 encoding uses at least 1 byte per UTF-16 code unit (the ratio is exactly
+  // 1 for ASCII, and higher for everything else), so the UTF-16 offset a given byte
+  // offset maps to is never greater than the byte offset itself — slicing `text` to
+  // `byteOffset` UTF-16 units is always a safe, generous upper bound on where it falls.
+  // Without this bound, this used to re-encode the *entire* document on every call
+  // regardless of how small `byteOffset` was — O(document length) per call, dozens of
+  // calls per interaction (block splitting/focusing), measurably slow on a real
+  // multi-page document (see phase4-product-validation.md).
+  const bound = Math.min(byteOffset, text.length);
+  const bytes = utf8Encoder.encode(text.slice(0, bound));
   return utf8Decoder.decode(bytes.subarray(0, byteOffset)).length;
 }
 

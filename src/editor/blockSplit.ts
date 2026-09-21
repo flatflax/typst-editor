@@ -30,7 +30,27 @@ import { utf16ToByteOffset } from "../util/offsets";
 
 type ScanState = "normal" | "string" | "raw" | "line-comment" | "block-comment";
 
+// Size-1 memoization cache keyed by reference equality on `source`. TypstLiveView.tsx
+// calls this same-source-instance repeatedly within one render pass — most visibly, the
+// top-level block map (`blockByteRanges(source).map(...)`) plus `renderOtherBlock`'s own
+// call, once per block, on every one of those blocks' renders — turning one render into
+// O(blocks) redundant full-document scans instead of one. `source`/`effectiveSource`/etc.
+// are always the *same string instance* across calls within one interaction handler (React
+// never mutates a string prop in place), so `===` is a cheap, correct cache-hit check —
+// found to matter for real on a large multi-page document (phase4-product-validation.md,
+// 2026-09-18).
+let cachedSource: string | null = null;
+let cachedRanges: [number, number][] | null = null;
+
 export function blockByteRanges(source: string): [number, number][] {
+  if (source === cachedSource && cachedRanges) return cachedRanges;
+  const ranges = scanBlockByteRanges(source);
+  cachedSource = source;
+  cachedRanges = ranges;
+  return ranges;
+}
+
+function scanBlockByteRanges(source: string): [number, number][] {
   const ranges: [number, number][] = [];
   const n = source.length;
   let lastEnd = 0;

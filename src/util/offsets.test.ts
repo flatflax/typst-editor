@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { byteToUtf16Offset, nextCodePointOffset, prevCodePointOffset, utf16ToByteOffset } from "./offsets";
 
 // Mirrors the user-reported bug: CodeMirror's cursor offset (UTF-16 code
@@ -47,6 +47,29 @@ describe("byteToUtf16Offset", () => {
       const byteOffset = utf16ToByteOffset(DOCUMENT, utf16Offset);
       expect(byteToUtf16Offset(DOCUMENT, byteOffset)).toBe(utf16Offset);
     }
+  });
+
+  it("clamps correctly when byteOffset is past the end of the text", () => {
+    expect(byteToUtf16Offset(DOCUMENT, 1_000_000)).toBe(DOCUMENT.length);
+  });
+
+  // Regression guard for a real perf bug (phase4-product-validation.md,
+  // 2026-09-18): this used to unconditionally re-encode the *entire* `text`
+  // to UTF-8 on every call, regardless of how small `byteOffset` was — an
+  // offset near the start of a huge document still paid for encoding the
+  // whole thing. Every UTF-8 encoding uses at least 1 byte per UTF-16 code
+  // unit, so slicing to `byteOffset` UTF-16 units first is always a safe,
+  // generous upper bound — this asserts that bound is actually being used,
+  // not just that the result happens to still be correct.
+  it("only encodes a bounded prefix, not the whole text, for an offset near the start", () => {
+    const encodeSpy = vi.spyOn(TextEncoder.prototype, "encode");
+    const hugeText = "x".repeat(2_000_000) + "tail";
+    encodeSpy.mockClear();
+    byteToUtf16Offset(hugeText, 5);
+    expect(encodeSpy).toHaveBeenCalledTimes(1);
+    const encodedLength = encodeSpy.mock.results[0].value.length;
+    expect(encodedLength).toBeLessThan(1000);
+    encodeSpy.mockRestore();
   });
 });
 

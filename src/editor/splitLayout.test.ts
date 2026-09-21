@@ -7,8 +7,10 @@ import {
   fairShareBoundsForIndex,
   fairShareBoundsFromInk,
   focusedLayoutPxFromInk,
+  fullViewBoxFromSvg,
   pageDimsFromSvg,
   parseViewBox,
+  svgInnerContent,
   unionYRange,
   widenContentBounds,
 } from "./splitLayout";
@@ -73,6 +75,29 @@ describe("fairShareBoundsForIndex", () => {
     // gap between block 0 (ends at 140) and block 1 (starts at 200): midpoint 170
     expect(first.yTopPt + first.heightPt).toBe(170);
     expect(middle.yTopPt).toBe(170);
+  });
+});
+
+describe("fullViewBoxFromSvg", () => {
+  it("extracts all four viewBox components, not just width/height", () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 600 800"><g/></svg>';
+    expect(fullViewBoxFromSvg(svg)).toEqual({ minX: 10, minY: 20, widthPt: 600, heightPt: 800 });
+  });
+
+  it("returns null for missing/malformed input", () => {
+    expect(fullViewBoxFromSvg(null)).toBeNull();
+    expect(fullViewBoxFromSvg("<svg></svg>")).toBeNull();
+  });
+});
+
+describe("svgInnerContent", () => {
+  it("strips the outer <svg> tag, keeping the inner markup", () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800"><g id="x"><rect/></g></svg>';
+    expect(svgInnerContent(svg)).toBe('<g id="x"><rect/></g>');
+  });
+
+  it("returns null when the input isn't a well-formed <svg>...</svg> wrapper", () => {
+    expect(svgInnerContent("<div>not svg</div>")).toBeNull();
   });
 });
 

@@ -56,7 +56,7 @@ Full rationale in [interaction-design.md](interaction-design.md) §10.
    document. Deferred at the time, not silently dropped, both now done (2026-09-15, see
    Milestones below): Up/Down navigation across a block boundary; reference-chain navigation
    UI for `#let`/`#import` bindings and `<label>`/`@ref` cross-references (interaction-design.md
-   §10 结论 14) — `#set` rule influence tracking specifically stays out of scope, a genuinely
+   §10 conclusion 14) — `#set` rule influence tracking specifically stays out of scope, a genuinely
    different, harder problem (see Milestones). This closes out every item from this list.
 7. ~~**Backend algorithmic fix for `geometry_for_range`**~~ — done (2026-09-14, promoted
    from "someday" given real-machine testing on a multi-page document, 2026-09-11): added
@@ -961,7 +961,7 @@ previous block; Down on the last line lands in the next block; both feel immedia
 lag or wrong-block flicker.
 
 **Reference-chain navigation implemented (2026-09-15)** — the last item on M23's own deferred
-list (§10 结论 14: a list above the focused textarea of "which variables/labels this block
+list (§10 conclusion 14: a list above the focused textarea of "which variables/labels this block
 references," click an item to jump to its declaration; only the usage→definition direction,
 the reverse — definition→all usages — stays deferred to §5A/§5C's future citation picker).
 
@@ -1236,7 +1236,7 @@ The last open P1 item from interaction-design.md §7 ("autosave + manual save co
 decided in principle back on 2026-09-09, mechanism never specified). Implemented
 (2026-09-16) as a straight write to the real file, reusing the existing manual-save path
 verbatim rather than introducing a separate recovery/draft-file concept — see
-interaction-design.md §10 结论 21 for the full reasoning (researched Obsidian/Typora/
+interaction-design.md §10 conclusion 21 for the full reasoning (researched Obsidian/Typora/
 VSCode/Word first; the two closest comparable products disagree, so this was a
 no-user-data-available, pick-the-cheaper-and-more-reversible-option call, explicitly
 logged as unvalidated rather than presented as a settled preference).
@@ -1269,7 +1269,7 @@ writing.
 
 ### Compile-failure fallback for the Live cursor view
 
-interaction-design.md §10 结论 22 records the full option comparison (patch-and-retry,
+interaction-design.md §10 conclusion 22 records the full option comparison (patch-and-retry,
 auto-fix, freeze-last-good, raw-source fallback, modifying the Typst compiler itself) and
 why "freeze the last successful result" won. Implemented 2026-09-17.
 
@@ -1308,7 +1308,7 @@ A new, independent geometry-fetch path (`ensureFrozenBlockGeometry` + its own sm
 *other* block's crop from `renderSource` specifically while `source !== renderSource` (a
 compile is currently failing) — wired into the `IntersectionObserver` callback only, not
 `enterFocus`/`switchFocusTo`/`crossBlockBoundary`/`jumpToReference` (matching the plan's
-own "被动渲染路径" scoping: those active call sites keep resolving the *focused* block's own
+own "passive rendering paths" scoping: those active call sites keep resolving the *focused* block's own
 margin against live `source`, an already-documented, unchanged precision limitation while a
 compile is failing). Deliberately **not** sharing `ensureBlockGeometry`'s existing
 `blockInkRangesRef`/`blockInkSourceRef` cache: reasoned through before writing any code that
@@ -1380,3 +1380,123 @@ Verified with a throwaway Playwright check: line:column text is gone from Live c
 diagnostics; the button reliably jumps to the broken block from both combined mode and from
 a different focused block (the case the mousedown guard exists for), with no double-commit.
 `tsc`/`vitest` (308 tests) and `cargo` (unaffected, no backend changes) clean.
+
+### Long-document compile-latency Spike (2026-09-18) — the one interaction-design.md §5C/§5D
+promised but never actually ran
+
+Two claims to check, kept separate since they need different kinds of evidence:
+
+1. **"Typing on a long document feels laggy" is gone.** Not measured — read directly:
+   `renderFocusedTextarea`'s `onChange` (`TypstLiveView.tsx`) only touches `draftRef.current`
+   and `autosizeTextarea` (local DOM), no `invoke` call at all. There's no per-keystroke
+   backend path for document size to affect, so this can't regress by construction, not by
+   having been tuned to be fast.
+2. **The one whole-document compile that fires on blur/commit.** Measured directly —
+   `cargo test --release -- --nocapture` against `compile.rs`'s own `multi_page_fixture`
+   helper (already used by the existing `single_character_edit_on_a_multi_page_document_
+   recompile_latency`/`recompile_latency_after_an_edit_depends_on_position_not_just_
+   document_length` tests, re-run here rather than re-derived), plus one throwaway test
+   (added, measured, then deleted — not a permanent addition) scaling further:
+
+   | sections | pages | bytes | single-char-edit recompile (release) |
+   |---|---|---|---|
+   | 40 | 14 | ~13,000 | ~73ms |
+   | 100 | 34 | ~93,000 | ~156ms |
+   | 300 | 100 | ~279,000 | ~489ms |
+
+   Roughly linear with page count, consistent with M14's original finding
+   (phase3-single-view.md) — this is the same `compile_typst` cost M14 measured; nothing
+   about the freeze-fallback or geometry-batching work changed `compile_typst`'s own
+   internals. 100 pages is an extreme document size for this product's target use cases
+   (papers/reports/résumés, interaction-design.md §1), and even there the cost lands at
+   the one natural pause point (blur), not per keystroke.
+
+**Conclusion**: interaction-design.md §5C/§5D/§8's "long-document compile latency" item is
+resolved, not just deprioritized — closed out in §10 conclusion 23, its P2
+backlog-priority-table row struck through.
+
+### Real-machine testing on a large document found three separate frontend perf bugs
+(2026-09-19) — the backend-only Spike above didn't measure the whole picture
+
+Real-machine testing in `pnpm tauri dev -- --release` against a genuinely long document
+(reported directly: clicking to focus a block, and waiting for surrounding blocks to
+render, both stayed noticeably slow even after a release build) — the Spike above only
+measured `compile_typst`'s own backend cost, which turned out not to be the dominant
+factor at all. Three real, separately-confirmed bugs, all in the frontend:
+
+**1. `byteToUtf16Offset` (`util/offsets.ts`) re-encoded the entire document on every
+call.** Regardless of how small `byteOffset` was, the old implementation ran
+`utf8Encoder.encode(text)` on the *whole* string first, then sliced — O(document length)
+per call. Called from `sliceByBytes`, itself called from nearly every commit path
+(`enterFocus`, `switchFocusTo`, `crossBlockBoundary`, `jumpToReference`,
+`commitFocusedDraft`, `runToolbarCommand`). **Fixed**: every UTF-8 encoding uses at least
+1 byte per UTF-16 code unit, so the UTF-16 offset a given byte offset maps to is never
+greater than the byte offset itself — slicing `text` to `byteOffset` UTF-16 units first is
+always a safe, generous upper bound, and only that bounded prefix gets encoded. Turns
+O(document length) into O(byteOffset) — free for anything near the start of a large
+document, which most blocks are. Regression test (`offsets.test.ts`) uses a `TextEncoder`
+spy to assert only a small prefix is ever encoded, not just that the result is correct.
+
+**2. `blockByteRanges` (`blockSplit.ts`) was recomputed from scratch on every one of its
+24 call sites in `TypstLiveView.tsx`, including once per block inside `renderOtherBlock`
+*on top of* the top-level block map** — one render pass on a document with N blocks did
+on the order of N redundant full-document scans, and the `IntersectionObserver`-driven
+lazy backfill triggers several such render passes as each block's geometry resolves
+independently. **Fixed**: a size-1 memoization cache keyed by reference equality on the
+input string — `source`/`effectiveSource`/etc. are always the *same string instance*
+across calls within one interaction handler (React never mutates a string prop in
+place), so `===` is a cheap, correct cache-hit check. Regression test
+(`blockSplit.test.ts`) asserts repeated calls with the same source return the *same array
+reference*, not just an equal one.
+
+**3. The dominant cost: `renderOtherBlock`'s crop duplicated the entire document's SVG
+into every visible block's DOM.** `cropSvgVertically` (splitLayout.ts) crops by rewriting
+`viewBox`/`height` on a full *copy* of the combined SVG string — it never removes any
+path data. Measured directly (`cargo test --release`, `typst_svg::svg_merged`'s own
+output): a 14-page document's SVG is ~3.2MB, a 34-page document's is ~7.9MB (every glyph
+is a `<path>`, not a text node — `typst-svg-a11y` footnote, interaction-design.md). Split
+mode can have a dozen-plus blocks visible at once (`IntersectionObserver`'s
+`rootMargin: "200px"`), each holding its own full copy — tens of megabytes of duplicate
+markup in the DOM simultaneously, far larger than anything the byte-offset/block-range
+fixes above touch.
+
+**Fixed** by mounting the compiled document's markup exactly once and referencing it via
+SVG's own `<use>` element instead of duplicating it:
+- The full `svg` markup (minus its outer `<svg>` wrapper — new `svgInnerContent`,
+  splitLayout.ts) is mounted once, hidden, inside `<g id="typst-live-master-svg-content">`
+  — `<svg aria-hidden style={{position:"absolute", width:0, height:0, overflow:"hidden"}}>`,
+  rendered unconditionally regardless of `focusedBlock` so both modes can reference it.
+- Combined mode's own display becomes `<svg viewBox={viewBox}><use href="#..."/></svg>`
+  instead of `dangerouslySetInnerHTML`-ing the raw markup directly.
+- `renderOtherBlock`'s crop becomes the same pattern with a narrowed `viewBox` (new
+  `fullViewBoxFromSvg`, splitLayout.ts, returning `minX`/`minY` alongside width/height so
+  the crop's origin matches `svg_merged`'s own coordinate system exactly, not an assumed
+  `0 0`) — a `<use>` reference, not a copy.
+
+`<use href="#id">` resolves against the document's single global ID namespace regardless
+of which `<svg>` root the reference lives in (the same mechanism icon sprite sheets use —
+one hidden `<symbol>`/`<g>`, referenced from many visible places) — well-supported,
+standard SVG behavior, not a hack. `cropSvgVertically` itself is untouched and still used
+by the old, not-further-polished spikes (`FocusRevealSpike2/3*.tsx`); only
+`TypstLiveView.tsx`'s real rendering path stopped calling it.
+
+Verified two ways: `splitLayout.test.ts` covers the two new pure helpers
+(`fullViewBoxFromSvg`, `svgInnerContent`) directly; a throwaway Playwright check against
+the live dev server (mocked Tauri IPC, a distinctively-`id`'d marker rect standing in for
+real content) confirmed — via the *raw* `innerHTML` serialization, not
+`page.locator(...).count()`, which was found to miscount here because it pierces `<use>`'s
+rendered shadow content — that exactly one copy of the marker exists in the DOM in both
+combined mode and split mode with 3 other blocks visible, each referencing the shared
+master via its own `<use>` rather than holding a copy.
+
+**Also measured, answering a direct question**: does Typst's `linebreaks: "optimized"`
+(Knuth-Plass, auto-enabled whenever `#set par(justify: true)` — confirmed directly in
+`typst-layout`'s `linebreak.rs`; every earlier benchmark in this doc used the default
+`justify: false` → `"simple"` greedy path without realizing it) cost meaningfully more?
+Measured directly rather than assumed: 14 pages, 55ms → 76ms (+38%) with justify; 34
+pages, 144ms → 167ms (+15%). A real, non-trivial cost, but not the dominant factor next to
+the SVG duplication above — no fix applied here, recorded for calibration on future
+long-document measurements (they should specify whether `justify` was on).
+
+`npx tsc --noEmit`, `npx vitest run` (316 tests, up from 308), `cargo test` (98,
+unaffected) and `cargo clippy --all-targets` all clean.
