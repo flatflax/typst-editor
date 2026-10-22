@@ -77,6 +77,15 @@ doesn't hold now that "zero syntax" was dropped as a goal.
 
 ## Current focus: Phase 4 — Product Validation
 
+**Update (2026-10-22):** Live cursor persistence now includes the uncommitted
+focused-block draft: manual save, debounced autosave, PDF export, and unsaved-change
+guards all see current input without committing the block or triggering a compile.
+Autosave waits for IME composition to finish. Native-format saves preserve literal
+source, and overlapping writes are serialized. Cross-block copy/cut/paste now use
+the actual source selection, with cut/paste recorded as separate undoable edits.
+These paths have React DOM regression coverage with mocked Tauri IPC; native
+WebView/clipboard verification remains open. See Phase 4's latest entry below.
+
 Full detail, including the milestone log and real-machine testing record, is in
 [doc/phase4-product-validation.md](doc/phase4-product-validation.md). Summary: Phase 3
 validated the *engineering* feasibility of single-view editing;

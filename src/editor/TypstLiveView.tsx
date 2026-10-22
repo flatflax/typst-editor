@@ -55,7 +55,7 @@
 // wired to it yet); Up/Down navigation across a block boundary; multi-page
 // documents specifically in split mode (untested risk, not just undone);
 // reference-chain navigation UI for `#set`/`#let`/labels.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Command } from "prosemirror-state";
 import type { EditorDiagnostic } from "./SourceEditor";
@@ -173,6 +173,8 @@ const TOOLBAR_ITEMS: { label: string; steps: Command[] }[] = [
   { label: "-Col", steps: [deleteTableColumn] },
 ];
 
+export type LiveDraft = { source: string; composing: boolean };
+
 type Props = {
   source: string;
   // The source `svg`/`pageOffsetsPt` actually correspond to — only advances
@@ -187,6 +189,7 @@ type Props = {
   documentDir: string | null;
   diagnostics: EditorDiagnostic[];
   onChange: (source: string) => void;
+  onDraftChange?: (draft: LiveDraft | null) => void;
 };
 
 // `block_geometry` (compile.rs) runs its own full `typst::compile` call
@@ -218,7 +221,21 @@ function sliceByBytes(source: string, startByte: number, endByte: number): strin
   return source.slice(byteToUtf16Offset(source, startByte), byteToUtf16Offset(source, endByte));
 }
 
-const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, diagnostics, onChange }: Props) => {
+const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, diagnostics, onChange: onCommit, onDraftChange }: Props) => {
+  // Persistence sees drafts without feeding them into the compile/layout loop.
+  function onChange(nextSource: string) {
+    focusedComposingRef.current = false;
+    onDraftChange?.(null);
+    onCommit(nextSource);
+  }
+
+  function publishDraft(text: string, composing = false) {
+    draftRef.current = text;
+    if (!focusedDraftRangeUtf16) return;
+    const [start, end] = focusedDraftRangeUtf16;
+    const nextSource = source.slice(0, start) + text + source.slice(end);
+    onDraftChange?.(nextSource === source && !composing ? null : { source: nextSource, composing });
+  }
   // Replacing `.typst-live-svg`'s `innerHTML` on every recompile (below)
   // reset this scroll container back to the top on a long, actually-
   // scrolled document — found live-testing a 20-section multi-page
@@ -386,6 +403,14 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   const focusRequestIdRef = useRef(0);
   const lockedWidthPxRef = useRef<number | null>(null);
   const draftRef = useRef("");
+  const focusedComposingRef = useRef(false);
+  // Convert the committed block's byte range once per focus/source change,
+  // never re-encode the document prefix on every native input event.
+  const focusedDraftRangeUtf16 = useMemo(() => {
+    if (focusedBlock === null) return null;
+    const range = blockByteRanges(source)[focusedBlock];
+    return range ? [byteToUtf16Offset(source, range[0]), byteToUtf16Offset(source, range[1])] as const : null;
+  }, [source, focusedBlock]);
   const focusedTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const nativeDragAnchorUtf16Ref = useRef<number | null>(null);
   const nativeDraggingRef = useRef(false);
@@ -769,7 +794,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   // diagnostic's own range in that case.
   const lastEditByteRef = useRef<number | null>(null);
 
-  function commitChange(newSource: string, beforeFocus: FocusSnapshot, delta: Delta, coalesce: boolean) {
+  function commitChange(newSource: string, beforeFocus: FocusSnapshot, delta: Delta, coalesce: boolean | "isolated") {
     historyRef.current = recordChange(historyRef.current, beforeFocus, { kind: "delta", delta }, coalesce, Date.now());
     lastEditByteRef.current = delta.start;
     onChange(newSource);
@@ -848,7 +873,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
     const redoEntry: HistoryEntry =
       entry.kind === "snapshot"
         ? { kind: "snapshot", source: beforeSource, focus: redoFocus, timestampMs: entry.timestampMs }
-        : { kind: "deltas", deltas: entry.deltas, focus: redoFocus, timestampMs: entry.timestampMs };
+        : { kind: "deltas", deltas: entry.deltas, focus: redoFocus, timestampMs: entry.timestampMs, isolated: entry.isolated };
     historyRef.current = { undo: popped.state.undo, redo: pushEntry(popped.state.redo, redoEntry) };
     lastEditByteRef.current = entry.kind === "deltas" ? (entry.deltas[0]?.start ?? null) : null;
     onChange(afterSource);
@@ -865,7 +890,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
     const undoEntry: HistoryEntry =
       entry.kind === "snapshot"
         ? { kind: "snapshot", source: beforeSource, focus: undoFocus, timestampMs: entry.timestampMs }
-        : { kind: "deltas", deltas: entry.deltas, focus: undoFocus, timestampMs: entry.timestampMs };
+        : { kind: "deltas", deltas: entry.deltas, focus: undoFocus, timestampMs: entry.timestampMs, isolated: entry.isolated };
     historyRef.current = { undo: pushEntry(popped.state.undo, undoEntry), redo: popped.state.redo };
     lastEditByteRef.current = entry.kind === "deltas" ? (entry.deltas[0]?.start ?? null) : null;
     onChange(afterSource);
@@ -879,6 +904,8 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   // committed source naturally reports however many blocks that produces.
   function commitFocusedDraft() {
     if (handedOffRef.current || focusedBlock === null) return;
+    focusedComposingRef.current = false;
+    onDraftChange?.(null);
     const ranges = blockByteRanges(source);
     const [start, end] = ranges[focusedBlock];
     const removed = sliceByBytes(source, start, end);
@@ -1618,19 +1645,20 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   // The one primitive every edit reduces to: replace `[start, end)` with
   // `insertText`, then collapse the cursor to just after it. Every other
   // handler below only has to compute the right range.
-  function commitEdit(start: number, end: number, insertText: string) {
+  function commitEdit(start: number, end: number, insertText: string, coalesce: boolean | "isolated" = true) {
     const removed = sliceByBytes(source, start, end);
     const result = spliceSource(source, start, end, insertText);
-    // `coalesce: true` — the only call site that needs it (决策 2/5): every
+    // Typing uses `coalesce: true` (决策 2/5): every
     // other commit is already "one meaningful action" on its own, but this
     // fires once per keystroke, so consecutive adjacent edits within
     // `COALESCE_MS` merge into a single undo step (see recordChange's own
-    // adjacency check, editHistory.ts).
+    // adjacency check, editHistory.ts). Clipboard edits are isolated so each
+    // cut/paste is a separate undo step.
     // Guards a real no-op: Backspace at byte offset 0 (or Delete at the
     // document's end) calls this with `start === end`, an empty
     // `insertText` — nothing to undo.
     if (result.source !== source) {
-      commitChange(result.source, { kind: "combined", cursorOffset, anchorOffset }, { start, removed, inserted: insertText }, true);
+      commitChange(result.source, { kind: "combined", cursorOffset, anchorOffset }, { start, removed, inserted: insertText }, coalesce);
     }
     setCursorOffset(result.cursorOffset);
     setAnchorOffset(result.cursorOffset);
@@ -1639,6 +1667,24 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   function handleInsert(text: string) {
     const [start, end] = selectionRange();
     commitEdit(start, end, text);
+  }
+
+  function handleCopyOrCut(event: React.ClipboardEvent<HTMLTextAreaElement>, cut: boolean) {
+    const [start, end] = selectionRange();
+    if (start === end) return;
+    event.preventDefault();
+    // Delete only after the clipboard write succeeds. Byte-aware slicing keeps
+    // CJK/emoji and the original Typst syntax intact, in either drag direction.
+    event.clipboardData.setData("text/plain", sliceByBytes(source, start, end));
+    if (cut) commitEdit(start, end, "", "isolated");
+  }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    if (!Array.from(event.clipboardData.types).includes("text/plain")) return;
+    event.preventDefault();
+    const [start, end] = selectionRange();
+    commitEdit(start, end, event.clipboardData.getData("text/plain"), "isolated");
+    event.currentTarget.value = "";
   }
 
   // M23: a structural edit (toggle heading/list, and — later slices — marks/
@@ -1939,8 +1985,16 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
           defaultValue={draftRef.current}
           onMouseDown={handleTextareaMouseDown}
           onChange={(event) => {
-            draftRef.current = event.currentTarget.value;
+            publishDraft(event.currentTarget.value, focusedComposingRef.current || (event.nativeEvent as InputEvent).isComposing);
             autosizeTextarea(event.currentTarget);
+          }}
+          onCompositionStart={(event) => {
+            focusedComposingRef.current = true;
+            publishDraft(event.currentTarget.value, true);
+          }}
+          onCompositionEnd={(event) => {
+            focusedComposingRef.current = false;
+            publishDraft(event.currentTarget.value);
           }}
           onBlur={commitFocusedDraft}
           onKeyDown={(event) => {
@@ -2117,7 +2171,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
             // textarea's own `onChange` does for a typed keystroke, since
             // native undo/redo changes `.value` without necessarily
             // routing through that handler on every browser.
-            draftRef.current = el.value;
+            publishDraft(el.value);
           }
         });
         return;
@@ -2212,6 +2266,9 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
             spellCheck={false}
             onKeyDown={handleKeyDown}
             onInput={handleHiddenInputChange}
+            onCopy={(event) => handleCopyOrCut(event, false)}
+            onCut={(event) => handleCopyOrCut(event, true)}
+            onPaste={handlePaste}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
           />
@@ -2254,4 +2311,6 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   );
 };
 
-export default TypstLiveView;
+// Draft notifications update shell persistence state on each input. The rendered
+// document still depends only on committed source, so do not rebuild its crops.
+export default memo(TypstLiveView);

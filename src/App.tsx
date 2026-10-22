@@ -5,7 +5,7 @@ import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import SourceEditor, { type EditorDiagnostic, type SourceEditorHandle } from "./editor/SourceEditor";
 import WysiwygEditor, { type WysiwygEditorHandle } from "./editor/WysiwygEditor";
-import TypstLiveView from "./editor/TypstLiveView";
+import TypstLiveView, { type LiveDraft } from "./editor/TypstLiveView";
 import { RECOMPILE_DEBOUNCE_MS as COMPILE_DEBOUNCE_MS } from "./editor/typstCursor";
 import { byteToUtf16Offset, utf16ToByteOffset } from "./util/offsets";
 import { svgPointFromClient, clientPointFromPt } from "./util/svgGeometry";
@@ -124,6 +124,9 @@ function App() {
   // into this view or loading a file, not kept live-synced to `doc` while
   // some other view is active.
   const [liveTypstText, setLiveTypstText] = useState(() => pmDocToTypst(INITIAL_DOC));
+  const [liveDraft, setLiveDraft] = useState<LiveDraft | null>(null);
+  const documentEpochRef = useRef(0);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [result, setResult] = useState<CompileResult | null>(null);
   // Diagnostics from the *latest* compile attempt, success or failure —
   // unlike `result` (below), this always reflects the most recent source,
@@ -222,11 +225,13 @@ function App() {
     return () => clearTimeout(timer);
   }, [derived.source]);
 
-  // Both branches compare against the Typst serialization: `derived.source`
-  // already holds it for both the "typst" (raw typstText) and "wysiwyg"
-  // (pmDocToTypstWithPositions(doc)) view modes.
+  // Persistence includes a focused block's draft; compilation continues to use
+  // only `derived.source`, so saving never forces a focus/undo/geometry reset.
+  const persistenceSource = viewMode === "typst-live" ? liveDraft?.source ?? liveTypstText : derived.source;
   const dirty =
-    viewMode === "markdown" ? markdownText !== lastSavedMarkdownText : derived.source !== lastSavedTypstText;
+    viewMode === "markdown" ? markdownText !== lastSavedMarkdownText : persistenceSource !== lastSavedTypstText;
+  const persistenceSourceRef = useRef(persistenceSource);
+  persistenceSourceRef.current = persistenceSource;
 
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -240,7 +245,7 @@ function App() {
   // the wait) rather than `setInterval` — this project has no interval-based
   // timer anywhere and this isn't the place to introduce one.
   useEffect(() => {
-    if (!filePath || !dirty) return;
+    if (!filePath || !dirty || (viewMode === "typst-live" && liveDraft?.composing)) return;
     const timer = setTimeout(() => {
       // Re-checked at fire time, not just at arm time: a manual Ctrl+S
       // during this window already cleared it, making this trigger a no-op
@@ -252,7 +257,7 @@ function App() {
         .catch((err) => setInvokeError(String(err)));
     }, AUTOSAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [filePath, fileSpoke, dirty, derived.source, markdownText]);
+  }, [filePath, fileSpoke, dirty, persistenceSource, markdownText, viewMode, liveDraft?.composing]);
 
   // Native window title mirrors the in-app `.file-title` label (`titleFor`
   // was already written as a "title-bar label" — this is the actual title
@@ -306,6 +311,8 @@ function App() {
     const nextTypstText = spoke === "typst" ? text : pmDocToTypst(nextDoc);
     const nextMarkdownText = spoke === "markdown" ? text : docToMarkdown(nextDoc);
 
+    documentEpochRef.current += 1;
+    setLiveDraft(null);
     setDoc(nextDoc);
     setTypstText(nextTypstText);
     setMarkdownText(nextMarkdownText);
@@ -352,18 +359,27 @@ function App() {
     }
   }
 
-  // Commits whichever view is active into the canonical doc, serializes it
-  // to `spoke`'s source format, writes it to `path`, and snapshots both
-  // serializations as the new dirty-comparison baseline.
+  // Save an immutable snapshot, retaining literal source in its native format.
+  // Only conversion to the opposite file format goes through the PM serializer.
   async function writeCurrentDoc(path: string, spoke: Spoke) {
-    const nextDoc = await commitCurrentView();
-    const nextTypstText = pmDocToTypst(nextDoc);
-    const nextMarkdownText = docToMarkdown(nextDoc);
-    const text = spoke === "markdown" ? nextMarkdownText : nextTypstText;
-    await writeTextFile(path, text);
-    setDoc(nextDoc);
-    setLastSavedTypstText(nextTypstText);
-    setLastSavedMarkdownText(nextMarkdownText);
+    const epoch = documentEpochRef.current;
+    const sourceSnapshot = persistenceSource;
+    const pmSnapshot = viewMode === "wysiwyg" ? wysiwygRef.current?.getDoc() ?? doc : null;
+    // Serialize writes in request order; a slower earlier autosave must never
+    // overwrite a newer manual save. All inputs belong to this request's render.
+    const operation = saveQueueRef.current.catch(() => {}).then(async () => {
+      const nextDoc = pmSnapshot ?? (viewMode === "markdown"
+        ? markdownToDoc(markdownText)
+        : typstAstToDoc(await invoke<AstDocument>("parse_typst_ast", { source: sourceSnapshot })));
+      const nextTypstText = sourceSnapshot;
+      const nextMarkdownText = viewMode === "markdown" ? markdownText : docToMarkdown(nextDoc);
+      await writeTextFile(path, spoke === "markdown" ? nextMarkdownText : nextTypstText);
+      if (documentEpochRef.current !== epoch) return;
+      setLastSavedTypstText(nextTypstText);
+      setLastSavedMarkdownText(nextMarkdownText);
+    });
+    saveQueueRef.current = operation;
+    await operation;
   }
 
   async function handleSave() {
@@ -414,7 +430,7 @@ function App() {
       });
       if (!target) return;
       await invoke("export_pdf", {
-        source: derivedRef.current.source,
+        source: persistenceSourceRef.current,
         path: target,
         baseDir: documentDir,
       });
@@ -459,7 +475,7 @@ function App() {
   async function commitCurrentView(): Promise<PMDoc> {
     if (viewMode === "wysiwyg") return wysiwygRef.current?.getDoc() ?? doc;
     if (viewMode === "markdown") return markdownToDoc(markdownText);
-    const source = viewMode === "typst-live" ? liveTypstText : typstText;
+    const source = viewMode === "typst-live" ? persistenceSource : typstText;
     const ast = await invoke<AstDocument>("parse_typst_ast", { source });
     return typstAstToDoc(ast);
   }
@@ -591,6 +607,7 @@ function App() {
               documentDir={documentDir}
               diagnostics={diagnostics}
               onChange={setLiveTypstText}
+              onDraftChange={setLiveDraft}
             />
           </div>
         </div>

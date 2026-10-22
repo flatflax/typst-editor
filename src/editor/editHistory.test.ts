@@ -149,6 +149,16 @@ describe("recordChange", () => {
     expect(state.undo).toHaveLength(2);
   });
 
+  it("isolates clipboard deltas from both preceding and following typing", () => {
+    let state = emptyHistory;
+    state = recordChange(state, BLOCK0, { kind: "delta", delta: insertDelta(0, "a") }, true, 1000);
+    state = recordChange(state, BLOCK0, { kind: "delta", delta: insertDelta(1, "pasted") }, "isolated", 1010);
+    state = recordChange(state, BLOCK0, { kind: "delta", delta: insertDelta(7, "b") }, true, 1020);
+    state = recordChange(state, BLOCK0, { kind: "delta", delta: insertDelta(8, "c") }, true, 1030);
+    expect(state.undo).toHaveLength(3);
+    expect((state.undo[2] as HistoryEntry & { kind: "deltas" }).deltas).toHaveLength(2);
+  });
+
   it("clears the redo stack on any new commit", () => {
     let state = emptyHistory;
     state = recordChange(state, BLOCK0, { kind: "delta", delta: insertDelta(0, "a") }, false, 1000);

@@ -43,7 +43,7 @@ export type HistoryEntry =
   // inserts/deletes within one run is a real algorithm with real edge
   // cases; applying a *list* of exact, individually reversible deltas in
   // sequence has none of that risk).
-  | { kind: "deltas"; deltas: Delta[]; focus: FocusSnapshot; timestampMs: number }
+  | { kind: "deltas"; deltas: Delta[]; focus: FocusSnapshot; timestampMs: number; isolated?: boolean }
   // `runToolbarCommand`'s two call sites only — a structural transform's
   // old/new source aren't related by one contiguous byte-range replacement,
   // so a delta doesn't apply; stores the *previous* source as a full
@@ -115,6 +115,8 @@ export function redoDeltas(beforeSource: string, deltas: Delta[]): string {
 
 // Records one committed change onto the undo stack (and clears redo — any
 // new change invalidates it, matching every other editor's convention).
+// `"isolated"` makes a clipboard edit a boundary on both sides: unlike
+// `false`, it also prevents subsequent typing from joining this entry.
 // `coalesce: true` (only `commitEdit`'s per-keystroke delta path) appends
 // `change.delta` onto the *top* undo entry's own `deltas` array instead of
 // pushing a new entry, but only if ALL of: the top entry is itself a
@@ -126,15 +128,16 @@ export function recordChange(
   state: HistoryState,
   beforeFocus: FocusSnapshot,
   change: { kind: "delta"; delta: Delta } | { kind: "snapshot"; source: string },
-  coalesce: boolean,
+  coalesce: boolean | "isolated",
   nowMs: number,
 ): HistoryState {
   const top = state.undo[state.undo.length - 1];
   if (
-    coalesce &&
+    coalesce === true &&
     change.kind === "delta" &&
     top &&
     top.kind === "deltas" &&
+    !top.isolated &&
     nowMs - top.timestampMs < COALESCE_MS &&
     deltasAdjacent(top.deltas[top.deltas.length - 1], change.delta)
   ) {
@@ -148,7 +151,7 @@ export function recordChange(
   }
   const entry: HistoryEntry =
     change.kind === "delta"
-      ? { kind: "deltas", deltas: [change.delta], focus: beforeFocus, timestampMs: nowMs }
+      ? { kind: "deltas", deltas: [change.delta], focus: beforeFocus, timestampMs: nowMs, isolated: coalesce === "isolated" }
       : { kind: "snapshot", source: change.source, focus: beforeFocus, timestampMs: nowMs };
   return { undo: [...state.undo, entry], redo: [] };
 }

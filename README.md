@@ -42,6 +42,9 @@ open before that happens.
   further edits are written to it automatically a couple of seconds after you pause —
   manual save always still works).
 - **Export to PDF.**
+- Live cursor saves and PDF export include the focused block's current draft without
+  leaving the block. Cross-block copy/cut/paste preserves source text; cut and paste
+  participate in undo/redo.
 - Embedded fonts, including CJK support.
 
 ## Usage
@@ -78,8 +81,11 @@ phase-by-phase detail.
 
 ## Development
 
-Requires [pnpm](https://pnpm.io/) and the [Tauri prerequisites](https://tauri.app/start/prerequisites/)
-for your platform (Rust toolchain, WebView2 on Windows).
+Requires Node.js 20.19+ or 22.12+, [pnpm](https://pnpm.io/) 10.11.0 (pinned in
+`package.json`), and the [Tauri prerequisites](https://tauri.app/start/prerequisites/)
+for your platform. On Windows, use a current stable Rust toolchain, WebView2,
+and Visual Studio C++ Build Tools with the Windows SDK. Rust/Cargo 1.82 is too old
+for the locked Typst dependencies' Rust 2024 edition.
 
 ```sh
 pnpm install

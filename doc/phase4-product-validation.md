@@ -73,6 +73,38 @@ Full rationale in [interaction-design.md](interaction-design.md) §10.
 
 ## Milestones
 
+### Draft persistence and cross-block clipboard (2026-10-22)
+
+Live cursor now publishes a separate persistence snapshot while its focused block
+is being edited. The shell uses it for dirty state, manual save, autosave, export,
+and view transitions; the compiler still receives only committed source. Saving
+does not blur/remount the textarea, commit its draft, or change native undo history.
+Autosave restarts after input pauses and waits until an IME composition ends.
+This supersedes the uncommitted-draft limitation recorded in the Autosave entry.
+
+Native-format saves retain literal source instead of normalizing it through PM.
+Writes run in request order, and an older save cannot change the saved baseline of
+a newly opened file. Later typing stays dirty when an earlier save finishes.
+
+The combined view's hidden input now handles copy/cut/paste using the real UTF-8
+source selection. Both drag directions preserve Typst syntax, CJK, emoji, and blank
+lines. Cut and paste each form a separate app-level undo step. Focused-block
+clipboard behavior remains native.
+
+Verification: 18 new React DOM integration cases in `src/App.test.tsx`, with mocked
+Tauri IPC/filesystem/geometry, plus an undo-isolation regression in `editHistory.test.ts`,
+pass alongside the 316 existing frontend tests.
+The checks cover unblurred manual/autosave, IME timing, export/close/open guards,
+write failure/retry, overlapping saves, file changes during a save, post-save blur,
+both selection directions, cut undo/redo, paste replacement, and native copying.
+Real WebView IME/OS clipboard validation remains open.
+
+Environment verification: locked frontend/Rust dependencies installed, pnpm pinned
+to 10.11.0, Corepack signature handling repaired, Rust stable updated, and MSVC
+Build Tools/Windows SDK installed. TypeScript checking, Vite production build, and
+`cargo check --locked --offline` pass. Vite still warns that this machine's Node
+22.11.0 is below its supported 22.12+ baseline; the production build succeeds.
+
 **Spike 1 — Focus reveals source: core swap (done, positive).** Built as an isolated
 tab (`FocusRevealSpike.tsx`, not wired into `TypstLiveView`'s M20 caret machinery —
 deliberately a throwaway swap of real DOM nodes, per this spike's own scope): a
