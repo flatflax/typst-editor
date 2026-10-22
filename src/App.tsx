@@ -574,7 +574,7 @@ function App() {
 
       {invokeError && <p className="preview-error">Invoke failed: {invokeError}</p>}
 
-      <div className="workspace">
+      <div className={viewMode === "typst-live" ? "workspace workspace-single" : "workspace"}>
         <div className="editor-pane">
           <div hidden={viewMode !== "wysiwyg"} className="view-panel">
             <WysiwygEditor
@@ -600,6 +600,7 @@ function App() {
           <div hidden={viewMode !== "typst-live"} className="view-panel">
             <TypstLiveView
               key={docGeneration}
+              active={viewMode === "typst-live"}
               source={derived.source}
               renderSource={lastGoodSource ?? derived.source}
               svg={result?.svg ?? null}
@@ -612,28 +613,30 @@ function App() {
           </div>
         </div>
 
-        <div className="preview-pane">
-          {diagnostics.map((d, i) => (
-            <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
-              {d.severity}
-              {d.line != null ? ` at ${d.line}:${d.column}` : ""}: {d.message}
-            </p>
-          ))}
+        {viewMode !== "typst-live" && (
+          <div className="preview-pane">
+            {diagnostics.map((d, i) => (
+              <p key={i} className={`diagnostic diagnostic-${d.severity}`}>
+                {d.severity}
+                {d.line != null ? ` at ${d.line}:${d.column}` : ""}: {d.message}
+              </p>
+            ))}
 
-          <div
-            ref={previewRef}
-            className="preview"
-            onClick={handlePreviewClick}
-            dangerouslySetInnerHTML={{ __html: result?.svg ?? "" }}
-          />
-
-          {highlight && (
             <div
-              className="cursor-marker"
-              style={{ left: highlight.clientX, top: highlight.clientY }}
+              ref={previewRef}
+              className="preview"
+              onClick={handlePreviewClick}
+              dangerouslySetInnerHTML={{ __html: result?.svg ?? "" }}
             />
-          )}
-        </div>
+
+            {highlight && (
+              <div
+                className="cursor-marker"
+                style={{ left: highlight.clientX, top: highlight.clientY }}
+              />
+            )}
+          </div>
+        )}
       </div>
     </main>
   );

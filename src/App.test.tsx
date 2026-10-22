@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import * as splitLayout from "./editor/splitLayout";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -118,6 +119,46 @@ afterEach(async () => {
   host.remove();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("Live cursor render work", () => {
+  it("mounts the compiled SVG only once and uses the full workspace", () => {
+    expect(host.querySelector(".preview-pane")).toBeNull();
+    expect(host.querySelectorAll("[data-source]")).toHaveLength(1);
+    expect(host.querySelector(".workspace-single")).not.toBeNull();
+  });
+
+  it("does not rescan SVG markup or request self-drawn caret geometry for a focused draft", async () => {
+    const extract = vi.spyOn(splitLayout, "svgInnerContent");
+    const textarea = await focusFirstBlock();
+    mocks.invoke.mockClear();
+    await typeDraft(textarea, "a focused draft");
+    await tick(200);
+    expect(extract).not.toHaveBeenCalled();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "block_geometry")).toHaveLength(0);
+  });
+
+  it("keeps only the normal preview mounted and skips inactive Live cursor geometry", async () => {
+    await settle(() => Array.from(host.querySelectorAll<HTMLButtonElement>("[role=tab]")).find((button) => button.textContent === "Typst source")!.click());
+    mocks.invoke.mockClear();
+    await tick(200);
+    expect(host.querySelector(".preview-pane")).not.toBeNull();
+    expect(host.querySelectorAll("[data-source]")).toHaveLength(1);
+    expect(host.querySelector("#typst-live-master-svg-content")).toBeNull();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "block_geometry")).toHaveLength(0);
+  });
+
+  it("does not refetch the combined-view caret after committing into another native block", async () => {
+    const textarea = await focusFirstBlock();
+    await typeDraft(textarea, "committed draft");
+    await settle(() => textarea.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" })));
+    await tick(20);
+    expect(host.querySelector<HTMLTextAreaElement>(".typst-live-block-textarea")!.value).toBe("second🙂");
+    mocks.invoke.mockClear();
+    await tick(200);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "block_geometry")).toHaveLength(0);
+  });
 });
 
 describe("Live cursor draft persistence", () => {

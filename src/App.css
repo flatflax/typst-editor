@@ -66,10 +66,9 @@
   min-height: 0;
 }
 
-/* Focus-reveal spike hides `.preview-pane` outright (its own rendered/source
-   swap replaces it, and showing the ordinary preview alongside would just
-   confuse the one thing this spike exists to test) — give the editor pane
-   the full row rather than leaving a dead empty column beside it. */
+/* Live cursor renders inside the editor pane and does not mount a second
+   preview. The older focus-reveal spikes use a hidden preview instead. */
+.workspace-single,
 .workspace:has(.preview-pane[hidden]) {
   grid-template-columns: 1fr;
 }

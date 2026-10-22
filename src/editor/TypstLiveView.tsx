@@ -176,6 +176,7 @@ const TOOLBAR_ITEMS: { label: string; steps: Command[] }[] = [
 export type LiveDraft = { source: string; composing: boolean };
 
 type Props = {
+  active?: boolean;
   source: string;
   // The source `svg`/`pageOffsetsPt` actually correspond to — only advances
   // on a successful compile (App.tsx), so it lags behind `source` exactly
@@ -221,7 +222,7 @@ function sliceByBytes(source: string, startByte: number, endByte: number): strin
   return source.slice(byteToUtf16Offset(source, startByte), byteToUtf16Offset(source, endByte));
 }
 
-const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, diagnostics, onChange: onCommit, onDraftChange }: Props) => {
+const TypstLiveView = ({ active = true, source, renderSource, svg, pageOffsetsPt, documentDir, diagnostics, onChange: onCommit, onDraftChange }: Props) => {
   // Persistence sees drafts without feeding them into the compile/layout loop.
   function onChange(nextSource: string) {
     focusedComposingRef.current = false;
@@ -1058,9 +1059,9 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   // requiring each one to remember to call `hiddenInputRef.current?.focus()`
   // itself. Redundant (and harmless) for the paths that already do.
   useLayoutEffect(() => {
-    if (focusedBlock !== null) return;
+    if (!active || focusedBlock !== null) return;
     hiddenInputRef.current?.focus({ preventScroll: true });
-  }, [focusedBlock]);
+  }, [active, focusedBlock]);
 
   // Fetches "which variables/labels this block references"
   // (interaction-design.md §10 结论 14) for whichever block is currently
@@ -1069,7 +1070,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   // elsewhere, e.g. the toolbar), but *not* on every keystroke inside the
   // still-open draft (see `blockReferences`'s own comment for why).
   useEffect(() => {
-    if (focusedBlock === null) {
+    if (!active || focusedBlock === null) {
       setBlockReferences([]);
       return;
     }
@@ -1096,7 +1097,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
     return () => {
       cancelled = true;
     };
-  }, [focusedBlock, source, documentDir]);
+  }, [active, focusedBlock, source, documentDir]);
 
   // Clicking a reference-navigation list item — jump to wherever it resolved
   // to. Mirrors `crossBlockBoundary`'s own commit-then-relocate-by-byte-
@@ -1335,8 +1336,12 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedBlock, source]);
 
-  const viewBox = parseViewBox(svg);
-  const pageDims = pageDimsFromSvg(svg);
+  const viewBox = useMemo(() => parseViewBox(svg), [svg]);
+  const pageDims = useMemo(() => pageDimsFromSvg(svg), [svg]);
+  const fullBox = useMemo(() => fullViewBoxFromSvg(svg), [svg]);
+  // Geometry/cursor updates can rerender this component many times per compile.
+  // Extract the multi-megabyte SVG body once, and skip it in inactive tabs.
+  const svgContent = useMemo(() => active && svg ? svgInnerContent(svg) ?? "" : "", [active, svg]);
 
   // The caret geometry (before/after a given offset) — shared by the
   // reactive display effect below and by vertical navigation
@@ -1422,7 +1427,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
   // the two cases need different treatment.
   const lastGeometrySourceRef = useRef(source);
   useEffect(() => {
-    if (!source) {
+    if (!active || focusedBlock !== null || !source) {
       setCaretRect(null);
       setSelectionRects([]);
       lastGeometrySourceRef.current = source;
@@ -1464,7 +1469,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
     return () => {
       cancelled = true;
     };
-  }, [source, cursorOffset, anchorOffset, pageOffsetsPt, documentDir]);
+  }, [active, focusedBlock, source, cursorOffset, anchorOffset, pageOffsetsPt, documentDir]);
 
   function baseSvgEl(): SVGSVGElement | null {
     return stageRef.current?.querySelector<SVGSVGElement>(".typst-live-svg svg") ?? null;
@@ -2073,8 +2078,7 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
     // NOT cropped while `isPending` — `svg` is still the *previous* commit's
     // pixels at that point, and `yRange` (fetched fresh against the current
     // source) would cut the wrong band out of them.
-    const fullBox = !isPending ? fullViewBoxFromSvg(svg) : null;
-    const cropBox = fullBox && yRange ? { ...fullBox, minY: yRange.yTopPt, heightPt: yRange.heightPt } : null;
+    const cropBox = !isPending && fullBox && yRange ? { ...fullBox, minY: yRange.yTopPt, heightPt: yRange.heightPt } : null;
 
     // A placeholder's `min-height`, estimated from this block's own byte
     // length against whatever real ink-to-byte ratio other already-resolved
@@ -2188,9 +2192,9 @@ const TypstLiveView = ({ source, renderSource, svg, pageOffsetsPt, documentDir, 
           `MASTER_SVG_CONTENT_ID`'s own comment above for why. Rendered
           regardless of `focusedBlock`: both combined mode and every
           unfocused block's crop reference it via `<use>`. */}
-      {svg && (
+      {active && svg && (
         <svg aria-hidden="true" style={{ position: "absolute", width: 0, height: 0, overflow: "hidden" }}>
-          <g id={MASTER_SVG_CONTENT_ID} dangerouslySetInnerHTML={{ __html: svgInnerContent(svg) ?? "" }} />
+          <g id={MASTER_SVG_CONTENT_ID} dangerouslySetInnerHTML={{ __html: svgContent }} />
         </svg>
       )}
       <p className="scope-note">

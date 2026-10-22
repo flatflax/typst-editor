@@ -77,6 +77,14 @@ doesn't hold now that "zero syntax" was dropped as a goal.
 
 ## Current focus: Phase 4 — Product Validation
 
+**Preview latency reopened (2026-10-22):** the user reports slow preview updates
+after editing in Live cursor compared with Tinymist. The earlier backend compile
+spike does not settle end-to-end preview performance. A first pass removes the
+duplicate right-hand preview, inactive/native-caret geometry work, and repeated
+SVG-body scans. Full-document SVG generation/transfer/DOM replacement remains;
+measure commit-to-paint and pursue compiled-document reuse plus incremental,
+viewport rendering. See [Preview performance](doc/preview-performance.md).
+
 **Update (2026-10-22):** Live cursor persistence now includes the uncommitted
 focused-block draft: manual save, debounced autosave, PDF export, and unsaved-change
 guards all see current input without committing the block or triggering a compile.
