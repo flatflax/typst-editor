@@ -1,109 +1,73 @@
-# Phase 1 — MVP (M0–M6, complete)
+# Phase 1: conversion and preview loop (M0–M6)
 
-Architecture reference: [architecture.md](architecture.md). Design rules: [design-principles.md](design-principles.md).
+Status: the phase has ended and feature milestones are complete. This document restores the comparison between original goals, deliverables, and validation evidence. Historical “complete” status does not mean every planned acceptance method has been automated. Document review date: 2026-10-23.
 
-## Goal
+## Goals, scope, and dependencies
 
-Prove that `Source ⇄ Editor Model → Typst Compiler → Layout/Render` forms a **stable
-closed loop** on top of Tauri, before attempting single-view editing. Not "build a
-Typst IDE" — a proof that:
+Demonstrate a stable `Typst ⇄ Editor Model ⇄ Markdown` conversion loop in Tauri, with previews produced by real Typst compilation. This phase uses rich-text editing and a separate preview; direct input in the final paginated output is not yet required.
 
-- a shared **Editor Model** (rich-text document) can be losslessly parsed from and
-  serialized back to **Typst source**, and separately to/from **Markdown source**, for
-  a small syntax subset;
-- that Editor Model always serializes to Typst source and compiles via the real Typst
-  compiler for an accurate rendered preview;
-- switching between WYSIWYG / Typst source / Markdown source doesn't corrupt or drift
-  content — proven by round-trip tests plus a manual smoke check.
+The supported subset comprises paragraphs, headings 1–3, bold, italic, inline code, ordered/unordered lists, and hard breaks. Unknown syntax, unexpanded function calls, and top-level settings are also preserved. The subset must be expressible in both source formats and the ProseMirror schema; “stable round trips for a limited subset” must not become a claim of byte-for-byte fidelity for the full Typst language.
 
-**Scope subset** (expressible identically in Typst markup, Markdown, and the
-ProseMirror schema): paragraphs, headings (levels 1–3), bold, italic, inline code,
-bullet/ordered lists, hard line breaks, plus opaque `#` function-call and top-level
-`#set` rule support (below). Excluded: math, tables, images/figures, links, footnotes,
-citations, raw blocks, multi-file imports, PDF export. [Phase 2](phase2-content-io.md)
-later added tables, images/figures, links, file I/O, and PDF export; math, footnotes/
-citations, raw blocks, and multi-file imports remain deferred (see
-[Deferred past Phase 2](phase2-content-io.md#deferred-past-phase-2)).
+File operations, PDF, links, tables, and images were excluded and later entered [Phase 2](phase2-content-io.md). Dedicated equation editing, citations, footnotes, multi-file imports, and full semantic analysis are not outcomes of this phase. Position mapping inside marked text in the old WYSIWYG view only required approximate navigation at the time, not byte-level precision.
 
-**Unsupported input policy**: source outside the subset is wrapped as an opaque
-`unsupported_block` leaf that round-trips its raw text verbatim but isn't
-WYSIWYG-editable — keeps the loop stable (no crashes, no silent data loss) without
-requiring full-language support.
+Implementation dependencies: establish World/fonts and native compilation first, then schema and conversion, and finally connect and validate the three views. This order brings Typst environment-integration risks forward, avoiding editor expansion before a working preview exists.
 
-## Opaque call/set support
+## Original goals compared with results
 
-- **`#` function calls** (`typst_call`): a distinct node type storing
-  `{ name, raw }`, where `raw` is the exact source slice, never re-parsed. Typst
-  serializer re-emits `raw` verbatim. Markdown has no equivalent, so it round-trips as
-  a fenced ```` ```typst-call ```` block. WYSIWYG renders it as an inert, non-editable
-  chip. No `#let`/`#show`/control-flow support — those still fall to
-  `unsupported_block`.
-- **`#set` rules** (`typst_set`): same verbatim-round-trip approach, but stored in a
-  separate top-level `settings: TypstSet[]` list (not interleaved in flow content),
-  each `{ function, raw }`. Serializer emits all `settings` at the top of generated
-  Typst source. Markdown uses the same fence convention, tagged ```` ```typst-set ````.
-  WYSIWYG exposes a "Document Settings" drawer (non-editable chips) — the WYSIWYG
-  surface never simulates `#set`'s visual effect; only the compiled preview does. Only
-  one `#set` per fence/position — scoped `#set` falls to `unsupported_block`.
+| Milestone | Original goal and acceptance basis | Actual delivery | Deviations, boundaries, and follow-up |
+|---|---|---|---|
+| M0 Project and compilation environment | Display SVG from hardcoded source in the WebView; validate World and font loading first | Tauri/React/Vite, TauriWorld, compile_typst, and font loading | System-font fallback for CJK came later; embedded fonts are not a complete CJK library |
+| M1 Typst source loop | Preview updates after CodeMirror edits, locatable diagnostics, and bidirectional preview/source navigation | Debounced compilation, real diagnostics, and typst-ide position queries | Requires the native backend; click mapping does not imply full selection or structural editing |
+| M2 Editor model | Schema represents the full promised subset; manually constructed model fixtures are valid | ProseMirror nodes/marks, raw-source leaf nodes, and fixtures | Preserve out-of-model content rather than expand the subset through forced conversion |
+| M3 Bidirectional Typst conversion | Stable parse→model→serialization; the original plan also compared compiled output before and after a round trip | Rust AST parsing, TS AST→model→source, expected-serialization tests, and position-mapping tests | Current frontend tests use AST fixtures without real Rust IPC; a complete real-compilation diff loop cannot be claimed as automatically passing |
+| M4 Bidirectional Markdown conversion | Use a real Markdown parser, stable model round trips, and preservation of special Typst content | remark conversion, typed fences, and model-equivalence tests | Structural normalization is supported; byte-identical markers/whitespace are not promised; later tables and image captions introduce separate format losses |
+| M5 Three-view integration | Switching WYSIWYG, Typst, and Markdown preserves subset content; previews always come from Typst | Three views, toolbar, and PM-position/Typst-byte-position mapping | Interpolation inside marked/escaped ranges; not direct editing in the final layout |
+| M6 Mixed loops and stability | Mixed fixtures, unknown syntax, full three-view cycles, and compilation regression checks | Cross-format pure-logic tests, Rust mixed-document compilation tests, and historical manual smoke records | Automation covers separate layers; a full three-view cycle with real Rust parsing still needs native manual checks, and historical records are not a rerun in this revision |
 
-## Milestones
+## Conversion contracts and presentation rules
 
-**M0 — Bootstrap.** Tauri v2 + Vite/React scaffold. `TauriWorld` + font bundling +
-`compile_typst` with a hardcoded string, SVG rendered in the webview. De-risks the
-World-trait/font-loading integration before anything else is built.
+| Construct | Data contract | Typst / Markdown behavior | Old WYSIWYG behavior |
+|---|---|---|---|
+| Unknown syntax | `unsupported_block` stores the raw fragment | Raw nodes emit original text; Markdown structures without direct equivalents use fences | Read-only placeholder, without claiming structural editing support |
+| Unexpanded function calls | `typst_call { name, raw }`, where raw is the original source slice | Original Typst output; `typst-call` fences in Markdown | Raw calls appear as read-only block/inline items |
+| Top-level settings | `typst_set { function, raw }` in a separate settings list | Settings emit before the body; `typst-set` fences in Markdown | Document Settings shows raw settings without simulating their layout effects in the CSS editing surface |
+| Local settings and complex semantics | Do not expand the scope semantics of the top-level settings model | Preserve raw source without inferring rule application | Raw-node handling; later Live cursor provides general source input |
 
-**M1 — Source-code loop, Typst only.** CodeMirror text area → debounced
-`compile_typst` → live SVG preview + diagnostics with resolved line/column. Wires
-`typst-ide`'s `jump_from_click_in_frame`/`jump_from_cursor` via `IdeWorld` on
-`TauriWorld`: clicking the preview scrolls/highlights the source position and vice
-versa.
+Assess three levels of fidelity separately:
 
-**M2 — Editor Model schema.** ProseMirror schema for the subset (`doc > heading(1–3) |
-paragraph | bullet_list | ordered_list > list_item`, marks `strong`/`em`/`code`) plus
-`unsupported_block`. Schema only, plus hand-built `PMDoc` fixtures.
+1. Supported subset: stable structure and expected serialization, allowing normalized Markdown markers.
+2. Raw nodes: unedited raw content must not be silently removed or rewritten by unknown-structure conversion.
+3. Whole file: model rebuilding, setting hoisting, and cross-format conversion do not imply whole-file byte identity. Current direct original-format saving belongs to [Phase 4](phase4-product-validation.md).
 
-**M3 — Typst ⇄ Editor Model.** `parse_typst_ast` (via `typst_syntax::parse`,
-recognizing `typst_call`/`typst_set`), `typstAstToDoc`/`pmDocToTypst`. Round-trip
-fixture tests (vitest): parse → map → serialize stability, plus compiling
-original-vs-round-tripped source and diffing the rendered SVG.
+## Validation methods and reproducible entry points
 
-**M4 — Markdown ⇄ Editor Model.** `mdastToDoc`/`pmDocToMdast` via remark, including
-the `typst-call`/`typst-set` fence conventions. Same round-trip + compile-diff tests
-mirrored for `.md` fixtures.
+Run from the repository root in the environment described in [README](../README.md#development-environment). These are review entry points, not claims that tests ran during this revision:
 
-**M5 — Wire the WYSIWYG UI.** ProseMirror `EditorView` with keymaps/toolbar for the
-subset. Three-way view switcher (WYSIWYG / Typst source / Markdown source) over one
-`PMDoc`. Preview stays live regardless of active view. `pmDocToTypst` extended to emit
-a PM-position ⇄ Typst-byte-offset map so click/cursor sync also works in WYSIWYG mode.
+```sh
+pnpm test src/model/schema.test.ts src/spokes/typstAst.test.ts src/spokes/markdown.test.ts src/loop.test.ts
+cargo test --locked --manifest-path src-tauri/Cargo.toml ast::tests
+cargo test --locked --manifest-path src-tauri/Cargo.toml typst_world::tests
+cargo test --locked --manifest-path src-tauri/Cargo.toml mixed_document_compiles_successfully
+```
 
-**M6 — Stabilize & prove the loop.** Fixture-based round-trip + compile-diff suite as
-an automated regression gate, extended to mixed content and `unsupported_block`.
-Manual smoke checklist: WYSIWYG → Typst source → Markdown → WYSIWYG, content/preview
-unchanged. Debounce tuning so full recompile-per-keystroke stays responsive at MVP doc
-sizes (no incremental compilation needed yet).
+| Evidence | What it establishes | What it does not establish |
+|---|---|---|
+| Schema and TS conversion fixtures | AST→model→expected source, Markdown model round trips, and position helpers | Real Rust parsing integration or identical real rendering |
+| `src/loop.test.ts` | Cross-format model equivalence through real remark and stable downstream Typst text | A complete native WYSIWYG→real Typst IPC→Markdown→WYSIWYG cycle |
+| Rust ast/world/compile tests | Real parsing, font environment, and successful compilation of specified mixed source | Item-by-item real SVG diffing between TS serialization output and input files |
+| Native smoke checks | Actual view integration, focus, clicks, and display | Files, platforms, IME, or long-document scenarios that were not exercised |
 
-**Explicitly out of scope**: math, tables, images/figures, links/footnotes/citations,
-`#let`/`#show`/control-flow/scoped `#set`, multi-file imports, PDF export, true
-inline-layout WYSIWYG, CodeMirror syntax highlighting, collaborative editing,
-incremental compilation, range-level click/cursor highlighting (point-only), byte-exact
-WYSIWYG sync inside marked-up text (proportional interpolation only).
+### M6 native acceptance procedure
 
-## Verification
+1. Open or enter a fixture containing headings, marks, nested lists, breaks, and raw-source nodes.
+2. Switch WYSIWYG→Typst source→Markdown source→WYSIWYG, comparing structure and text item by item.
+3. Check that raw calls/settings remain and supported content is not duplicated, omitted, or incorrectly merged.
+4. Compare real previews from each view and exercise source→preview and preview→source navigation.
+5. Enter an invalid call, confirm diagnostics appear, then fix it and verify preview recovery without a crash.
+6. Record the fixture, platform, fonts, build, and failures. Usability with short MVP documents is not acceptance of long-document performance.
 
-- `cargo test` for `TauriWorld`/font-loading sanity and `parse_typst_ast` shape.
-- `vitest` round-trip + compile-diff suite — the primary evidence the loop is stable.
-- Manual `tauri dev` run: load each fixture, exercise the M6 smoke checklist, confirm
-  preview matches expected rendering from all three entry views.
+## Risks and phase handoff
 
-## Risks
+The common subset of two formats limits structural expression; preserving unknown syntax is necessary for a stable loop. Pin typst-ide and core versions together and recheck position interfaces after upgrades. Font environments affect rendering comparisons and should be recorded rather than attributing every difference to the editor.
 
-- Typst crate boilerplate (`World` trait, font setup) was the likely early bottleneck —
-  front-loaded into M0.
-- Two independent parsers (Typst, Markdown) feeding one schema constrains both to their
-  common subset; anything either grammar expresses that the other can't becomes
-  `unsupported_block`, by design.
-- Full recompile per debounce is fine at MVP doc sizes; a known scaling limit, not
-  solved here.
-- `typst-ide`'s jump API isn't battle-tested by prior art (tinymist reimplements it
-  independently) — pin the exact version, budget time to adapt if signatures shift;
-  treated as a non-blocking enhancement to M1.
+Phase 2 takes on real files and content expansion; Phase 3 takes on single-view feasibility, performance, and range geometry. This phase establishes reusable conversion and compilation foundations, without promising completion of subsequent interaction work.

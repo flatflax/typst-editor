@@ -1,0 +1,29 @@
+{
+  "archived_on": "2026-10-23",
+  "description": "Existing local observations; not rerun for this documentation revision.",
+  "measurement_build_revision": null,
+  "environment_manifest_available": false,
+  "files": [
+    {
+      "file": "backend.json",
+      "source": "src-tauri/target/preview-benchmark/backend.json",
+      "bytes": 35525,
+      "sha256": "82f830404650fba59cfc5c646a2b7018f59d212fb01ee6983fa996ce155f537b",
+      "source_mtime_utc": "2026-10-22T15:57:43.450Z"
+    },
+    {
+      "file": "browser.json",
+      "source": "src-tauri/target/preview-benchmark/browser.json",
+      "bytes": 5132,
+      "sha256": "14ae0e78c88c02661ed58d1ff691f593a3f8773748e54b5daf782ecc186c0d98",
+      "source_mtime_utc": "2026-10-22T16:18:05.534Z"
+    },
+    {
+      "file": "tinymist.json",
+      "source": "src-tauri/target/preview-benchmark/tinymist.json",
+      "bytes": 2047,
+      "sha256": "35fb41241d0f61a212a2645415880fb080d48684e49f923b970f50d9e1d87ff0",
+      "source_mtime_utc": "2026-10-22T16:21:52.208Z"
+    }
+  ]
+}

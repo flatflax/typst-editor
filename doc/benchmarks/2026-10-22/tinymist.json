@@ -1,0 +1,91 @@
+{
+  "browser": "155.0.4283.62",
+  "initial": {
+    "bytes": 66784,
+    "prefix": "new,Libe",
+    "write_to_receive_ms": null
+  },
+  "results": [
+    {
+      "sample": 0,
+      "bytes": 3636,
+      "prefix": "diff-v1,",
+      "write_to_receive_ms": 53.1917,
+      "write_to_paint_opportunity_ms": 114.8792,
+      "nodes": 6363,
+      "page_nodes": 26
+    },
+    {
+      "sample": 1,
+      "bytes": 8124,
+      "prefix": "diff-v1,",
+      "write_to_receive_ms": 35.6329,
+      "write_to_paint_opportunity_ms": 58.1885,
+      "nodes": 6363,
+      "page_nodes": 26
+    },
+    {
+      "sample": 2,
+      "bytes": 3636,
+      "prefix": "diff-v1,",
+      "write_to_receive_ms": 29.3817,
+      "write_to_paint_opportunity_ms": 47.3781,
+      "nodes": 6363,
+      "page_nodes": 26
+    },
+    {
+      "sample": 3,
+      "bytes": 3756,
+      "prefix": "diff-v1,",
+      "write_to_receive_ms": 21.3981,
+      "write_to_paint_opportunity_ms": 40.2712,
+      "nodes": 6363,
+      "page_nodes": 26
+    },
+    {
+      "sample": 4,
+      "bytes": 3756,
+      "prefix": "diff-v1,",
+      "write_to_receive_ms": 24.551,
+      "write_to_paint_opportunity_ms": 47.472,
+      "nodes": 6363,
+      "page_nodes": 26
+    },
+    {
+      "sample": 5,
+      "bytes": 3652,
+      "prefix": "diff-v1,",
+      "write_to_receive_ms": 18.1025,
+      "write_to_paint_opportunity_ms": 41.1279,
+      "nodes": 6363,
+      "page_nodes": 26
+    },
+    {
+      "sample": 6,
+      "bytes": 3684,
+      "prefix": "diff-v1,",
+      "write_to_receive_ms": 17.5962,
+      "write_to_paint_opportunity_ms": 41.3764,
+      "nodes": 6363,
+      "page_nodes": 26
+    },
+    {
+      "sample": 7,
+      "bytes": 3804,
+      "prefix": "diff-v1,",
+      "write_to_receive_ms": 21.9548,
+      "write_to_paint_opportunity_ms": 39.8216,
+      "nodes": 6363,
+      "page_nodes": 26
+    },
+    {
+      "sample": 8,
+      "bytes": 3804,
+      "prefix": "diff-v1,",
+      "write_to_receive_ms": 14.5586,
+      "write_to_paint_opportunity_ms": 33.5913,
+      "nodes": 6363,
+      "page_nodes": 26
+    }
+  ]
+}

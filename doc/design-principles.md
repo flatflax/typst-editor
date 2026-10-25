@@ -1,89 +1,51 @@
-# Design Principles
+# Design principles
 
-Two standing rules govern all work on this codebase, across every phase. Apply them
-before adding anything new.
+Document review: 2026-10-23. The following rules apply to subsequent implementation; conclusions from early approaches are superseded by the current interaction mechanism. See [Interaction design §6](interaction-design.md#6-核心交互机制聚焦块编辑源码) for actionable behavior requirements and [Phase 4](phase4-product-validation.md#validation-levels-and-existing-records) for validation records.
 
-## 1. Primitives over nodes
+## 1. Reuse editing operations first
 
-Don't design toward "support more node types." Design a small, fixed set of editing
-primitives that more node types can reuse. Before writing new parse/serialize/schema
-logic for a content construct, check whether it fits an existing primitive:
+Before adding a content capability, determine whether existing operations can serve it, rather than adding a separate parser, serializer, and control for every Typst construct.
 
-- **Verbatim round-trip carry-through** — `unsupported_block`, `typst_call`, `typst_set`.
-- **A recursive mark stacked via `addToSet`** — `link`.
-- **A container whose children recurse through the same block/inline serializer as
-  top-level content** — table cells (M10).
+- Raw-source preservation: `unsupported_block`, `typst_call`, and `typst_set`.
+- Composable recursive marks: for example, normalizing links and existing styles through `addToSet`.
+- Recursive containers: table cells and body content reuse block/inline serialization.
+- Structural transformations: parse into a ProseMirror document, execute existing commands, and serialize; Live cursor does not require a permanently mounted ProseMirror editing DOM.
 
-Judge a genuinely new primitive by whether *other future* node types could reuse it,
-not just the one motivating it.
+An operation is worth introducing as a new primitive only if it can serve a class of future needs.
 
-## 2. Typst decides visibility; the editing system decides interaction
+Reuse does not mean putting every conversion in one dispatch table. Inline leaf conversions are usually one-to-one and context-free, making centralized definitions suitable. Block conversions may inspect siblings, hoist top-level settings, identify standalone images, or validate table shapes; they should retain explicit contextual handling. M13 reduced duplication while preserving these differences, rather than hiding different semantics behind a uniform form.
 
-For the single-surface model (Phase 3), whether a Typst construct gets a permanent
-place in the ProseMirror schema depends on one test: **does it produce layout
-geometry** (real, positioned ink in the compiled `Frame`)?
+## 2. Typst handles layout; the editing system handles interaction
 
-- **Yes** → primary content, rendered on the document surface.
-  - *Directly authored* (one contiguous source range, one contiguous rendered region)
-    → directly editable in place.
-  - *Indirectly produced* (a call's rendered output, auto-numbering, a footnote
-    rendered elsewhere on the page) → still visible, but reached through source/semantic
-    inspection, not direct in-place editing. See M15 in [phase3-single-view.md](phase3-single-view.md).
-- **No** (`#set`, `#let`, imports, other directives with no visual footprint) → stays
-  invisible by default, exposed only through an inspector addressed by source range —
-  no dedicated PM node/schema entry. The `#set` "Document Settings" drawer (Phase 1)
-  already follows this.
+Unfocused content displays Typst's actual compiled output. Custom cursors, selections, and click positions must correspond to the same source and layout geometry; another layout system must not determine those pixel positions.
 
-This narrows rule 1 rather than contradicting it: rule 1 governs constructs that *do*
-need on-surface representation; rule 2 says a whole class of constructs may need none.
+In Live cursor, the focused block explicitly displays editable source. A native textarea handles input, IME, local selection, and local undo; the source textarea is not presented as final layout. Constructs without visible geometry, such as `#let` and `#set`, can also be edited through source entry points or definition navigation. Geometry is not a prerequisite for editable source.
 
-**Role split, revised after M15's negative result (see
-[phase3-single-view.md](phase3-single-view.md)):** the original split — ProseMirror
-owns the editing engine (cursor/selection/IME), Typst owns layout — assumed these
-responsibilities can be divided across two independently-laid-out systems for the same
-visual region. M15 falsified that assumption: cursor and selection are pixels that
-must land between specific rendered glyphs, so whichever system renders the glyphs
-must also own the cursor. Splitting them guarantees a visual seam exactly where the
-user is looking (the focused region).
+Handle three kinds of need separately:
 
-Corrected split — Typst has no concept of a cursor or selection; it only produces
-geometry:
+| Content | Required capability |
+|---|---|
+| Variable, rule, and label declarations | Semantic positioning, definition navigation, and scope; usage-to-definition navigation is partially implemented, while reverse navigation and rule-effect ranges remain pending |
+| Comments and unknown syntax | Preserve raw source without silently discarding it |
+| Frequently used visible content, such as equations | Specialized structural editing can be added gradually, with Typst remaining responsible for layout |
 
-- **Typst owns visual geometry**: layout, typography, positioned ink in the
-  compiled `Frame`.
-- **The editing system owns input, cursor/selection state, and navigation** —
-  keystroke/IME capture, what's selected, arrow-key/click/drag logic (M20:
-  `cursorOffset`/`anchorOffset` as component state, addressed in Typst byte
-  offsets, not PM positions). Structural edits (tables, lists, inserting a
-  figure) go through a document-tree transform via parse → transform →
-  serialize, not a persistent on-screen editing widget.
-- **Cursor/selection render against Typst's geometry, never a second
-  independently-laid-out system.** `geometry_for_range`/`block_geometry`
-  (M14A/M20) turn a Typst byte range into real positions the editing system's
-  own state is drawn against — confirmed working by M20's implementation.
+## 3. Advance input, saving, and preview independently
 
-The bridge is still `editor position ⇄ source range ⇄ Typst layout geometry`
-(`jump_from_click`/`jump_from_cursor`, M1/M5; `geometry_for_range`/`block_geometry`,
-M14A/M20) — the editing system holds and moves the position; geometry only answers
-where it currently renders.
+Native draft input must not wait for Rust geometry queries or compilation. Drafts must immediately participate in dirty-state checks, saving, and export; whether to commit them for compilation is a separate decision. Do not autosave intermediate text during IME composition.
 
-## Revision: adopted for the Live cursor view (focus-reveals-source)
+Every asynchronous result must match the document, directory, and source version. Do not clip an old SVG using geometry from new source, or let an old save request mark a new document as saved. Focus requests and saves currently have corresponding safeguards; the new workspace compilation scheduler and page-version protocol still need coverage of real error recovery and concurrency scenarios.
 
-[interaction-design.md](interaction-design.md) §6 (2026-09-09) proposed collapsing this
-rule's yes/no geometry test into one: **focused → source text, unfocused → rendered
-according to geometry.** Spikes 1–3 (2026-09-10) validated this, and it has since landed
-as the Live cursor view's real editing mechanism (`TypstLiveView.tsx`, phase4-product-
-validation.md) — not a pending idea anymore. This *does* supersede the geometry test
-above for that view's own editability question: a focused block is always directly
-editable as raw source, even a `#set`/`#let`/complex-`#show` construct the geometry test
-above would have left inspector-only — the geometry test still describes how the
-*un*focused WYSIWYG view (the original PM-schema-based one, still a separate view) draws
-the line for permanent on-surface representation, but it no longer gates what's directly
-editable in Live cursor.
+## 4. Correctness and evidence
 
-The gap this revision's own proposal flagged — `#set`/`#let`/tag-style references
-needing reference-chain navigation beyond a placeholder — has since been built (jump to
-where a variable/label was declared, interaction-design.md §10 结论 14), so it's no
-longer an open caveat on adopting this rule. The other one — comments needing a fidelity
-guarantee regardless of focus state — was already covered by the lossless-fallback
-primitive (rule 1, above) rather than needing anything specific to focus state.
+- Do not sacrifice layout precision, source preservation, undo, or IME behavior for performance.
+- Distinguish “code exists,” “tests passed,” “native acceptance passed,” and “user needs validated”; mocked-backend tests cannot establish system-clipboard or real-layout correctness.
+- Judge preview performance by overall commitment-to-display latency; a compilation-only measurement cannot close the reported lag issue.
+- Keep a path to improvement in simple implementations; choices such as autosaving directly to the real file must state their recovery limits.
+
+Documentation needs maintained constraints just as implementation does: status summaries cannot replace interaction specifications, milestone numbers cannot replace comparisons of goals and results, and test totals cannot replace acceptance evidence. When removing repeated prose, preserve preconditions, event outcomes, failure paths, ownership of unfinished items, and reproduction entry points. If an original statement overclaims, document the evidence gap rather than restoring it as a proven fact.
+
+## Evolution of the rules
+
+Phase 3 initially tried to join ProseMirror's editing layout and Typst's paginated layout in the same area. M15's three experiments exposed DOM reconciliation, cursor, and layout-transition problems, and that mechanism was not adopted. M20–M22 validated interaction drawn from Typst geometry; Phase 4 then returned ordinary single-block input to a native textarea, leaving custom interaction primarily for cross-block selection.
+
+The earlier judgment that “constructs without geometry can only be edited in an inspector” has been superseded by Live cursor's source-editing approach. See [Phase 3](phase3-single-view.md) for the full experimental basis and [Interaction design](interaction-design.md) for product tradeoffs.

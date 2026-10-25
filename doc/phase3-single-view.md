@@ -1,749 +1,166 @@
-# Phase 3 — Single-View WYSIWYG (closed 2026-09-09; M13–M22 complete, M23 deprioritized to backlog)
+# Phase 3: single-view engineering validation (M13–M23)
 
-Architecture reference: [architecture.md](architecture.md). Design rules: [design-principles.md](design-principles.md).
+The phase ended on 2026-09-09: core technical feasibility was validated, not product interaction or user value. M23 was incomplete at the time and subsequently moved into [Phase 4](phase4-product-validation.md). This document preserves the experimental basis; [plan.md](../plan.md) defines the current plan.
 
-## Closed
+Document review: 2026-10-23. The plan/result comparison below restores the phase's evolution. Commands are current review entry points; historical measurements were not rerun for this documentation revision.
 
-Phase 3's purpose — engineering validation of single-view WYSIWYG — is fulfilled:
-M14/M14A/M18/M20/M21/M22 give a working, validated "self-drawn cursor on live Typst
-rendering" editing loop (see Milestones below for the full record, including M15's
-discarded swap mechanism and the design-principle correction it forced). Per
-[interaction-design.md](interaction-design.md) (2026-09-09), the project now moves
-from engineering validation to product design: the remaining work under this phase —
-M23 (porting Phase 2's table/toolbar/slash-menu affordances) and any open Live-cursor
-bugs — is bug-fix/polish-level, not required to validate the next product direction,
-and is demoted to backlog rather than continued as active work. Active work moves to
-the Spikes in [interaction-design.md](interaction-design.md) §10
-(**focus-reveals-source**, a further refinement of the mechanism validated here — see
-that document for full rationale), tracked in [plan.md](../plan.md)'s "Current focus"
-section.
+## Original questions, dependencies, and acceptance principles
 
-**M23 status at closing**: slice 1 (block-type toggles — heading/paragraph/list,
-`structuralCommand.ts`) done and committed. Slice 2 (mark toggles, table row/column
-operations, plus two Live-cursor bug fixes — a mousedown/drag race corrupting
-selection anchors, and stale click targets resolving against an already-superseded
-render during an in-flight recompile) was in progress, uncommitted, at the time of
-closing; left as-is rather than force-finished, since M23 is no longer being driven
-to completion. The slash-command menu (a further planned slice) was never started.
+The original plan alternated Typst-rendered fragments and editable PM blocks on one document surface. M14 validated compilation cost and M14A validated range geometry, both before M15. M13 was an independent refactoring to reduce conversion-dispatch duplication, not a necessary prerequisite for the single-view mechanism.
 
-## Reframing
+After M15 failed, completion no longer meant “PM takes over the cursor in the real layout.” Instead, the question became whether input and cursor/selection state could work from the same Typst geometry. M18's IME experiment and M20's static interaction could be validated independently, then connected into an editing loop by M21. This changed the acceptance goal; simply marking all milestone numbers complete would conceal that change.
 
-The goal: one view, no separate preview pane, backed by real Typst rendering — made
-feasible by fast-enough recompilation (M14, done for short/medium documents — see
-below for the measured limit) and by mapping source ranges to rendered geometry (M14A,
-done — see below). An earlier framing assumed single-view meant
-hand-rolling cursor/selection/IME directly on the compiled SVG/Frame output — an
-open-ended rewrite, correctly rejected for the MVP.
+## Original goals compared with results
 
-That framing was incomplete: **Typora doesn't do that either.** Typora's mechanism is
-*per-block focus swapping* — the focused block shows a lightly-styled editable view,
-every other block shows fully rendered output, swapped on focus/blur.
-
-Applying that mechanism here turns single-view into a scoped integration problem:
-**ProseMirror keeps owning text editing** (already solved); **Typst keeps owning
-rendering** (already solved via `compile_typst`). The new work is:
-(a) incremental compilation fast enough to recompile-and-swap on focus change/keystroke
-without visible lag (M14),
-(b) extending point-only position-mapping (`jump_from_click`/`jump_from_cursor`, M1/M5)
-to return rendered geometry for a source *range*, not just a point (M14A),
-(c) a block-level focus-swap UI on PM node views using both.
-
-Architecture was governed by [design-principles.md](design-principles.md) rule 2's
-original role split (ProseMirror owns cursor/selection/IME, Typst owns rendering) —
-see M15 below for how that splits into direct content (the swap mechanism) vs.
-indirectly produced content (a source/semantic inspection interaction, deliberately
-undesigned until a prototype exposes real cases). **M15 falsified the role split
-itself, not just its first implementation** — see M15's entry below and
-[design-principles.md](design-principles.md)'s revised rule 2.
-
-**Revised framing (after M15).** Per-block focus swapping requires the swapped-in
-editable view and the swapped-out rendered view to agree closely enough on
-size/shape that neither the swap itself nor the seam between active and inactive
-regions is visible — true for Typora (both views are CSS-laid-out) but not
-achievable here, where the two views come from two independently-laid-out engines
-(PM/CSS vs. Typst) rendering the same content differently. The corrected mechanism
-(M18–M23 below) does not swap between two renderings of a block. It keeps one
-rendering — Typst's, for the whole document, at all times — and adds a cursor/
-selection layer drawn directly against that rendering's own geometry (M14A). See
-each milestone below for detail.
-
-## Milestones
-
-Tentative — M14 and M14A were feasibility spikes M15+ depended on; both are now done
-(see their entries for results and follow-on design notes for M15/M16). The perf
-baseline task below is not part of that dependency chain (see its own entry for why).
-
-**M13 — Node-type dispatch refactor — done.** Not part of the single-view mechanism
-itself; landed ahead of the next content node type. `spokes/markdown.ts`/
-`spokes/typstAst.ts` dispatched each node type through up to six near-duplicate
-`switch` statements — increasingly error-prone as the node count grows toward full
-Typst content coverage (footnotes, math, grids, citations, ...).
-- Scope: content-shaped node types only (attrs + children, symmetric conversion) — not
-  `#let`/`#show`/control-flow (categorically different: variable binding/scoping, not
-  node conversion).
-- Inline layer collapsed into one shared table
-  (`INLINE_ATOM_SPECS_BY_PM_TYPE` in `spokes/inlineLeaves.ts`) since those conversions
-  are already context-free 1:1 leaf mappings.
-- Block layer kept as separate per-direction functions (not a unified table) — several
-  cases are lookahead/accumulation over siblings (image-from-sole-child,
-  `#set` hoisting, list-item shape validation, table's flat cell grid), which would
-  leak parent/sibling context into a per-node table.
-- Structural position-validity (e.g. a list can't be a list-item's primary content) is
-  now declared centrally in `schema.ts` (`LIST_ITEM_PRIMARY_TYPES`/`LIST_TYPES`/
-  `BLOCK_NODE_TYPES`) instead of enforced by switch-case omission.
-- Switches on `node.type.name` now cast against a literal union with
-  `default: return assertNever(kind)`, so a missing case fails to compile.
-- Landed as a pure refactor (zero behavior change) gated on the existing round-trip
-  suite passing unchanged, before any new content node type is added on top.
-
-**Perf baseline (parallel, non-gating) — in progress** (edit-position follow-up done,
-full pipeline instrumentation not started). Instrument the existing
-end-to-end pipeline (`parse_typst_ast` → `typstAstToDoc` → PM render/edit →
-`pmDocToTypst` → `compile_typst` → preview render, plus IPC serialization between the
-Rust/TS boundary) and measure wall time per stage for open and per-keystroke edit,
-across a small sweep of fixture sizes (e.g. ~1, ~10, ~40 pages — reuse M14's
-`multi_page_fixture` shape rather than a single "realistic medium" doc) so growth
-trends are visible, not just one point-in-time number. Unlike M14/M14A, this isn't a
-gate — it doesn't block and isn't blocked by anything below, and can run at any time
-since the pipeline it measures already exists post-M13. Purpose is threefold: (1) find
-out now whether any stage of the *current* loop is already a bottleneck worth fixing,
-rather than assuming the Rust compile step is the only one that matters; (2) stand up
-measurement infrastructure/tooling that M14A/M15 (geometry + swap latency) and M16
-(reflow) each reuse for their own new perf surface instead of rebuilding
-per-milestone; (3) double as an ongoing regression guard for M14's linear-in-pages
-recompile-latency finding (below) — the per-size sweep should keep failing loudly if a
-future change makes the scaling worse, or should stop showing the linear trend at all
-once a session-held `World` (M14's follow-up (a)) actually lands.
-- **Follow-up: vary edit position, not just document size — done, negative
-  result.** Benchmarked in `src-tauri/src/compile.rs`
-  (`recompile_latency_after_an_edit_depends_on_position_not_just_document_length`;
-  release-mode numbers below). M14's table varied page count and edit-vs-no-edit but
-  never *where* in the document the edit lands. Crossed two document lengths (14/40
-  sections) with three edit positions (near-start/middle/near-end, persistent `World` +
-  `Source::edit`) to separate two explanations for the linear-in-pages result: cost
-  tracking *total document size* vs. cost tracking *content after the edit point*.
-
-  | Sections | near-start | middle | near-end |
-  |---|---|---|---|
-  | 14 | ~21ms | ~29ms | ~28ms |
-  | 40 | ~69ms | ~58ms | ~61ms |
-
-  Edit position is within noise at each document length; the ~2.4x cost increase from
-  14→40 sections roughly tracks the 2.9x section-count ratio regardless of where the
-  edit landed.
-  **Cost tracks total document size, not content after the edit point** — confirms
-  M14's read that Typst's pagination pass is sequential over the whole document (a page
-  break anywhere depends on cumulative height of everything before it) rather than
-  scoped to the edit site. Rules out a bounded-window recompile at the *compile* layer
-  (M16's undecided direction (a)) as a real lever — M16 should not pursue it on the
-  premise that near-end edits are cheaper; whatever mitigates long-document latency has
-  to act elsewhere (e.g. reducing recompile frequency/scope at the UI layer, or
-  accepting the linear cost for long documents as a known limit).
-
-**M14 — Incremental compilation feasibility spike — done, partial-negative
-result.** Benchmarked in `src-tauri/src/compile.rs`
-(`single_character_edit_on_a_multi_page_document_recompile_latency`,
-`incremental_edit_on_a_persistent_world_shows_comemos_real_speedup`; release-mode
-numbers below, `cargo test --release -- --nocapture`).
-
-Measurements (release mode, synthetic multi-section fixture — see
-`multi_page_fixture` in compile.rs):
-
-| Architecture | Pages | Edit | Latency |
+| ID and original goal | Actual result | Evidence / unmet conditions | Deviation and handoff |
 |---|---|---|---|
-| Fresh `World` per call (today's `compile_typst`) | 14 | none (repeat compile) | ~75–110ms |
-| Fresh `World` per call | 14 | 1 character | ~75–110ms |
-| Fresh `World` per call | 27 | 1 character | ~240ms |
-| Fresh `World` per call | 40 | 1 character | ~390ms |
-| Persistent `World` + `Source::edit` | 14 | none (repeat compile) | ~9µs |
-| Persistent `World` + `Source::edit` | 14 | 1 character | ~60ms |
+| M13 Reduce duplicate dispatch for new nodes | Centralized inline atoms and schema constraints; block conversions remain directional | Conversion/schema tests; not a new semantic engine | Retained as shared infrastructure without forcing sibling-dependent block logic into one implementation |
+| M14 Fast recompilation after edits to support focus swapping | Persistent World benefits unchanged input; real edits still incur scale-dependent cost | Release benchmarks; initial expectations of document-size independence or 16–50ms per keystroke were not met | Retained persistent World; end-to-end performance deferred to later measurement |
+| M14A Obtain pages, rectangles, and baselines from byte ranges | Single/wrapped lines, headings, images, footnotes, and cross-page ranges can be located | Six real-engine geometry test categories; multi-column/group-transform boundaries uncovered | Used for cross-block interaction and Phase 4 clipping |
+| M15 Seamlessly swap PM editing blocks and Typst fragments | All three attempts had layout/DOM problems; no adoptable mechanism emerged | Prototypes and manual failure records; not implementation completion | Abandoned the mechanism in favor of interaction on shared Typst geometry |
+| M15b Extend swapping to tables/images/lists; M17 Cursor continuity between swaps | Cancelled | The underlying swap mechanism was withdrawn | No longer pending features; reaccept related capabilities through the new interaction approach |
+| M16 Visual continuity of reflow/pagination | New compilations update the whole document; waiting feedback moved to M22 | No longer needs repairs to stale numbering/footnote fragments left by local swaps | Does not mean all scrolling/clipping issues are solved; Phase 4 continues them |
+| M18 Native input bridge for CJK composition | Independent static experiment passed with Chinese Pinyin, Japanese, and Korean | Real IME observations; no full navigation or current cross-block composition display validation | Supports native input; subsequent single-block editing uses textarea |
+| M19 Local compilation / second World | Unimplemented | No performance or correctness results for this path | Folded into M21 scope tradeoffs; revisit according to real latency |
+| M20 Static cursor/selection on real layout | Clicks, arrow keys, Shift selection, and drag selection work | Geometry unit tests and repeated manual corrections; no text editing yet | Foundation for the composite view; Phase 4 stops querying geometry for every single-block keystroke |
+| M21 Input→source→compile→display loop | Insertion/deletion, final composition commitment, and whole-document updates work | Short-fixture and multi-page manual checks; long-document lag and limited live cross-block composition | Ordinary input later moved to local drafts; the hidden input remains for cross-block use |
+| M22 Understandable feedback while compilation runs | Temporary source hint disappears when the matching result arrives | Manual checks with short/20-section fixtures; cold-load hint delay unresolved | Hints are not real previews and do not resolve update latency |
+| M23 Port Phase 2 toolbar/table/menu capabilities | Block-type switching committed at phase close; marks/tables partly unfinished | Separate phase-close records from later work; no Live slash menu | Marks/tables completed later in Phase 4; slash menu later became undecided |
 
-- **Whole-doc recompile scales roughly linearly with page count, ~8–10ms/page.**
-  It comfortably meets the *existing* 250ms debounce window (`COMPILE_DEBOUNCE_MS`,
-  App.tsx) for short-to-medium documents (roughly ≤20 pages) but not the
-  milestone's tighter ~16–50ms "instant-per-keystroke" target, and it keeps
-  getting worse as documents grow — it is not the page-count-independent result
-  M15+ would ideally want.
-- **`comemo` doesn't rescue this, even with a persistent `World`.** The current
-  `compile_typst` command builds a fresh `TauriWorld`/`Source` (fresh `FileId`) on
-  every call, which discards `comemo`'s cache entirely — that alone explains why
-  the fresh-`World` row is identical whether or not the source actually changed.
-  Holding one `TauriWorld` alive and applying a real incremental edit via
-  `typst_syntax::Source::edit` (the same mechanism `typst-cli --watch` uses) makes
-  an *unmodified* repeat-compile nearly free (full cache hit), but a genuine
-  one-character edit is still only modestly better than the fresh-`World` number
-  at the same page count. Typst's flow/pagination pass is inherently sequential
-  across the whole document (a page break anywhere depends on cumulative height of
-  everything before it), so an edit can force re-layout of everything after it
-  regardless of caching — `comemo` saves parse/eval work, not the page-layout pass
-  itself.
-- **Consequence for M15+**: whole-document recompilation is fast enough to *not
-  block* starting M15 for realistic short/medium documents under the current
-  debounce-based architecture, but the linear page-count scaling is a real,
-  measured ceiling, not a hypothetical one — long documents (tens of pages) will
-  feel laggy under a naive "recompile-and-swap on every keystroke" design. Two
-  follow-ups: (a) switch `compile_typst`'s architecture from a fresh `World` per
-  call to a session-held `World` + `Source::edit` — **done** (`compile.rs`,
-  M15's first implemented slice; see below), a low-risk win regardless (near-free
-  no-op recompiles) even though it doesn't fix the linear-in-pages cost of a real
-  edit; (b) for long documents, M16's "bounded window" idea (recompile/reposition
-  only the edited block's numbering/page scope, not the whole document) may need
-  to apply at the *compile* layer, not just the reposition layer its current
-  wording assumes — since resolved: the perf-baseline edit-position follow-up above
-  shows it does *not* help at the compile layer; the reposition layer remains a
-  separate, still-open question.
+## M13: reducing duplicate conversion code
 
-**M14A — Layout geometry spike — done, positive result.** Prototyped in
-`src-tauri/src/geometry.rs` (`geometry_for_range`): given a source byte range, walk
-every page's `Frame` tree and collect every rendered item whose span overlaps it —
-the same span-matching `jump_from_click`/`jump_from_cursor` (`typst-ide`, jump.rs)
-already do for a single point, generalized to a range and to collecting geometry
-(page, x/y, width/height, baseline) instead of just a byte offset. 6 tests, each
-checking one piece of what M15 needs:
+Inline-atom dispatch was centralized in `INLINE_ATOM_SPECS_BY_PM_TYPE`; list item nodes, list types, and block types were centralized, with `assertNever` checking branch omissions. Block conversions remain directional because siblings and context differ; they were not forced into one generic converter.
 
-| What M15 needs | Verified by | Result |
+## M14: compilation experiments and measurement boundaries
+
+Historical Release fixtures:
+
+| Condition | Size | Recorded duration |
 |---|---|---|
-| Page(s) a range renders on | `a_range_crossing_a_page_break_yields_boxes_on_both_pages` | ✅ direct from per-page walk |
-| x/y, width/height | `a_single_line_paragraph_...`, `an_image_yields_an_exact_size_box_...` | ✅ exact for images (`FrameItem::Image`'s own `Size`); approximated from font size for text (see below) |
-| Baseline | `a_single_line_paragraph_...` (`baseline_from_top_pt`) | ✅ a `Text` item's frame position *is* its baseline — no extra API needed |
-| Line boxes (one per wrapped line) | `a_wrapped_paragraph_yields_one_line_box_per_visual_line` | ✅, but reconstructed by clustering glyph hits with matching baselines — see limitation below |
-| Fragment boxes (content pulled out of flow) | `a_footnote_body_is_locatable_even_though_it_renders_away_from_its_reference` | ✅ falls out for free — a footnote body's span still resolves to a real box wherever it actually renders |
+| New World each time, repeated input or single-character edit | 14 pages | 75–110ms |
+| New World each time, single-character edit | 27 / 40 pages | Approximately 240 / 390ms |
+| Persistent World, unchanged source | 14 pages | Approximately 9µs |
+| Persistent World, single-character edit | 14 pages | Approximately 60ms |
 
-Mechanism: each `Glyph` carries `span: (Span, u16)` — a syntax node span plus a
-per-glyph byte offset within it — so `world.range(span).start + offset` gives the
-*exact* source byte position of that specific glyph (the same computation
-`jump_from_click_in_frame` does for click hit-testing), not just "this whole text run
-overlaps somewhere." Checking that offset against the target range, per glyph, is
-enough to collect every hit; `FrameItem::Image`/`Shape` carry one span for their whole
-item instead.
+Early wrapper calls and persistent-World microbenchmarks used different measurement boundaries. Some records included SVG, while the latter primarily measured compilation. These numbers show caching potential, not a directly comparable end-to-end speedup. Persistent World was retained, with `Source::edit` enabling reuse of unchanged portions.
 
-Two real limitations, not blockers:
-- **No explicit per-line boundary in `Frame` itself.** `Frame::push_frame` inlines
-  ("flattens") short soft sub-frames (≤5 items) into their parent rather than keeping
-  them as a nested `Group` — which is what a single-style text line normally is (one
-  `FrameItem::Text` per style). So line boxes are reconstructed here by clustering
-  glyph hits that share a page and baseline, not by reading an authoritative
-  "line N" boundary off the tree. This worked cleanly on every fixture tried, but two
-  genuinely different lines that happen to share an identical baseline (e.g. a
-  multi-column layout) would currently merge into one box — untested, and would need
-  an x-discontinuity check added to the clustering, not a different approach.
-  Real font-metrics ascent/descent also aren't exposed per glyph run, only the font
-  size used to lay it out — `geometry.rs` uses the same size-based approximation
-  `typst-ide` itself uses for click hit-testing (jump.rs), which is precise enough to
-  align an overlay but isn't the font's actual metrics.
-- **`Group` transforms aren't composed**, only translated — `geometry_for_range`
-  accumulates each nested frame's *position* but not `GroupItem::transform`'s
-  rotation/scale. Correct for ordinary flow content (paragraphs, headings, lists,
-  images — everything M15's swap mechanism scopes to), wrong under `#rotate`/`#scale`
-  (out of M15's stated scope anyway). `jump_from_click_in_frame` already has the
-  matrix-inversion code (`Transform::invert`/`Point::transform_inf`) this would need
-  to reuse if that scope ever grows.
+Another set of “14/40 sections” fixtures recorded beginning/middle/end edits at approximately 21/29/28ms and 69/58/61ms respectively. The limited sample did not show “later edits are faster,” which is insufficient to prioritize fixed-window compilation, but also does not prove that local reuse is impossible in every document.
 
-**Consequence for M15+**: no fallback to coarse per-block bounding boxes is needed —
-`Frame` data, walked the same way `typst-ide` already walks it for click/cursor sync,
-gives real line-level boxes with baselines and correctly locates content rendered
-away from its source position (footnotes) or across a page break. M15 can build
-directly on this rather than redesigning around a coarser data source.
+Compilation debounce was reduced from 250ms to the later 150ms. This phase only established whole-document compilation as usable for short/medium editing loops, not acceptable long-document display latency. The 2026-10-22 Live cursor user report reopened overall performance; see [performance analysis](preview-performance.md).
 
-**M15 — Direct-content render/edit swap — done, negative result.** Original goal:
-extend PM node views so each top-level block that is both geometry-producing and
-directly authored (paragraph, heading, list item, table, image, ...) presents as
-either an inline Typst-rendered SVG fragment (inactive) or an editable node view
-(active), toggling on focus/blur/click. Three mechanisms were built and discarded,
-in order, each fixing the previous one's failure but exposing a new one. The
-furthest-landed (#3 below) survives as a complete, working snapshot on branch
-`spike/m15a-block-swap`, not merged to `main` — only the load-bearing pieces
-(`block_geometry`, `geometry.rs`'s public API) were kept there.
+### M14 experiment reproduction and reporting conventions
 
-1. **NodeView-based swap.** Wrapped `paragraph`/`heading` content in a custom
-   `NodeView` that swapped between a rendered SVG fragment and PM's own
-   `contentDOM`. Result: corrupted document content. `EditorView.nodeDOM`'s own
-   doc comment warns against mutating a node's DOM this way ("will be immediately
-   overriden by the editor as it redraws the node") — confirmed directly: PM's own
-   reconciliation overwrote the manual swap on the next redraw, and a `NodeView`
-   whose DOM shape diverges from the schema's own `toDOM` output confused PM's
-   native-event handling.
-2. **Absolute-positioned overlay.** Positioned the rendered SVG fragment via
-   `position: fixed` + `getBoundingClientRect` over the live PM block instead of
-   replacing its DOM. Fixed the corruption, but reintroduced two problems
-   computed-pixel overlays have inherently: the CSS-rendered box's aspect ratio
-   doesn't match the Typst-rendered crop's native aspect ratio (visible
-   stretching), and viewport-relative positioning needs recomputing on every
-   scroll.
-3. **Before/after crop.** Rendered exactly two crops — everything before the
-   active block, everything after it — as plain flow siblings around the live PM
-   block (its other top-level siblings hidden via a decoration), so all three
-   pieces share one native scroll container and no pixel-position tracking is
-   needed (`activeBlockPlugin.ts`, `blockSwapGeometry.ts`, `sharedSvgHost.ts`).
-   Furthest-landed of the three, but exposed two problems that don't reduce to
-   more engineering:
-   - **Single-page only, and not fixable by more work**: a "before crop" that
-     spans a page break isn't a single rectangle — `svg_merged`'s page stacking
-     has no representation this crop shape can union into one box. M14A's own
-     single-page scope carried through as a limitation to lift later; here it's
-     the crop shape itself breaking down for multi-page documents.
-   - **The seam lands exactly where the user is looking.** The active block is
-     PM/CSS-rendered; its neighbors are Typst-rendered. Different layout engines
-     give materially the same content different line breaks, spacing, and font
-     metrics — the visual mismatch is worst at the one block currently focused,
-     the opposite of what "single view, always real Typst rendering" was meant
-     to deliver.
+Run from the repository root with native Rust/SDK and fonts available:
 
-**Root cause: a design-principle failure, not an implementation defect.**
-[design-principles.md](design-principles.md) rule 2 (pre-revision) split ownership
-as "ProseMirror owns the editing engine (cursor/selection/IME); Typst owns layout."
-That split cannot be implemented for a single visual region: cursor and selection
-are pixels that must land between specific rendered glyphs, so whichever system
-lays out the glyphs must also own the cursor drawn into them. Any split of that
-ownership across two independently-laid-out systems guarantees a seam at the
-focused block, regardless of how the swap is engineered. Rule 2 is revised
-accordingly — see [design-principles.md](design-principles.md).
+```sh
+cargo test --release --locked --manifest-path src-tauri/Cargo.toml single_character_edit_on_a_multi_page_document_recompile_latency -- --nocapture --test-threads=1
+cargo test --release --locked --manifest-path src-tauri/Cargo.toml incremental_edit_on_a_persistent_world_shows_comemos_real_speedup -- --nocapture --test-threads=1
+cargo test --release --locked --manifest-path src-tauri/Cargo.toml recompile_latency_after_an_edit_depends_on_position_not_just_document_length -- --nocapture --test-threads=1
+```
 
-**M14's perf standard was also the wrong standard.** M14 benchmarked whole-document
-recompile against a "recompile every keystroke in under 16–50ms" bar, modeled on
-synchronous swap-on-keystroke. The standard every mainstream rich-text/DTP editor
-actually uses is optimistic local echo plus a debounced settle (Word, Google Docs),
-not synchronous per-keystroke recompile. Under that standard, M14's own numbers
-(tens of ms for short/medium documents) are workable — M14's result stands, but its
-framing as a tight per-keystroke ceiling does not.
+These tests are in `src-tauri/src/compile.rs`, with fixtures from multi_page_fixture. Section count and actual page count are different variables; fonts, layout, and current code changes may alter page count. Record the actual page count printed by the test rather than reusing historical counts. Loose Debug regression thresholds prevent abnormal regressions; they are not Release performance targets.
 
-**Disposition of the milestones this cancels:**
-- **M15b** (extend the swap to table/image/list) is moot — there is no swap
-  mechanism left to extend.
-- **M17** (cursor continuity across swaps) is moot — there is no swap to be
-  continuous across. Click-to-position becomes part of the primary cursor
-  mechanism itself (M20 below), not a generalization of activating a node view.
-- **M16** (reflow/pagination) is not cancelled, but its hardest sub-problem
-  dissolves: the "sibling shows stale numbering/`#set`/footnote content" bug (its
-  open scope question, previously undecided) cannot occur once the display is
-  always a whole-document recompile-and-redraw with no cached or cropped
-  fragment to go stale. Only a latency/visual-continuity question remains — see
-  M22.
-- The `TauriWorld` session-holding work first landed under M15 (`compile.rs`) is
-  kept — it is load-bearing for M21, independent of the swap mechanism's fate.
+Record first compilation, warmed unchanged compilation, and single-character edits separately, stating whether World is persistent and whether SVG is timed. Preserve build revision, Rust version, CPU, fonts, font size, justify, edit position, repetition count, and raw output for each group. The historical table lacks complete machine/distribution records; do not invent p95 values or guarantee the same results.
 
-**Revised mechanism (M18–M23 below).** Typst renders the whole document, at all
-times, as one multi-page SVG — no per-block swap, no cropping. Cursor and
-selection are drawn by the editing system directly from that rendering's own
-geometry (M14A's `geometry_for_range`/`jump_from_click`), not by a second,
-independently-laid-out engine. A hidden input element captures keystrokes and IME
-composition; structural edits (tables, lists, inserting a figure) go through a
-parse → transform → serialize round trip rather than a persistent PM DOM tree. See
-[design-principles.md](design-principles.md)'s revised rule 2 for the corrected
-role split.
+The early “synchronous 16–50ms per key” expectation conflated input response and compiled display. Later evaluation must separate immediate native input feedback from background completion. This corrects the usability criterion without making waiting disappear. See [preview performance](preview-performance.md) for current full-path measurement requirements.
 
-**M18 — CJK IME composition spike — done, positive result.** The one risk
-M14/M14A didn't cover, and the one open question deciding whether M20–M23 are
-worth building: can a self-drawn cursor/selection layer over a static
-Typst-rendered SVG host CJK IME composition acceptably? Tested manually
-(composition can't be exercised meaningfully by synthetic events) against real
-Chinese (Microsoft Pinyin), Japanese, and Korean IMEs on Windows, using the
-harness at `spike/m18-ime/index.html` — a standalone static page, no build
-step, no compile/backend integration at runtime (its background SVG was
-compiled once from the real `compile_typst` pipeline, so its glyphs are real
-Typst output, not a CSS mockup). Result: **yes, for all three**, with two
-harness bugs found and fixed along the way and one architectural finding to
-carry forward.
+## M14A: obtaining layout geometry from source
 
-- **The full-replace model holds for all three languages, including the
-  hard cases.** The harness always sets the composition overlay to
-  `compositionupdate`'s `data` field wholesale, never a diff/append. This
-  correctly handles Chinese's wholesale-replace-on-candidate-selection,
-  Japanese's candidate *cycling* (confirmed live: `きょう` → `今日` → `協力`
-  → back to `今日` — unrelated kanji candidates for the same reading, not
-  extensions of each other, delivered through the identical event/field), and
-  Korean's in-place jamo-to-syllable replacement (`ㄴ` → `내` → `낸`, each a
-  full replace of the previous, not an append).
-- **No segment/clause-boundary information is exposed by the standard
-  Composition Event API.** Nothing in `compositionupdate` distinguishes "you
-  typed another character" from "you cycled to a different candidate for an
-  existing segment," and nothing marks a Japanese multi-segment composition's
-  confirmed vs. unconfirmed clauses. Not a blocker: the full-replace model
-  never needed that distinction to render correctly, and the OS's own
-  candidate popup already shows segment/clause state visually — a page-level
-  overlay doesn't need to reproduce it.
-- **Korean commits per-syllable, not per-word — a real frequency difference
-  for M20/M21 to design for.** Chinese and Japanese ran one long
-  `compositionstart`…`compositionend` per phrase; Korean fired a full
-  start/update/end cycle per syllable (sometimes per single jamo), confirmed
-  live: `ㄴ→내→낸→(end "낸")→(start)→ㅁ→므→(end "므")→...`. An
-  implementation that assumes "one composition ≈ one word" will see far more
-  composition-lifecycle churn per second of typing for Korean than for
-  Chinese/Japanese. The harness already handles this correctly (each
-  `compositionend` commits and advances the caret independently, regardless
-  of how short-lived the composition was) — the finding is about expected
-  event *frequency*, not a correctness gap.
-- **Candidate-window positioning is correct, confirmed visually (not just
-  inferred from the log) for all three languages.** Positioning the real
-  (if visually tiny and transparent) `<input>` element at the caret's actual
-  screen location was sufficient for the browser/OS to anchor its native
-  candidate popup correctly — no dedicated IME-positioning API call was
-  needed beyond keeping that element's position in sync with the caret.
-- **Two real bugs found and fixed in the harness's own logic** (not the
-  browser/OS) — both are genuine lessons for M20/M21, not spike-only quirks:
-  1. Chromium fires the terminal `input` event for a composition emptied via
-     backspace with `isComposing:false` and `inputType:"deleteContentBackward"`,
-     ~0.3ms *before* `compositionend` actually fires. Code that trusts that
-     event's `isComposing` flag will treat a cancelled composition as a real
-     backspace and delete a character from already-committed content instead.
-     Fix: track composition state with your own flag (set on
-     `compositionstart`, cleared on `compositionend`), not the individual
-     event's own flag.
-  2. A self-drawn caret does not automatically track the growing/shrinking
-     end of an in-progress composition — it must be explicitly repositioned
-     on every `compositionupdate` (here, via the overlay's own rendered
-     width), or it stays frozen wherever the composition started for its
-     whole duration.
-- **Not tested, and out of scope for this milestone**: arrow-key navigation
-  through already-committed text. That needs a real position↔geometry
-  mapping (M14A's `geometry_for_range`), which is M20's job, not something
-  this harness approximates.
+Traverse glyph Spans and character offsets inside Frames to obtain source byte ranges; images return actual rectangles. Text boxes cluster by page and baseline, with heights estimated from font-size metrics. Footnotes and cross-page content may yield multiple boxes, positioned in the merged SVG using page offsets.
 
-**Consequence for M20+**: the one existential risk blocking this direction is
-cleared. M20 can start.
+Boundaries:
 
-**M20 — Static cursor, selection, and hit-testing on live Typst rendering —
-done, positive result.** Click-to-position, arrow-key navigation (with Shift
-to extend), and drag-to-select directly against the full-document Typst SVG,
-using M14A's `geometry_for_range`/`jump_from_click` — no text editing yet, no
-IME (M21). Independent of M18 (pure geometry/hit-testing) — ran in parallel
-rather than after it. New "Live cursor (M20)" view mode in `App.tsx`,
-alongside (not replacing) WYSIWYG/Typst/Markdown — the first milestone since
-M12 with a directly visible, positive result: a real caret blinking on real
-Typst-rendered text, clickable and navigable, confirmed working after seven
-rounds of manual testing.
+- Same-baseline text in multiple columns may cluster into one box.
+- Group translations accumulate, but rotation/scaling remains incomplete.
+- Text boxes are approximate geometry usable for editing, not standard line boxes guaranteed by the engine.
+- Initial per-range traversal later became batch traversal; see [Architecture](architecture.md) for the current algorithm.
 
-- **Fixed a real, pre-existing gap this milestone's own premise depends on**:
-  `jump_from_click` (jump.rs, M1-era) hardcoded `document.pages().first()` —
-  a click anywhere on `svg_merged`'s full multi-page output beyond page 1 was
-  silently hit-tested against page 1's content instead. Harmless for the old
-  split-pane preview (MVP documents fit on one page, and click-sync was a
-  nicety); a real correctness gap for M20, whose whole point is a clickable
-  *full* document. Fixed via a new `geometry::page_offsets_pt` (the merged-
-  coordinate-space Y where each page starts, mirroring `svg_merged`'s own
-  stacking arithmetic exactly via a shared `PAGE_GAP_PT` constant) — used by
-  `jump_from_click` to resolve which page a merged-Y click point actually
-  falls on, and returned to the frontend via `CompileResult` so `RangeBox`
-  geometry (page-relative) can be placed on the single rendered SVG
-  (merged-absolute). 3 new Rust tests (`geometry.rs`, `jump.rs`).
-- **Mechanism**: the compiled SVG renders once, unmodified; a second `<svg>`
-  overlay with the identical `viewBox` sits exactly on top via CSS and holds
-  only the caret/selection `<rect>`s — both in the same pt coordinate space,
-  so no px conversion is needed to *draw* them (only to *hit-test* a click,
-  via the existing `svgPointFromClient`, now shared from `util/svgGeometry.ts`
-  instead of living only in `App.tsx`).
-- Caret placement prefers the leading edge of the character after the
-  cursor, falling back to the trailing edge of the character before it (end
-  of document, or an empty "after" query) — doesn't attempt to resolve
-  line-wrap-boundary affinity, a known heuristic limit inherited from
-  M14A's line-box clustering. Drawn height is trimmed to the glyph's own
-  baseline (`visualHeightPt`), not `geometry.rs`'s full ascent+descent hit-
-  testing box (see bugs below).
-- **Up/Down navigation searches real line geometry, not a guessed
-  distance.** `nearestAdjacentLine` (`editor/typstCursor.ts`) fetches every
-  line box in the document (cached per `source` string) and finds whichever
-  one sits strictly above/below the caret's current line — a synthesized
-  click then lands at that real line's vertical center, clamped
-  horizontally (`clampXToLine`) to a sticky "preferred X" column. Line
-  spacing genuinely differs across block types (heading vs. body text vs.
-  list item), which is exactly why an earlier guessed-multiplier version of
-  this (see bugs below) could never fully work.
-- Pure geometry/offset math lives in `editor/typstCursor.ts` (box→absolute-
-  position conversion, caret placement, line search, UTF-8-byte code-point
-  stepping), tested independently of React/Tauri — the component
-  (`editor/TypstLiveView.tsx`) only wires it to `invoke` calls and DOM events.
-- Drag-select coalesces `jump_from_click` calls to the latest mouse position
-  rather than queuing every `mousemove` — that command isn't on the
-  session-held `World` `block_geometry` uses, and an uncoalesced fast drag
-  could both lag and resolve out of order. Up/Down presses are queued
-  instead (a real FIFO, not "coalesce to latest") since a discrete keypress
-  must not be dropped the way a continuous mouse position can be.
+### M14A capabilities and corresponding evidence
 
-**Seven rounds of manual testing found seven real bugs, all fixed** — the
-production-code equivalent of M18's IME testing loop, and a useful
-reminder that M14A's/jump.rs's geometry approximations were validated for
-*hit-testing* (generous, forgiving) and needed real correction once the
-same numbers were used to *draw* something or navigate by real distance:
-1. **Caret drawn visibly too low.** `geometry.rs`'s glyph-box approximation
-   (`ascent = full font size`, `descent = ascent × 0.25`) deliberately
-   overshoots on both ends for generous hit-testing — real ascent is well
-   under a full em, and the 25%-below-baseline descent exists for glyphs
-   that don't actually have one. Fine for click matching; visibly wrong once
-   drawn as a caret bar, which read as hanging into the next line's space.
-   Fixed by trimming the drawn height to `baseline_from_top_pt`.
-2. **Up/Down silently failing intermittently.** The handler used `caretRect`
-   React state as the "current position," but that state is populated by an
-   async effect one round-trip behind `cursorOffset` — pressing Up/Down
-   again before that effect resolved computed the next target from a stale
-   box, occasionally landing back where it started. Fixed by fetching
-   geometry fresh (via a `cursorOffsetRef` mirror, since rapid key-repeat
-   also outruns React's render cycle) at the moment each press is processed.
-3. **Caret/selection X-offset appeared only in a maximized window.** Root
-   cause: `.typst-live-view`'s flex column defaulted `.typst-live-stage` to
-   `align-items: stretch`, stretching it to the *container's* full width —
-   wider than the actual rendered SVG whenever the window was wide enough
-   that `max-width: 100%` wasn't the binding constraint (it only ever
-   shrinks, never grows past the SVG's intrinsic size). The overlay `<svg>`
-   (sized to 100% of that too-wide box) then centered its content via its
-   default `preserveAspectRatio` inside slack width the real, left-aligned
-   SVG didn't have — invisible in a narrow window, visibly offset once
-   maximized. Fixed with `align-self: flex-start` on `.typst-live-stage`.
-4. **Up/Down still unreliable after a distance-tuning attempt.** An
-   intermediate fix widened the guessed step distance empirically (measured
-   against a real sample document); still failed differently across block
-   types — skipped a paragraph's first wrapped line moving down from a
-   heading, didn't move at all between short list items, skipped a list's
-   last item moving up into it. No single multiplier of "the current line's
-   own height" can hold across headings/paragraphs/list items, which have
-   genuinely different line spacing — replaced with the real-geometry
-   search (`nearestAdjacentLine`) described above, not a better guess.
-5. **Up/Down froze moving onto a shorter line.** `nearestAdjacentLine`
-   correctly found the target line, but the synthesized click still aimed
-   at the old (sticky) X position — past where a *shorter* line's content
-   actually ends, `jump_from_click` had nothing to resolve to. Fixed with
-   `clampXToLine`, clamping only the click's target, not the stored sticky
-   column (so returning to a longer line later still snaps back to the
-   original one).
-6. **Clicking blank space did nothing** — past a short line's end, below the
-   last line, in the margins, or in the gap between lines, `jump_from_click`
-   had nothing there to resolve to and returned nothing, same underlying
-   problem as bug 5 but for a *direct* click (no "current line" to clamp
-   against, since finding the right line is the point of a click). Fixed
-   with `lineContainingY` (nearest line whose vertical span contains the
-   point, or nearest by center distance otherwise) plus the same
-   `clampXToLine`, shared by both click-to-position and drag-select.
-7. **A fast click sometimes got stuck in drag mode** ("recognized as a long
-   press"). Race condition: `handleMouseDown` set the dragging flag inside
-   `offsetAtClient`'s async `.then()`, not synchronously on mousedown. A
-   fast click's `mouseup` could clear that flag *before* the promise
-   resolved; the resolution then set it back to `true` afterward, leaving
-   drag-mode stuck on with the button already released — every following
-   mouse movement then extended a selection. Fixed by setting the flag
-   synchronously at the top of `handleMouseDown`.
+All tests below are in `src-tauri/src/geometry.rs`; run `cargo test --locked --manifest-path src-tauri/Cargo.toml geometry::tests` to review them:
 
-**M21 — Edit loop: keystroke to whole-document recompile-and-redraw — done,
-positive result.** Keystroke → edit the session `World`'s source →
-whole-document recompile (the existing single session `World`, M14's
-already-validated numbers — e.g. ~60ms for a 14-page document) → replace the
-rendered SVG → redraw cursor from fresh geometry. No block-scoped or
-second-`World` compilation for v1 — that architecture was planned as its own
-milestone (M19, hence the gap in the numbering) but folded in here instead,
-since M14's own numbers already make it unnecessary for v1; deferred and
-built only if long-document latency proves unacceptable in practice — see the
-long-document finding below for where that stands now.
+| Capability/fixture | Test name | Passing result and boundaries |
+|---|---|---|
+| Single-line paragraph | a_single_line_paragraph_yields_one_line_box_on_page_one | Page, position, dimensions, and baseline exist; text height approximates font size |
+| Wrapped paragraph | a_wrapped_paragraph_yields_one_line_box_per_visual_line | A box per visual line; currently baseline clustering, not formal engine line nodes |
+| Heading | a_heading_yields_a_line_box | Heading range maps to actual layout |
+| Image | an_image_yields_an_exact_size_box_with_no_baseline | Dimensions come from the image Frame; no fabricated text baseline |
+| Footnote body | a_footnote_body_is_locatable_even_though_it_renders_away_from_its_reference | Source locates the actual body area away from its reference |
+| Cross-page range | a_range_crossing_a_page_break_yields_boxes_on_both_pages | One range may return multiple boxes on multiple pages; do not collapse them into one page rectangle |
 
-- **Mechanism**: a hidden `<textarea>` inside `TypstLiveView.tsx`'s stage
-  captures keystrokes/IME composition via `input`/`compositionend` events —
-  not `keydown`, matching M18's validated harness exactly, since IME
-  composition only works correctly through the browser's own composition
-  machinery. `source` is edited directly (`spliceSource`, `typstCursor.ts`)
-  and never routed through ProseMirror, per M15's finding — PM is, at most,
-  an on-demand structural transformer for tables/lists/figures, not a
-  persistent editing surface for plain text. `App.tsx` gains its own
-  `liveTypstText` buffer for the Live cursor view, following the same
-  lazy-refresh convention as `typstText`/`markdownText` (only pushed a fresh
-  value on switching into the view or loading a file).
-- **A real, non-obvious cost found before shipping, not after**:
-  `block_geometry` (compile.rs) runs its own full `typst::compile` call
-  internally — it walks a *compiled* document's Frame tree, and doesn't reuse
-  whatever `compile_typst`'s own debounced call already produced. Refetching
-  caret/selection geometry on every keystroke without a matching debounce
-  would have silently forced a *second* full recompile per keystroke,
-  defeating the entire point of debouncing `compile_typst` in the first
-  place. Fixed by sharing one `RECOMPILE_DEBOUNCE_MS` constant
-  (`typstCursor.ts`) between `App.tsx`'s compile debounce and
-  `TypstLiveView.tsx`'s geometry refetch — but only when `source` itself just
-  changed (typing); a pure cursor/selection move with `source` unchanged
-  (navigation) skips the delay entirely, since `block_geometry`'s compile
-  call is then a comemo cache hit (near-free, M14) and navigation stays
-  instant. Two different triggers needing two different treatments, not a
-  single blanket debounce.
-- **No live IME composition overlay yet** — a composing IME (typing Chinese/
-  Japanese/Korean) shows nothing on screen until `compositionend` commits it,
-  unlike M18's own harness, which drew the in-progress composition string
-  live. The commit-only path *works* (M18's `compositionend`-commits pattern
-  carries over directly, including its backspace-cancellation fix via a
-  `composingRef` rather than trusting `isComposing` alone), but the missing
-  live preview is a real UX gap for CJK input specifically, given this
-  project's CJK orientation — deferred as a known follow-up, not solved here.
-- **What M21 deliberately doesn't attempt**: any local/optimistic rendering
-  during the settle window between a keystroke and the next redraw (there is
-  no rendering layer available except Typst itself — showing *something*
-  progressively would need its own approximation, which is explicitly M22's
-  scope, not this one's); undo/redo for this view (browser-native undo on
-  the hidden textarea wouldn't do anything useful, since its value is
-  cleared after every event; a real fix needs its own history stack, not
-  attempted yet).
+A glyph's source position is the Span's source-range start plus the glyph offset, rather than treating a whole text run as one hit range. Images/shapes use element Spans. Some soft groups are flattened in Frames, leaving no reliable “whole visual line” node; hence baseline clustering. Same-baseline columns need additional horizontal separation to avoid merging. Extending group transforms should compose transformation matrices rather than continue accumulating translation only.
 
-**Manual testing found five real bugs, all fixed, plus one confirmed
-architectural limitation the previous milestones already predicted**:
-1. **A fast click sometimes got stuck in drag mode**, and **arrow keys/typing
-   were completely dead** (click/drag alone still worked). Root cause of the
-   dead keyboard input: `handleMouseDown` calls
-   `hiddenInputRef.current?.focus()`, but mousedown on a non-focusable target
-   (the stage `<div>`/its SVG children) has a *default* browser action that
-   shifts/blurs focus, firing *after* that handler returns — without
-   `event.preventDefault()`, that default action immediately undid the
-   explicit focus call, so the hidden textarea never actually kept focus and
-   no keyboard event ever reached it, even though the handler itself ran
-   fine (hence click/drag working while typing/arrows didn't).
-2. **Enter needed two presses to see any visible change, and a blank
-   line/empty paragraph showed no caret at all.** A single `\n` is a soft
-   break in Typst source (swallowed into the same paragraph, like Markdown),
-   not a new paragraph — Enter now inserts `\n\n`, a deliberate WYSIWYG-
-   affordance choice (one Enter reads as "start a new paragraph"), not a
-   literal transcription of the keystroke. Separately, `fetchCaretRect` only
-   ever queried a 1-character window either side of the cursor, and Typst
-   renders no ink for bare whitespace — exactly what a blank line is (and
-   what Enter now reliably creates) — so the caret vanished there. Fixed by
-   widening the query to a few hundred bytes either side when the narrow
-   window finds nothing, landing the caret near the nearest real content
-   instead — an approximation, since there's nothing at the blank line
-   itself to measure, but far better than disappearing.
-3. **Backspace/Delete never worked at all.** The hidden textarea's value is
-   always cleared back to `""` right after every commit — pressing Backspace
-   against an already-empty textarea has nothing to delete *from*, so the
-   browser never dispatches an `input` event for it in the first place; not
-   a matter of the handler being wrong, the event never arrived. Fixed by
-   handling Backspace/Delete directly via `keydown` instead of waiting on an
-   event that will never come in the non-composing case — backspacing
-   *during* active IME composition is unaffected, since `event.key` reports
-   as `"Process"` (not `"Backspace"`) while composing (M18's own finding),
-   so this new check naturally doesn't fire there and the textarea's own
-   (non-empty, mid-composition) value continues to handle it correctly.
-4. **Scrolled several pages into a long document, then typing, reset the
-   view back to the top.** Not root-caused to the exact browser mechanism;
-   fixed defensively by tracking the scroll container's latest
-   `scrollTop`/`scrollLeft` on every native scroll event and restoring it in
-   a layout effect (runs synchronously after the DOM commit but before
-   paint) keyed on `svg`, so any reset during that commit is corrected
-   before it's visible.
-5. Also tightened `RECOMPILE_DEBOUNCE_MS` from 250ms (a value carried over
-   from the split-pane preview, never re-validated here) to 150ms — a
-   real improvement, but a tuning number, not a fix for the deeper gap in
-   finding 6 below.
-6. **Typing on a 20-section (multi-page) document feels laggier than on the
-   short demo document — confirmed, not a surprise.** This is exactly what
-   M14 already measured and predicted: whole-document recompile scales
-   ~linearly with page count, and M14's own risk section said long documents
-   "will feel laggy under a naive recompile-and-swap on every keystroke
-   design." Decided (2026-09-08): accept this for v1 rather than pull the
-   deferred block-scoped/second-`World` compile work (M19, folded into this
-   milestone) forward now — record it as a known, measured limitation and
-   revisit only if it becomes a real blocker, per M21's own original
-   deferral condition. No optimistic/progressive feedback during the
-   (now-shorter) settle window is still M22's job, not solved by the
-   debounce tuning above.
+## M15: why block swapping was not adopted
 
-**One pre-existing, cross-cutting gap surfaced during this testing, not part
-of M21 and not fixed here**: a tofu/box placeholder for at least one typed
-CJK character — a font-coverage gap (`typst_world.rs`'s embedded+system font
-merge, M1), not a bug in how M21 splices composed text into the source
-buffer (confirmed: the glyph is genuinely missing from whatever font got
-selected, not a wrong/corrupted character). Would show up identically in any
-view (WYSIWYG, Typst source), not something specific to the Live cursor
-view. Left open — not investigated further this session.
+| Attempt | Main problem | Conclusion |
+|---|---|---|
+| Swap DOM inside PM NodeViews | ProseMirror DOM reconciliation conflicts with external node replacement and can damage the document | Not adopted |
+| Fixed overlay above rendering | Two sets of font, dimension, and scrolling calculations cannot align reliably; growth covers later content | Not adopted |
+| Place before/after SVG crops and a focused PM block in document flow | Multiple pages cannot be reduced to one rectangle; two layouts still have visible transitions at focus | Not adopted |
 
-**M22 — Settle-window UX (done, positive; supersedes M16).** What the document
-shows during the recompile-latency window between a keystroke and the next
-redraw. M16's hard correctness question (a sibling block showing stale
-content) is resolved by construction under M21 (see M15's disposition notes
-above); this milestone only had the latency/visual-continuity question left.
+The historical snapshot was named `spike/m15a-block-swap`; it is an experimental record, not a promise that the branch exists in the current checkout. Reusable geometry and the session World remained in the main implementation.
 
-Chose an optimistic text overlay: a small floating badge, anchored just above
-the caret, showing the raw source text of the paragraph currently being edited
-(`currentParagraphText`, `typstCursor.ts`) while a real recompile is in
-flight. Tracked by two explicit `useState`/`useEffect` pairs in
-`TypstLiveView.tsx` — `isPending` flips true the instant `source` changes and
-false once the displayed `svg` reflects it — deliberately not a ref-derived
-flag, since mutating a ref alone doesn't force the re-render that hides the
-badge.
+The revised rule: Typst supplies layout geometry; the editor owns input, cursor, and selection state and displays interaction against that geometry. Structural operations may temporarily use PM document transformations without permanently mounted PM layout. Phase 4 goes further by assigning single-block input to a native textarea that explicitly displays source, avoiding presentation as final layout.
 
-Manual testing on both the short demo document and the 20-section
-`m21-multipage-test.typ` fixture confirmed the intended behavior, though the
-visible pattern differs by document size in a way that is correct, not a bug:
-on the short document, real compile time is negligible next to the 150ms
-debounce, so the badge flashes once per keystroke and clears before the next
-one lands unless typing faster than the debounce window. On the long
-document, where real compile time is the dominant cost (M21's "laggier
-typing" finding), the badge stays visible for the whole recompile — exactly
-the gap it was built to cover. One caveat found during testing: right after
-loading a large file, the first badge appearance lagged noticeably (a cold
-first compile against the freshly-loaded `World`) before settling into the
-expected per-edit behavior — not investigated further, and not a regression
-against M21 (M21 already accepted the same document as "laggier").
+This experiment rejected the specific approach of “joining two layout outputs without visible differences and using the PM cursor to interpret Typst glyphs.” It did not prove every focus-switching interaction impossible. Later native-source blocks explicitly accept different styling and move neighbors through document flow; this new approach changes the premises and must not be conflated with success of the M15 mechanism.
 
-Live re-pagination — later content visibly shifting position as the user
-types, the way Word/Google Docs redraw — was in this milestone's original
-scope but turned out to be unnecessary: M21's whole-document recompile
-already redraws every page from scratch on each settle, so there is no
-separate "stale layout" state to reconcile. What was missing was purely the
-feedback *during* the settle window, which the badge now covers.
+## M18: native CJK input experiment
 
-**M23 — Port Phase 2 editing affordances — partial progress, deprioritized to
-backlog at Phase 3's closing (see Closed section above).** Table editing, the
-slash-command menu, the floating toolbar, and list operations — currently built
-on PM's persistent DOM tree — reimplemented against the parse → transform →
-serialize model (M15's finding: PM, where still used, becomes an on-demand
-structural transformer, not a persistent editing surface).
+The independent page `spike/m18-ime/index.html` historically passed manual checks with Windows Chinese Pinyin, Japanese, and Korean IMEs. Observations included:
 
-- **Slice 1 (done, committed).** Block-type toggles (heading/paragraph/list)
-  ported to the Live cursor toolbar via `structuralCommand.ts`: each click runs
-  an existing `wysiwygCommands.ts` PM command against a throwaway `EditorState`
-  parsed from the whole current source, then serializes the result straight
-  back to Typst text. Also: "P" now escapes a list item (a button the original
-  WYSIWYG toolbar never exposed), and ordered lists serialize with Typst's
-  native `+` auto-number marker instead of explicit `1. 2. 3.` when the list
-  starts at 1 (a `pmDocToTypst` change, not toolbar-specific). Manual testing
-  confirmed three initially-reported "bugs" (repeated list-toggle clicks not
-  merging into one list; toggling a list again being a no-op) are pre-existing
-  PM command behavior already present in the old WYSIWYG editor, not
-  regressions — pinned as characterization tests.
-- **Slice 2 (in progress, uncommitted at closing).** Mark toggles
-  (bold/italic/code/link) and table row/column operations ported the same way.
-  Two Live-cursor bugs found and fixed along the way: a mousedown/drag race
-  where a fast drag's own `offsetAtClient` call could resolve before
-  mousedown's anchor-setting one, corrupting the selection range they form
-  together; and stale click/drag targets resolving against an
-  already-superseded render while a recompile is in flight (`isPending`),
-  fixed by refusing to resolve a click/drag position at all during that
-  window rather than risk silently selecting the wrong text. Known,
-  accepted gap: mark toggles are a no-op on a collapsed cursor with nothing
-  selected, since there's no persistent PM `storedMarks` state for this raw
-  splice-based editing model to carry a pending toggle in.
-- **Slash-command menu**: not started.
+- `compositionupdate.data` is the entire current composition string and must replace rather than append; Japanese candidate changes and Korean syllable composition follow their respective event cycles.
+- Standard browser composition events do not expose detailed candidate-clause boundaries.
+- The input element must be near the cursor to anchor the system candidate window correctly.
+- Deletion events before composition ends may report `isComposing=false`, requiring independent composition state.
+- Changing composition-text width also requires updating a custom cursor's position.
 
-## Risks
+The experiment did not validate full navigation. It supports choosing native input, but does not establish complete composition preview and candidate positioning in the current cross-block hidden input.
 
-- **Cross-block layout dependencies (resolved by the revised mechanism).**
-  A block's compiled size/appearance isn't purely a function of its own content
-  (earlier `#set` rules, auto-numbering, widow/orphan control) — this was a real
-  risk for a per-block swap, which needed neighbors to stay correct without being
-  re-rendered. Under M21's whole-document recompile-and-redraw, every visible
-  block is always freshly rendered, so this risk no longer applies.
-- **Page-boundary UX (resolved by the revised mechanism).** The old open scope
-  question — an edited block's numbering/`#set`/footnote effects could leave a
-  stale-content sibling under a per-block swap — no longer applies once nothing is
-  cached or cropped independently (see M15's disposition notes). The settle-window
-  UX question this left open is resolved by M22's pending badge.
-- **M14A's line-box reconstruction is a heuristic (baseline clustering), not an API
-  guarantee** — two visually distinct lines sharing an exact baseline (e.g. a
-  multi-column layout) would currently merge into one box. Untested; would need an
-  x-discontinuity check added before M20 relies on it for that case. This risk
-  gained weight after M15: line boxes now drive the primary cursor (M20), not just
-  an optional preview-sync overlay, so a wrong merge is now a visible editing bug,
-  not a cosmetic one.
-- **M14's measured linear-in-pages recompile cost** means whole-document
-  recompile-and-redraw will feel laggy on long documents even though it's fine for
-  short/medium ones. M21 accepts this for v1 (optimistic local echo + debounced
-  settle, not synchronous per-keystroke recompile — see M15's perf-standard
-  correction) rather than solving it upfront; a bounded-window/block-level compile
-  is deferred until real usage shows it's needed (the perf-baseline edit-position
-  follow-up already rules out a compile-layer bounded window as a fix, so any such
-  future work would need a different lever).
-- **CJK IME composition (M18) — resolved, positive.** Was the mechanism's one
-  unvalidated risk; now traces to a real test against Chinese/Japanese/Korean
-  IMEs, same as geometry/hit-testing/recompile cost. One residual risk carried
-  forward: Korean's much higher composition-lifecycle event frequency
-  (per-syllable, not per-word) is a load characteristic M20/M21 should keep in
-  mind, not a correctness gap — see M18's entry above.
+When reviewing, observe active input, candidate changes, confirmation, Backspace clearing, cancellation, and consecutive syllables separately, rather than only final compositionend characters. The historical independent-page path identifies the prototype; the product must be rechecked in its own controls, scrolling, and focus environment. Prototype success cannot substitute for product acceptance.
+
+## M20: composite-view interaction
+
+Implemented clicks, left/right/up/down movement, Shift selection, and drag selection. The cursor prefers the next glyph's leading edge, otherwise the previous glyph's trailing edge; visible height is trimmed relative to the baseline. Vertical movement queries real adjacent lines, retains the original horizontal position, and constrains the landing point within the target line. Dragging processes only the latest position; vertical keypresses execute FIFO without dropping repeats.
+
+Key issues found and corrected manually:
+
+| Symptom | Correction |
+|---|---|
+| Cursor too tall; vertical movement loses steps | Adjust visible cursor height and query geometry from the current offset each time |
+| Horizontal overlay offset in wide windows | Size the stage to actual SVG width rather than parent flex stretching |
+| Navigation fails with mixed font sizes, short lines, or space outside lines | Use real line geometry, clamp horizontal landing points, and choose the nearest line |
+| Quick mouse release leaves dragging active | Set dragging state synchronously on mousedown so asynchronous queries cannot arrive after mouseup |
+| Multi-page positions use only the first page | Use page offsets and inter-page spacing in merged coordinates |
+
+## M21: source-editing loop
+
+A hidden native input receives text; insertion, deletion, and replacement operate on UTF-8 source ranges before whole-document compilation. Final text commits at composition end; live composition overlays did not yet exist.
+
+Historical fixes included preventing mousedown from stealing focus; inserting Typst paragraph separators `\n\n` on Enter; progressively expanding empty-range geometry queries to usable characters (up to 256 bytes); handling Backspace/Delete on keydown for an empty hidden textarea; and restoring scroll after SVG replacement. Cold-compilation feedback on first loading a large document may still be slow.
+
+A 20-section multi-page fixture was confirmed slower than a short document. Whole-document compilation was accepted as a v1 boundary at the time; this explains the historical tradeoff but has been reconsidered after later performance reports. Missing CJK glyphs were recorded separately as font-coverage issues and were not resolved in this phase.
+
+## M22: feedback while waiting
+
+Source changes immediately set pending, cleared when matching successful rendering arrives. A temporary source hint appears above the cursor and is explicitly distinct from final Typst layout. Short documents may mostly wait for debounce, while long documents wait for real compilation. Repagination occurs in the next whole-document compilation without a separate temporary pagination result.
+
+The short demo and 20-section fixture had manual checks; first-hint delay for large documents remains insufficiently investigated.
+
+## M23: phase-close versus current status
+
+The first part moved paragraph, heading, and list commands to parse → transform → serialize. “P” exits lists; ordered lists starting at 1 use Typst `+`. Some repeated list-switching behavior comes from existing PM commands and is fixed by characterization tests.
+
+Mark/table adaptation was not committed at phase close and was completed later in Phase 4. An asynchronous drag-anchor race was fixed, and positioning from old rendering while pending was rejected. The lack of storedMarks on collapsed selections remains a limitation. A slash menu was never implemented in Live cursor and is now undecided.
+
+## Risks passed to the next phase
+
+Source, layout, and geometry must share a version; whole-document compilation does not remove the need to order asynchronous results. Multiple columns, group transforms, font coverage, long-document display costs, and real input experience all require later acceptance checks. Engineering-experiment success and independent user approval are recorded separately; see [Interaction design](interaction-design.md).
+
+### Phase-ending criteria and handoff checklist
+
+The phase ended because compilation, geometry, native input, and the editing loop each had positive experiments sufficient to proceed to interaction validation. This does not mean the original M15 approach succeeded, all of M23 was finished, or real users had endorsed the product.
+
+- Adopted: persistent World, byte/geometry mapping, composite-view selection, and input foundations.
+- Replaced: block swapping and dependent M15b/M17; M16 waiting feedback moved to M22.
+- Handed off: remaining M23 tools, real multi-page interaction, font coverage, display-update cost, and product validation.
+- Later revised: Phase 4 returned single-block input to native drafts; preview performance reopened on 2026-10-22. Historical “acceptable for v1” status no longer constrains actual lag reported by users.

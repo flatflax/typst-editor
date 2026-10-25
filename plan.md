@@ -1,129 +1,68 @@
-# Typst WYSIWYG Editor — Plan
+# Project plan
 
-## Status
+Document review: 2026-10-23. This document records goals, progress, and next steps only. The topic documents below cover interaction specifications, implementation comparisons, and validation evidence. This is a documentation revision; it makes no new claim of passing tests or product delivery.
 
-| Phase | Milestones | Scope | Status |
-|---|---|---|---|
-| 1 — MVP | M0–M6 | Prove `Source ⇄ Editor Model ⇄ Typst` forms a stable, round-trippable closed loop | Complete |
-| 2 — Content & File I/O | M7–M12 | File I/O, PDF export, links, tables, images/figures, toolbar/UI polish | Complete |
-| 3 — Single-View WYSIWYG (engineering validation) | M13–M22 | Validate that single-view editing is technically feasible: perf ceiling, rendered geometry, CJK IME, a working edit loop | Closed 2026-09-09 — feasibility validated (M14/M14A/M18/M20/M21/M22 positive, M15 negative but superseded); M23 backlogged at closing, later picked back up under Phase 4 (see below) |
-| 4 — Product Validation | Spikes 1–3, then real implementation | Validate the "focus-reveals-source" interaction model, then build it out as the Live cursor view's real editing mechanism | In progress — spikes validated (2026-09-10) and landed as Live cursor's real editing mechanism; several P0/P1 items shipped since (see below); shipped a whole-document compile-failure fallback (freeze last good render, red error placeholder — 2026-09-17/18); independent user validation still not started |
+## Goals and scope
 
-Details: [Phase 1 — MVP](doc/phase1-mvp.md) · [Phase 2 — Content & File I/O](doc/phase2-content-io.md) · [Phase 3 — Single-View WYSIWYG](doc/phase3-single-view.md) · [Phase 4 — Product Validation](doc/phase4-product-validation.md) · [Interaction Design](doc/interaction-design.md) · [Architecture](doc/architecture.md) · [Design Principles](doc/design-principles.md)
+Provide a desktop editing experience that directly displays Typst's compiled output for writers who already know Typst. In Live cursor, unfocused blocks show compiled output, while the focused block uses a native textarea for source editing. This is still different from editing text directly in its final layout. Full WYSIWYG remains a long-term goal.
 
-## Product goal
+Markdown remains a first-class file format and must support genuine bidirectional conversion. There are still four tabs: WYSIWYG, Typst source, Markdown source, and Live cursor. The old WYSIWYG view is the default; consolidation has not been implemented.
 
-A desktop Typst editor for writers who already know Typst syntax and want faster
-everyday input — not a syntax-free editor. The core promise is **true WYSIWYG** (the
-industry's own term for this specific property — see
-[doc/interaction-design.md](doc/interaction-design.md) §4/footnote; this doc used to
-call it "zero render drift," a made-up term now retired): what's on screen while
-editing is never an approximation, because it's always the real Typst compiler's own
-output, not a second layout engine's guess, inside a single visual surface (no separate
-preview pane). See [doc/interaction-design.md](doc/interaction-design.md) for the
-current product positioning (2026-09-09; supersedes the earlier "edits like
-Typora/Notion, zero syntax" framing — "zero syntax" was dropped as a goal, replaced by
-**focus-reveals-source**, see that document §6) and [Phase 3](doc/phase3-single-view.md)
-for the engineering feasibility work that validated this is achievable.
+## Phase progress
 
-The MVP (Phase 1) proved a narrower goal first: `Source ⇄ Editor Model → Typst
-Compiler → Layout/Render` forms a stable closed loop, without attempting single-view
-editing.
+| Phase | Status | Capabilities established |
+|---|---|---|
+| [Phase 1: M0–M6](doc/phase1-mvp.md) | Complete | Conversion between Typst, Markdown, and the structured model; real previews, diagnostics, and position mapping |
+| [Phase 2: M7–M12](doc/phase2-content-io.md) | Features complete; gaps remain in historical M12 interaction acceptance records | File operations, PDF, links, tables, images, and the old editing surface's toolbar |
+| [Phase 3: M13–M23](doc/phase3-single-view.md) | Engineering validation ended on 2026-09-09 | Persistent World, geometry queries, CJK input experiments, custom cursor, and cross-block selection; M15's mixed-layout approach was not adopted; M23 moved into Phase 4 |
+| [Phase 4: interaction and product validation](doc/phase4-product-validation.md) | In progress | Native block editing, toolbar, cross-block history and navigation, definition navigation, autosave, and last-successful-output retention on compilation failure; independent user validation has not begun |
 
-**Locked scope decisions** (do not revisit without confirming a change in direction):
-1. Phase 1's WYSIWYG was a rich-text editing surface + separate accurate preview pane
-   (split-pane), not single-view editing on Typst's real paginated layout — correct
-   scope while the loop itself was unproven. Single-view WYSIWYG has since been
-   confirmed as the long-term target (Phase 3).
-2. Markdown is a first-class second source format, requiring real Markdown ⇄ Editor
-   Model conversion, not just a UX reference — Typst source and Markdown source are
-   two independent spokes around the same Editor Model hub.
+## Recent work implemented
 
-## Design principles
+- Saves, autosaves, PDF exports, and unsaved-change prompts include drafts that have not lost focus. Autosave waits for IME composition to end, and disk writes follow request order. Cross-block copy, cut, and paste use the actual source selection; cut and paste are independently undoable.
+- Live cursor's duplicate right-hand preview has been removed. Inactive views and native focus mode issue fewer unnecessary geometry queries; SVG content extraction is cached by result. The entire SVG is still generated, transferred, and replaced, so end-to-end latency remains open.
+- This round fixed clipping misalignment caused by inconsistent SVG width/height units; unified page width and proportional focused-block sizing; and included textarea borders in height measurement, with height updates after width changes.
+- This round fixed the window remaining open after exit confirmation by adding Tauri's window-destruction permission. Regression tests use the SDK's actual close-event flow and cover confirmation, cancellation, and closing without changes.
+- The workspace also contains uncommitted preview optimizations: request coalescing and stale-result rejection, optional per-page delta output, page DOM reuse, and stage timing now have code. The default remains merged mode. This parallel work has not completed native acceptance checks for page mode and does not count as resolving the performance issue.
+- Existing backend/browser experiment data has been found and [the raw observations archived](doc/benchmarks/2026-10-22/README.md). Timing boundaries and result comparisons are in the performance document. These were not rerun in this revision and do not establish overall speed relative to Tinymist under matched conditions.
 
-Two standing rules govern all future work, not just one phase — see
-[doc/design-principles.md](doc/design-principles.md) for full rationale:
-1. **Primitives over nodes** — a small, fixed set of editing primitives should cover
-   more node types over time, not bespoke parse/serialize/schema plumbing per node.
-2. **Typst decides visibility; the editing system decides interaction** — a construct
-   is directly editable in place only if it produces layout geometry *and* is
-   directly authored; otherwise it stays inspector-only, addressed by source range.
-   Revised after M15 (below): Typst owns visual geometry only; the editing system
-   owns cursor/selection state and navigation, rendered against that geometry —
-   never a second, independently-laid-out system. Superseded again, for the Live
-   cursor view specifically, once focus-reveals-source was adopted: a focused block is
-   always directly editable, geometry or not.
+**Validation boundaries:** Passing frontend test records exist for the 344-test fix baseline on 2026-10-22 and a later 347-test snapshot containing page tests, alongside TypeScript/production build records from that time. This does not mean tests were rerun for this documentation revision or that all subsequent workspace code is verified. That day's Release checks covered real Typst short-document clipping, the focused textarea, and clean closing. Unsaved-change confirmation/cancellation has SDK-flow regression coverage but still lacks a new native-dialog acceptance check. Multi-page layout, IME, and system clipboard behavior need rechecking. The 98 Rust test record belongs to an earlier stage and is not a result from this run.
 
-## Phase 3 — closed (engineering validation)
+## Next steps, in order
 
-Full detail, including the complete M13–M22 milestone record and M23's status at
-closing, is in [doc/phase3-single-view.md](doc/phase3-single-view.md). Summary: M13
-(dispatch refactor), M14/M14A (perf and geometry feasibility spikes), M18 (CJK IME
-spike), and M20/M21/M22 (a working self-drawn-cursor editing loop on live Typst
-rendering — the "Live cursor" view) are all done, with M15's per-block swap mechanism
-built three times, found fundamentally unworkable, and superseded by that same
-self-drawn-cursor mechanism (see M15's entry for the design-principle correction this
-forced — reflected in [design-principles.md](doc/design-principles.md) rule 2). M23
-(porting Phase 2's table/toolbar affordances onto the new mechanism) was deprioritized
-to backlog when Phase 3 closed — see [phase3-single-view.md](doc/phase3-single-view.md)
-for that closing-time record — but was picked back up as part of Phase 4's real
-implementation work rather than staying backlogged: it's substantially done now (table/
-mark toggles, toolbar, Ctrl+B/I), tracked going forward in
-[phase4-product-validation.md](doc/phase4-product-validation.md), not as a separate
-Phase 3 item. A slash-command menu was part of M23's original scope but has since been
-downgraded to pending/undecided in [interaction-design.md](doc/interaction-design.md) §10
-conclusion 20 — the reasoning that motivated wanting one (helping users avoid hand-typing syntax)
-doesn't hold now that "zero syntax" was dropped as a goal.
+| Order | Work | Completion criteria |
+|---|---|---|
+| 1 | Native application regression checks | Follow the Phase 4 acceptance matrix for clipping, drafts/IME, clipboard, exit confirmation/cancellation, and error recovery; record the build, fixtures, actual results, and uncovered cases |
+| 2 | Consolidate the four tabs | Current proposal: default Live cursor with separate Typst/Markdown source entry points; define entry points/shortcuts/return behavior first, then verify Markdown capabilities, structural operations, and saves without regression before removing old entry points |
+| 3 | Optimize preview updates after editing | Measure latency from commitment to first display and neighboring-block stability; separate compilation, SVG, IPC, DOM, and paint costs; implement compiled-result reuse, request coalescing, and page updates according to measurements |
+| 4 | Product and writing capabilities | Target-user validation; equations, citations/bibliographies, and footnotes; interface cleanup and an accessible text layer |
 
-## Current focus: Phase 4 — Product Validation
+Consolidating the four tabs is the next main task after acceptance checks for this round's fixes, ahead of autocomplete and hover highlighting. There is no confirmed completion date. Performance measurement can proceed alongside consolidation design; completing all long-term performance work is not a prerequisite.
 
-**Preview latency reopened (2026-10-22):** the user reports slow preview updates
-after editing in Live cursor compared with Tinymist. The earlier backend compile
-spike does not settle end-to-end preview performance. A first pass removes the
-duplicate right-hand preview, inactive/native-caret geometry work, and repeated
-SVG-body scans. Full-document SVG generation/transfer/DOM replacement remains;
-measure commit-to-paint and pursue compiled-document reuse plus incremental,
-viewport rendering. See [Preview performance](doc/preview-performance.md).
+“Next main task” describes the current order; the specific source entry points remain a design proposal. Existing gaps such as Shift selection across blocks must not be presented as new capabilities. Whether they block migration should depend on data/save/basic-editing regressions and an explicit migration acceptance scope, rather than waiting for every long-term feature.
 
-**Update (2026-10-22):** Live cursor persistence now includes the uncommitted
-focused-block draft: manual save, debounced autosave, PDF export, and unsaved-change
-guards all see current input without committing the block or triggering a compile.
-Autosave waits for IME composition to finish. Native-format saves preserve literal
-source, and overlapping writes are serialized. Cross-block copy/cut/paste now use
-the actual source selection, with cut/paste recorded as separate undoable edits.
-These paths have React DOM regression coverage with mocked Tauri IPC; native
-WebView/clipboard verification remains open. See Phase 4's latest entry below.
+## Explicit outstanding items
 
-Full detail, including the milestone log and real-machine testing record, is in
-[doc/phase4-product-validation.md](doc/phase4-product-validation.md). Summary: Phase 3
-validated the *engineering* feasibility of single-view editing;
-[doc/interaction-design.md](doc/interaction-design.md) (2026-09-09) is the product
-design that followed, proposing **focus-reveals-source** (a focused block becomes a
-native, editable source-text region; every other block stays fully rendered) as a
-refinement of M20–M22's mechanism rather than a restart. Spikes 1–3 validated this is
-the right direction, and it has since landed as the Live cursor view's real editing
-mechanism — not just a spike anymore. Since then: cross-block undo/redo, Ctrl+B/I,
-Up/Down cross-block navigation, reference-chain navigation, and M23's table/toolbar
-port are all done and real-machine tested; autosave (§7) is done. A compile-failure
-fallback (2026-09-17/18) is also shipped: one compile error anywhere used to blank Live
-cursor's entire rendering and navigation, not just the broken block (root cause:
-`compile_typst`/`block_geometry` are both whole-document); now the last successful
-render freezes and only the actually-broken block shows an error placeholder — see
-[doc/phase4-product-validation.md](doc/phase4-product-validation.md) for the design and
-[doc/interaction-design.md](doc/interaction-design.md) §10 conclusion 22 for the option
-comparison. Real-machine verification of that fallback against the real compiler (only
-Playwright-against-mock so far) is still open. Separately, real-machine testing on a
-genuinely long document (2026-09-19) found and fixed three frontend performance bugs —
-an offset-conversion helper that re-encoded the whole document on every call, a
-block-splitting function rescanned dozens of times per render, and (the dominant one)
-every unfocused block's rendered crop duplicating the *entire* document's multi-megabyte
-SVG into its own DOM node — see
-[doc/phase4-product-validation.md](doc/phase4-product-validation.md) for the measurements
-and fixes. Still not started: independent user validation of true WYSIWYG as a real pain
-point — the original, oldest item in §10's pending-decisions table; two more have joined
-it since (the slash-menu and autosave-mechanism choices), both judgment calls made
-without user data, not yet validated either. Also newly added to the backlog (2026-09-20,
-see [doc/interaction-design.md](doc/interaction-design.md) §10's next-steps list):
-actually collapsing the four view tabs into one editing surface (previously assumed to happen on its own once
-Live cursor absorbed their functionality — it hasn't), and a not-yet-scoped UI
-visual-polish pass.
+- Shift+Up/Down selection extension across blocks, cross-block IME composition feedback and candidate-window positioning, and an application-history memory limit.
+- Compilation-error display without any previous successful result, changing block counts during errors, multi-page clipping, and blur ordering when clicking a neighboring block directly. Visible blocks may continue showing placeholders after geometry-cache invalidation.
+- Splitting triple-backtick code fences; geometry for same-baseline text in multiple columns and for rotation/scaling; position-mapping precision inside marked text.
+- Declaration autocomplete has a design only, with no code. Definition-to-usage navigation and `#set` effect ranges are unimplemented. World does not support multi-file imports yet.
+- [Preview hover highlighting](doc/preview-hover.md) has been investigated but is unimplemented. A Live cursor slash menu remains undecided and is excluded from v0.1.
+- Font coverage for some CJK glyphs needs further checking. System-font fallback does not mean a complete CJK font library is bundled.
+- Node 22.11.0 is below the current Vite requirement, and production builds report a bundle-size warning. Upgrade Node and decide on code splitting using actual loading measurements.
+- Autosave overwrites an existing path directly, without a separate crash-recovery file; this choice has not been validated with users.
+
+## Documents and artifacts
+
+| Document | Responsibility and reading entry point |
+|---|---|
+| [Interaction design](doc/interaction-design.md) | Product tradeoffs, states/events, exceptional behavior, keyboard behavior, and 15 acceptance scenario categories; numbered decisions serve only as an index |
+| [Phase 1](doc/phase1-mvp.md), [Phase 2](doc/phase2-content-io.md) | Goals/results/deviations, format-fidelity boundaries, historical M12 acceptance gaps, and review methods |
+| [Phase 3](doc/phase3-single-view.md) | Evolution of engineering approaches, experimental conditions/commands, negative results, and handoff |
+| [Phase 4](doc/phase4-product-validation.md) | Plan/result comparison, evidence by validation level, native acceptance matrix, and independent user validation |
+| [Architecture](doc/architecture.md), [Design principles](doc/design-principles.md) | Current responsibilities, interface/data contracts, technical tradeoffs, and correctness constraints |
+| [Performance analysis](doc/preview-performance.md), [Hover investigation](doc/preview-hover.md) | Measurement methods and unfinished optimizations; historical investigation separated from implementation status |
+
+Reporting conventions: **implemented** means code exists; **automated checks passed** identifies the check type, snapshot, and scope; **native acceptance** identifies the build/platform/fixture; **user validation** requires records of target-user tasks. Ending a phase does not mean every detail has been accepted. Test totals, milestone numbers, and complete links cannot by themselves prove that the documented capabilities are complete.
+
+See [README](README.md) for running the project, dependencies, and build artifacts. A fixed Release exe was generated this round; MSI/NSIS packages are still old. The exe corresponds to the 2026-10-22 23:51 build snapshot and does not include all subsequent parallel changes; updating `dist/` does not automatically update an existing exe.

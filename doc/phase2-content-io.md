@@ -1,124 +1,88 @@
-# Phase 2 — Content & File I/O (complete, M7–M12)
+# Phase 2: content and file operations (M7–M12)
 
-Architecture reference: [architecture.md](architecture.md). Design rules: [design-principles.md](design-principles.md).
+Status: feature milestones complete; gaps remain in historical M12 interaction acceptance records. Review date: 2026-10-23. This document distinguishes code delivery, automated tests, and native acceptance, without attributing later Live cursor results to this phase.
 
-## Goal
+## Original goals, order, and invariants
 
-The MVP proved the loop was stable, not that the editor was usable or complete against
-Typst's real syntax. Phase 2 works through the MVP's "out of scope" list in hybrid
-order: ship app-level basics that make the existing subset usable on a real file first,
-then grow the content subset cheapest-to-most-expensive, deferring anything that only
-pays off once the subset is bigger (`#let`/`#show`, precision work, incremental
-compilation) to later work — see [Deferred past Phase 2](#deferred-past-phase-2) below.
+The MVP established the conversion loop; this phase makes it usable with real files and gradually expands content. The order is file operations→PDF→links→tables→images→editing interaction: images depend on the document directory, and interaction depends on existing structural commands. Improve usability of the existing subset before taking on complex semantics.
 
-Unchanged from Phase 1: the hub-and-spoke architecture, the `unsupported_block`/opaque
-policy for anything outside the subset, and the **primitives over nodes** principle.
-Every milestone here is additive, not a redesign.
+Retain the same schema, bidirectional Typst/Markdown conversion, raw-source preservation, and recursive editing operations. Each addition needs an explicit supported shape and fallback rules; “does not crash” is not full support.
 
-## Milestones
+## Original goals compared with results
 
-**M7 — File I/O.** Open/Save/Save As via `@tauri-apps/plugin-dialog` +
-`@tauri-apps/plugin-fs`. Extension (`.typ` vs `.md`) selects the parse spoke. `dirty`
-flag is a derived comparison (live serialization vs. last-saved snapshot), not an
-edit-count boolean. Recent-files list via `@tauri-apps/plugin-store`.
-`Ctrl+S`/`Ctrl+O`/`Ctrl+Shift+S` keybindings. `fs:allow-read/write-text-file` scoped to
-`**` in `src-tauri/capabilities/default.json` (open-any-file needs it; M11 narrows
-scope for image resolution specifically).
+| Milestone | Original goal and acceptance criteria | Actual results and evidence | Deviations and boundaries |
+|---|---|---|---|
+| M7 Files | Extension selects format; open/save/save as and recent files work; undo to saved content restores clean state | dialog/fs/store, file-helper tests, and native menu accelerators | Native dialogs and file errors need manual checks; autosave came later |
+| M8 PDF | Use current document and the same engine; generate a PDF successfully and write no file on error | export_pdf; Rust tests check PDF headers and error paths | Not full-text extraction or page-by-page visual comparison; Live draft export coverage was added later |
+| M9 Links | Links in both formats, stable composition with other marks, and editing through toolbar/Mod-k | Recursive link AST, PM link mark, Markdown conversion, and combined-mark tests | Marked-range position precision retains M5 limitations |
+| M10 Tables | Parse restricted Typst tables, recursive cells, row/column operations, and Markdown round trips | prosemirror-tables; integer/array column definitions, raw-call fallback, and conversion tests | No arbitrary styling, row/column spans, or table.cell; GFM loses layout properties such as column widths |
+| M11 Images/figure | Relative paths, real image previews, plain-text captions, and consistent export | image/figure mapping, backend data URLs, and image present/missing/out-of-root tests | Replaced planned static asset protocol with restricted backend reads; caption→alt conversion loses semantics |
+| M12 Interaction | Floating toolbar, slash menu, block operations, file menu, and continued input at document end | PM plugins, block-level hover +, trailing-paragraph plugin, and required style fixes | Actual drag reordering is unimplemented; historical records cover pure logic, type/build checks, and startup only, so toolbar placement/menus/hover cannot be described as fully passing native acceptance |
 
-**M8 — PDF export.** `typst_pdf::pdf(&paged_document, ...)` via a new `export_pdf`
-command, reusing the same `TauriWorld`/`PagedDocument` pipeline as `compile_typst`;
-writes bytes straight to disk. Exports whatever `derived.source` currently holds, so
-the PDF matches the live preview by construction. Verified via `cargo test` (valid
-source produces `%PDF-`-prefixed bytes; a compile error returns `Err` and writes no
-file) rather than full text-extraction diffing.
+## Feature contracts and tradeoffs
 
-**M9 — Links.** Cheapest content addition — a mark, not a new node type.
-`#link("url")[text]` parses/serializes directly (understood, not opaque) into a `link`
-mark (`href` attr); Markdown's native `[text](url)` maps directly. Standard PM `link`
-mark, toolbar button + `Mod-k` keymap. `AstInline::Link` is a recursive container (a
-link body can itself contain marked-up content), stacked via `addToSet` so mark order
-is canonical regardless of source nesting. `[`/`]` added to the Typst text-escape set.
+### Files and PDF
 
-**M10 — Tables.** Highest-effort addition — Typst has no lightweight table markup, only
-`#table(columns: .., [cell], ...)`, so this parses a structured subset of
-call-argument syntax rather than treating it as opaque. Supported shape: a `columns:`
-arg + flat content-block cells (no `#table.cell`/rowspan/colspan/styling — those fall to
-`unsupported_block` as a whole call); cell content recurses through the same
-block/inline serializer as top-level content. Markdown side uses `remark-gfm` tables
-(cell-inline-only per GFM); a table with block-level cell content falls back to the
-same fenced-passthrough convention as `unsupported_block`. WYSIWYG via
-`prosemirror-tables`. `columnsRaw` is only re-emitted verbatim when it still matches
-the table's actual column count, else falls back to a plain integer, so a WYSIWYG
-column edit can't emit a stale spec.
+`.typ` and `.md` select the corresponding conversion entry point. Dirty state compares current content with the saved snapshot rather than counting edits; save completion, undo to original text, and save-as paths need separate checks. The file menu owns Ctrl/Cmd+O, S, and Shift+S; duplicate DOM handlers were removed to avoid a shortcut firing twice.
 
-**M11 — Images & figures.** Depends on M7 for a real on-disk path to resolve relative
-image paths against. `#image("path")` / `#figure(image("path"), caption: [...])` parse
-into an `image` leaf (`src`, optional plain-text-only `caption`) and a `figure`
-wrapper; Markdown's `![alt](path)` maps directly, with a captioned image's caption
-round-tripping through `alt` text (a deliberate, documented lossy-but-stable mapping).
-**Deviates from the original "Tauri asset protocol" plan**: the asset protocol's access
-scope is static config, but this app has no fixed project root (a document can open
-from anywhere), so the WYSIWYG preview instead calls a narrowly-scoped
-`read_image_as_data_url` Rust command returning a base64 `data:` URL — no
-`tauri.conf.json`/capability changes. Path resolution reuses `TauriWorld::file`'s
-`..`-escape-proof `VirtualPath::realize` guard — the same primitive `typst-cli`'s own
-`SystemWorld` uses for resolving asset paths. The Editor Model still only stores the relative path string, never
-image bytes. `base_dir` (open document's directory) is threaded through every Rust
-command that resolves a path. Custom PM NodeView (not `toDOM`) renders the image node,
-closing over a live `documentDirRef`.
+PDF compiles and writes through the same Typst engine. M8 aimed for correct file generation, not automated visual comparison of every page. Inclusion of unblurred Live drafts in export is additional Phase 4 coverage, not evidence of tests at M8.
 
-**M12 — Toolbar / UI polish.** Borrows the visual language of modern block editors
-(Tiptap, PlateJS — floating/bubble toolbars, block drag-handles, slash-command menus)
-without adopting either as a dependency: both are thin wrappers or a different core
-entirely (PlateJS is built on Slate, not ProseMirror), and either would mean
-re-expressing the existing schema/node views/position-mapping inside a foreign
-framework. Implemented instead as ProseMirror plugins/decorations on the existing
-`EditorView`:
-- Floating/bubble toolbar on text selection (bold/italic/code/link).
-- Slash-command menu (`/heading`, `/list`, ...), narrowly triggered only when `/` is a
-  paragraph's entire content (can't misfire mid-sentence).
-- Per-block hover `+` button: a single button tracked via mouse position
-  (`posAtCoords`/`coordsAtPos`), not one decoration per block, living as a sibling of
-  the scrollable content wrapper.
-- File operations (Open/Save/Save As/Export/recent-files) moved from in-content
-  buttons to a native app menu (`@tauri-apps/api/menu`); the DOM keydown listener was
-  removed since the native menu now owns those accelerators. Content-editing toolbar
-  buttons stayed inline.
-- Fixed: WYSIWYG cursor disappearing on an empty line (missing
-  `prosemirror-view/style/prosemirror.css`, which provides the caret-anchoring hack for
-  empty text blocks) and `prosemirror-tables/style/tables.css` (missing since M10).
-- Fixed: a table (or any other "closed" block) as the last document child left no way
-  to move the cursor past it. Fixed generally — `ensureTrailingParagraphPlugin` always
-  appends an empty paragraph when the last child isn't one, safe because an empty
-  paragraph serializes to nothing.
-- **Scope decision, not an oversight**: true drag-to-reorder wasn't built (needs
-  pointer drag-start/move/drop tracking, unverifiable in this environment); block
-  reordering is still reachable via cut/paste.
-- **Verification gap**: mostly interactive UI (toolbar position, menu behavior, hover)
-  that automated tests can't cover. What's verified: pure-logic unit tests, clean
-  `tsc`/build, app launching without runtime error. Interactive behavior needs a manual
-  `tauri dev` pass.
+### Links and tables
 
-## Deferred past Phase 2
+Link bodies convert recursively, combining existing bold/italic and other marks through `addToSet`; Typst text escapes `[`/`]`.
 
-- **`#let`/`#show`/control-flow** — real semantic support (variable binding, scoping,
-  rule application) is substantially larger than everything above combined; scoped as
-  its own future phase.
-- **Fidelity/precision work** — byte-exact WYSIWYG sync inside marked-up runs,
-  range/selection-level highlighting, incremental compilation. Deferred because
-  hardening sync/perf for a subset about to grow risked redoing the work twice.
-- **Footnotes/citations, math mode, multi-file imports beyond images, collaborative
-  editing** — unchanged from the MVP plan, still out of scope.
+Restricted tables accept a `columns:` argument and flat content-block cells, reusing body conversion inside cells. After a column-count change, a mismatched old `columnsRaw` becomes an integer column count rather than retaining an incorrect column definition. Complex arguments, non-content-block cells, or unrepresentable shapes must preserve the entire raw call, not only recognizable cells.
 
-## Risks
+### Images and paths
 
-- **Table representation risk**: the supported `#table(...)` shape is a heuristic, not
-  a full argument-grammar parse — real-world tables (with styling args) are more likely
-  to fall to opaque than other constructs. Budget time to widen the shape from real
-  fixtures.
-- **Image path/security risk**: M11 is the first milestone giving the Rust backend real
-  filesystem access — scope tightly (document-directory-only, read-only) from the
-  start.
-- **Markdown fidelity gap widens**: GFM tables and image-caption-as-alt-text add two
-  more deliberate lossy-but-stable fallbacks on top of the MVP's `unsupported_block`,
-  consistent with but larger than the MVP's existing risk.
+The model stores relative paths, not image bytes. The opened document's directory is passed through base_dir to compilation, export, and image reads. Because documents have no fixed project root, `read_image_as_data_url` replaced the planned static asset protocol, reusing VirtualPath root restrictions and returning data URLs.
+
+The old WYSIWYG image NodeView reads the current documentDirRef and must not retain the old directory after a file switch. Missing images need explanatory diagnostics; paths escaping the document root must be rejected rather than broadening arbitrary file access to display images.
+
+### Cross-format losses must be explicit
+
+| Content | Typst / model representation | Markdown representation and loss | Acceptance judgment |
+|---|---|---|---|
+| Table column widths | Can preserve `columns: (1fr, 2fr)` | GFM has no column widths; returning to Typst may produce equal-width columns | Preserved content does not mean equivalent layout; exclude from lossless cross-format fixtures |
+| Cells with block content | Recursive representation | GFM cells support inline content only; preserve with fences | Check preservation fallback rather than forcing ordinary GFM tables |
+| Image captions | Plain-text figure caption | Text passes through image alt, losing the distinction between caption and alternative-text semantics | Text can round-trip stably, but semantic conversion is not lossless |
+| Unsupported complex calls | Raw-source nodes | Typed fences | Check that original text is neither deleted nor rewritten; do not claim structured support |
+
+`src/loop.test.ts` explicitly excludes `tableWithArrayColumns` from lossless model assertions. New format mappings must update the loss inventory and fixtures, rather than weaken the meaning of “round-trip equivalence.”
+
+### Specific M12 interaction boundaries
+
+- The floating toolbar appears for text selections and provides bold, italic, code, and links.
+- The slash menu triggers only when an entire paragraph is a single `/`, not within ordinary sentences or paths.
+- Hover `+` is a single **block-level** tracked button positioned through posAtCoords/coordsAtPos; it is not a table drag handle, and row/column drag reordering is absent.
+- When a closed block ends the document, ensureTrailingParagraphPlugin adds an empty paragraph for continued input; it adds no serialized content.
+- Existing ProseMirror plugins are used without Tiptap or Plate; their structures/dependencies are not necessary to adapt the existing schema.
+- Required ProseMirror and table styles are part of cursor/selection correctness, not merely decoration.
+
+## Validation entry points and native checks
+
+These commands provide reproducible review entry points; code tests are not rerun for this documentation revision:
+
+```sh
+pnpm test src/shell/fileIO.test.ts src/spokes/typstAst.test.ts src/spokes/markdown.test.ts src/editor/wysiwygCommands.test.ts src/loop.test.ts
+cargo test --locked --manifest-path src-tauri/Cargo.toml ast::tests
+cargo test --locked --manifest-path src-tauri/Cargo.toml export::tests
+cargo test --locked --manifest-path src-tauri/Cargo.toml image_
+```
+
+| Scenario | Actions and expected result | How to record validation status |
+|---|---|---|
+| File cycle | Open .typ/.md, edit, save, reopen; change paths with save as; undo to snapshot restores clean state | Native checks identify file, platform, and result; pure helper tests do not replace them |
+| Export errors | Valid source produces PDF; invalid calls return errors without leaving invalid artifacts | Corresponding Rust export tests; record visual comparisons separately |
+| Links and tables | Combined-mark round trips, row/column insertion/deletion, and full raw-source preservation for unsupported tables | Separate automated conversion/command tests from native button checks |
+| Relative images | Same-named images in different directories, missing files, and out-of-root paths | Rust file tests do not establish correct NodeView display after directory switches |
+| M12 interaction | Toolbar near selection; no slash trigger mid-sentence; hover + follows the correct block; input works after a trailing table | **Historical native acceptance gaps remain open**; a launchable application does not imply a pass |
+| Actual drag reordering | Move blocks or rows/columns while retaining correct undo/structure | Unimplemented; not an acceptance item for existing features |
+
+## Phase handoff and risks
+
+M12 feature-code completion and sufficient interaction acceptance are separate matters. Phase 4 adapted its own toolbar but did not thereby fill every acceptance-evidence gap for hover/menus in the old PM editing surface.
+
+Equations, citations, footnotes, multi-file World support, and full `#let`/`#show` semantics remain open; later definition navigation does not mean all these semantics are supported. Range geometry and incremental compilation advanced in Phase 3/4 and must not still be described as entirely undone. Collaboration is explicitly out of scope, not a missing defect.
+
+The main risks remain real-world tables frequently falling back to raw preservation, cross-format semantic/layout loss, and image-file access boundaries. Further expansion should follow real fixtures and user scenarios, not broadening generic claims of “table/image support.”

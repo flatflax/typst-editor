@@ -1,107 +1,60 @@
 # Typst Editor
 
-A desktop [Typst](https://typst.app/) editor built with Tauri + React + TypeScript.
+A desktop Typst editor built with Tauri v2, React, and TypeScript. Intended for writers who already know Typst; the project is still under development.
 
-This project targets writers who already know Typst syntax and want faster everyday
-input, not a syntax-free editor. The direction it's working toward is **true WYSIWYG**
-— editing without a gap between what's on screen and what the real Typst compiler would
-actually produce (see [doc/interaction-design.md](doc/interaction-design.md) §4 for the
-term and its use by comparable LaTeX editors).
+## Current features
 
-Today it's a work in progress, with four views of the same document: a regular
-rich-text WYSIWYG editor (ProseMirror + CSS) kept in sync with a separate live preview
-pane; raw Typst and Markdown source views; and **Live cursor**, built around
-**focus-reveals-source** — every paragraph renders normally except the one currently
-focused, which becomes its own native, editable source-text region (free undo/redo,
-IME, copy/paste), with no separate preview pane at all. Live cursor is the current step
-toward closing the WYSIWYG gap; the other three views are expected to eventually be
-absorbed into it, but it isn't the default view yet. See [plan.md](plan.md) and
-[doc/interaction-design.md](doc/interaction-design.md) for the roadmap and what's still
-open before that happens.
+- Four views: ProseMirror rich-text editing, Typst source, Markdown source, and Live cursor. The first three have a separate preview; Live cursor displays compiled output in the editing surface and replaces the focused block with a native source textarea.
+- Headings, lists, links, tables, and images/captions; Live cursor provides a structural toolbar, cross-block selection, undo/redo, clipboard operations, vertical navigation, and navigation from usages to variable/label definitions.
+- Native file menus, recent files, open/save/save as, autosave, unsaved-change protection, and PDF export. Unblurred Live cursor drafts are included in saves and exports.
+- Native Typst compilation, SVG previews, diagnostics, click navigation, and cursor mapping. Source views recompile as text is entered; focused Live cursor drafts recompile after commitment.
+- Compilation failures retain the last successful rendering and show diagnostics and the failing block's source.
 
-## Features
+The old WYSIWYG view remains the default, and the four tabs have not been merged. Recent draft, clipboard, layout, and exit fixes have passed frontend regression tests; acceptance checks in the updated native application remain pending. See [plan.md](plan.md) for progress.
 
-- **WYSIWYG, Typst source, Markdown, and Live cursor views** of the same document —
-  switch freely, content and formatting survive the round trip.
-- **Live cursor** (see above): cross-block undo/redo, Ctrl/Cmd+B/I, Up/Down navigation
-  across a block boundary, and reference-chain navigation (jump to where a
-  variable/label was declared) — all work across the whole document, not just within
-  one focused block. A persistent toolbar covers headings/lists/tables/marks.
-- **Rich content**: headings, lists, tables, images/figures, and links, all directly
-  editable in the WYSIWYG view (and, via its own toolbar, in Live cursor).
-- **Live preview** rendered by the real `typst::compile`, not a reimplementation —
-  recompiled as you type.
-- **Click-to-source / cursor-to-preview sync** — click the preview to jump the editor
-  cursor there, and vice versa.
-- **Inline diagnostics** — compiler errors and warnings surface next to the preview
-  instead of crashing the app.
-- **Floating toolbar and `/` slash-command menu** for formatting and inserting blocks
-  in the WYSIWYG view (Live cursor has its own toolbar instead, no slash menu yet).
-- **Open / Save / Save As** (native File menu), a recent-files list, an
-  unsaved-changes guard, and autosave (once a file has been saved at least once,
-  further edits are written to it automatically a couple of seconds after you pause —
-  manual save always still works).
-- **Export to PDF.**
-- Live cursor saves and PDF export include the focused block's current draft without
-  leaving the block. Cross-block copy/cut/paste preserves source text; cut and paste
-  participate in undo/redo.
-- Embedded fonts, including CJK support.
+## Data and limitations
 
-## Usage
+Typst, Markdown, and the ProseMirror model are connected by parsing and serialization. Active source views and Live cursor drafts maintain their own text buffers; the model is not the sole state at every moment. Conversion tests cover the supported structural subset; they do not guarantee byte-for-byte preservation of arbitrary Typst after switching views.
 
-- `pnpm tauri dev` to launch (see [Development](#development)) — packaged releases
-  are not published yet.
-- Opens and saves `.typ` and `.md` files directly; **Export PDF** renders the current
-  document to a PDF alongside the source.
+Unsupported structures are preserved in raw-source nodes and represented by typed code fences in Markdown. Live cursor can edit raw source directly. Converting structured image captions to Markdown alternative text loses caption semantics; arbitrary merged table cells, styling, and multi-file projects are not yet supported.
 
-## How it works
+Fonts come from embedded fonts and the host system. CJK coverage depends on system fonts; a complete CJK font library is not bundled. Long-document updates still generate and replace the entire SVG; performance remains an open issue. See [performance analysis](doc/preview-performance.md).
 
-Hub-and-spoke: the **Editor Model** (a ProseMirror document) is canonical. Typst and
-Markdown are independent spokes that parse into and serialize from the Editor Model,
-preserving unsupported Typst constructs explicitly rather than silently dropping them.
-Every view derives from the model, not from each other, and the preview always compiles
-the model's current Typst serialization through the real compiler.
+## Development environment
 
-The Rust backend (`src-tauri/src/`) owns everything needing the real Typst engine:
-parsing (`typst_syntax::parse`, `ast.rs`), compiling and rendering
-(`typst::compile` + `typst-svg`/`typst-pdf`, `compile.rs`/`export.rs`), resolving
-image paths for the WYSIWYG preview (`asset.rs`), and click/cursor position mapping
-(`typst-ide`, `jump.rs`) — all backed by a hand-written `TauriWorld` (`typst_world.rs`)
-that merges embedded fonts with the host's system fonts for CJK glyph fallback. The
-TypeScript frontend (`src/`) owns the ProseMirror schema and both source-format
-conversions (`typstAst.ts`, `markdown.ts` via `remark`), since neither needs to cross
-the IPC boundary per keystroke.
-
-Syntax outside the supported subset — `#let`/`#show`, an unhandled `#table` shape,
-anything else unrecognized — round-trips verbatim as an opaque, non-editable node
-rather than being dropped or crashing the parse; on the Markdown spoke, which has no
-equivalent, it round-trips through a tagged fenced code block instead. See
-[plan.md](plan.md) for the roadmap and [doc/](doc/) for full architecture and
-phase-by-phase detail.
-
-## Development
-
-Requires Node.js 20.19+ or 22.12+, [pnpm](https://pnpm.io/) 10.11.0 (pinned in
-`package.json`), and the [Tauri prerequisites](https://tauri.app/start/prerequisites/)
-for your platform. On Windows, use a current stable Rust toolchain, WebView2,
-and Visual Studio C++ Build Tools with the Windows SDK. Rust/Cargo 1.82 is too old
-for the locked Typst dependencies' Rust 2024 edition.
+- Node.js 20.19+ or 22.12+, and pnpm 10.11.0 (pinned in `package.json`).
+- Current stable Rust; Rust/Cargo 1.82 does not support the Rust 2024 edition required by locked dependencies.
+- Windows: WebView2, Visual Studio C++ Build Tools, and Windows SDK. For other platforms, follow the [Tauri prerequisites](https://tauri.app/start/prerequisites/).
+- If a standalone Cargo check on Windows cannot find the MSVC linker, run it in a Developer PowerShell/Command Prompt with the appropriate build environment loaded. Do not record an environment failure as a passing test or a product regression.
+- Typst-related Rust crates are pinned to 0.15.1; install dependencies using the lockfiles.
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 pnpm tauri dev
 ```
 
-Other useful scripts:
-
 ```sh
-pnpm dev         # Vite dev server only (frontend)
-pnpm build       # Type-check and build the frontend
-pnpm tauri build # Build the desktop app
-pnpm test        # Frontend tests (vitest)
-cargo test --manifest-path src-tauri/Cargo.toml  # Rust tests
+pnpm dev          # Frontend development server only, port 5183
+pnpm test         # Frontend tests
+pnpm build        # TypeScript checks and frontend production build
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+pnpm tauri build --no-bundle  # Release desktop application
+pnpm tauri build            # Desktop application and installers
 ```
 
-## Recommended IDE Setup
+An ordinary browser has no Tauri backend. The layout fixture at `/test-fixtures/live-cursor-rendering.html` uses mocked SVG/IPC to check clipping, short drafts, and width changes; it cannot replace real compilation, clipboard, or native exit acceptance checks. See [test fixtures](test-fixtures/README.md).
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## Build artifacts
+
+| Command | Default Windows output |
+|---|---|
+| `pnpm build` | `dist/`: frontend assets |
+| `cargo check` | Type-checking metadata and caches; no runnable application |
+| `pnpm tauri build --no-bundle` | `src-tauri/target/release/typst-editor.exe` |
+| `pnpm tauri build` | The exe above, plus installers under `src-tauri/target/release/bundle/msi/` and `bundle/nsis/` |
+
+A Release exe containing the clipping, textarea, and exit-permission fixes was built in this round, and checked with a real short document and a clean close. It corresponds to the 2026-10-22 23:51 build snapshot; subsequent parallel preview changes are not all included, and the MSI/NSIS packages are still old. Run a full desktop build again before distribution; changing the target directory or build configuration changes these paths.
+
+[Project plan](plan.md) · [Architecture](doc/architecture.md) · [Interaction specification and scenarios](doc/interaction-design.md#6-核心交互机制聚焦块编辑源码) · [Phase goals and acceptance records](doc/phase4-product-validation.md)
+
+Development tools: [pnpm](https://pnpm.io/), [VS Code](https://code.visualstudio.com/), [Tauri extension](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode), and [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).

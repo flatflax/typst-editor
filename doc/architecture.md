@@ -1,135 +1,112 @@
-# Architecture
+# System architecture
 
-## Hub-and-spoke
+Review: 2026-10-23. This document explains responsibilities, data contracts, and technical tradeoffs in the current implementation. See [Interaction design](interaction-design.md) for behavior requirements, [Phase 4](phase4-product-validation.md) for evidence and phase differences, and [plan.md](../plan.md) for the roadmap. Uncommitted preview optimizations are distinguished from capabilities that have passed acceptance checks.
 
-The Editor Model (a ProseMirror document) is the hub:
+## Technology stack and responsibilities
 
-```
-Typst source  <---parse/serialize--->  Editor Model (ProseMirror doc)  <---parse/serialize--->  Markdown source
-                                              |
-                                              | (always serializes to Typst source)
-                                              v
-                                     Typst source  --[Rust: typst::compile]-->  PNG/SVG preview
-```
+The frontend uses React 19, TypeScript, Vite 7, CodeMirror, and ProseMirror; the desktop shell is Tauri v2. Rust-side Typst, typst-syntax, typst-ide, SVG/PDF, and related crates are pinned to 0.15.1. There is currently no WASM compilation path.
 
-- **Editor Model is canonical during a session.** Loading a `.typ` or `.md` file parses
-  it into the model; every other view (WYSIWYG, opposite source format, preview)
-  derives from the model, not from each other.
-- **Preview always goes through real Typst source + the real Typst compiler.** On every
-  debounced change, the current model serializes to Typst source and compiles, regardless
-  of which view is active.
-- **The Live cursor view (Phase 3 M20–M23, Phase 4's focus-reveals-source) is a second,
-  source-first editing path, not routed through the Editor Model.** A focused block
-  becomes a real, native `<textarea>` on its own raw Typst source; every other block
-  stays rendered. Only a genuine cross-block selection falls back to M20's original
-  mechanism, a self-drawn cursor/selection layer on the compiled `Frame`'s own
-  geometry. See Key technical decisions below and
-  [phase3-single-view.md](phase3-single-view.md) M15 for why.
+| Directory/file | Responsibility |
+|---|---|
+| `src/App.tsx` | Active view, document buffers, compilation results, file state, save queue, and unsaved-change protection |
+| `src/editor/TypstLiveView.tsx` | Native block drafts, cross-block cursor/selection, toolbar, history, definition navigation, clipping, and scrolling |
+| `blockSplit.ts` / `splitLayout.ts` | UTF-8 source splitting and SVG clipping/focus layout calculations |
+| `usePreviewCompiler.ts` / `pagePreview.ts` / `SvgDocument.tsx` / `previewMetrics.ts` | Uncommitted scheduling, optional page protocol, page DOM reuse, and local timing; see validation boundaries below |
+| `src/model/`, `src/spokes/` | ProseMirror schema, Typst AST mapping, Markdown conversion, and position mapping |
+| `src/shell/` | File formats, menus, and recent files |
+| `src-tauri/src/ast.rs` | Typst syntax parsing and supported-subset mapping |
+| `compile.rs` / `typst_world.rs` | Persistent compilation environment, incremental source editing, SVG, and range-geometry commands |
+| `geometry.rs` / `jump.rs` / `references.rs` | Layout geometry, source/preview navigation, and declaration references |
+| `export.rs` / `asset.rs` | PDF export and relative image loading |
 
-## Process split
+## Document state and conversion
 
-**Rust backend (Tauri commands)** owns everything requiring the real Typst engine:
-- `parse_typst_ast(source) -> AstJson` — via `typst_syntax::parse`, pruned to the
-  supported node kinds (everything else becomes an opaque span).
-- `compile_typst(source) -> CompileResult` — builds a `World`, runs
-  `typst::compile::<PagedDocument>`, renders via `typst_render`/`typst_svg` (SVG
-  preferred — inline into DOM, scales cleanly), returns image bytes +
-  `SourceDiagnostic`s.
-- `export_pdf(source, path)` — `typst_pdf::pdf(&paged_document, ...)` through the same
-  `TauriWorld`/`PagedDocument` pipeline, writes bytes directly to disk.
-- `read_image_as_data_url(path)` — resolves a relative image path against the open
-  document's directory and returns a base64 `data:` URL for the live WYSIWYG preview.
-- `geometry_for_range`/`block_geometry` (`geometry.rs`, Phase 3 M14A/M20) — walk the
-  compiled `Frame` tree for a source byte range and return rendered geometry (page,
-  x/y, width/height, baseline), generalizing `jump_from_click`/`jump_from_cursor`'s
-  span-matching from a point to a range. Backs the Live cursor view's block layout and
-  cursor/selection positioning.
+The conversion relationship is `Typst ⇄ ProseMirror document ⇄ Markdown`. The model handles structured conversion; it is not the sole text state at every moment:
 
-**TypeScript frontend** owns the Editor Model and both source-format conversions —
-ProseMirror already lives there, and Markdown parsing has mature TS-typed libraries:
-- `typstAstToDoc(ast) -> PMDoc` / `pmDocToTypst(doc) -> string` — hand-written mapper +
-  serializer for the supported subset.
-- `mdastToDoc(ast) -> PMDoc` / `pmDocToMdast(doc) -> mdast` via `remark-parse`/
-  `remark-stringify`, reusing the same PMDoc schema as the Typst path.
-- ProseMirror schema, keymaps, the WYSIWYG `EditorView`.
+- WYSIWYG modifies the ProseMirror document directly and serializes it to Typst for compilation.
+- Typst source maintains its own text and compiles directly; Markdown source maintains Markdown and converts it through the model to Typst for compilation.
+- Live cursor retains committed Typst source, with a separate native-textarea draft for the focused block. Drafts commit on blur, block switching, structural operations, or cross-block handoff; ordinary typing does not trigger whole-document compilation.
+- View switches parse/serialize to refresh the target buffer. Semantic round trips for a supported subset and byte-for-byte preservation of arbitrary source are therefore different guarantees.
 
-## `src/` layout
+Supported structures include paragraphs, headings 1–3, inline marks, lists, links, restricted tables, and images/figure constructs. Unknown constructs use raw-source nodes, carried by typed fences in Markdown. Top-level `#set` rules are stored separately and emitted before the body; local rules and complex constructs use raw source. There is no promise of structured support for the full language, arbitrary layouts, or multi-file projects.
 
-Reorganized 2026-09-04 into five folders mirroring the architecture:
-- `model/` — the Editor Model schema (`schema.ts`), the hub.
-- `spokes/` — the two conversion spokes: `markdown.ts`, `typstAst.ts`.
-- `editor/` — WYSIWYG and source-mode editing surfaces: `WysiwygEditor.tsx`,
-  `wysiwygCommands.ts`, `SourceEditor.tsx`. Also, since M20 (Phase 3's
-  revised mechanism — see below): `TypstLiveView.tsx` (the "Live cursor"
-  view, no PM involved), `typstCursor.ts` (its pure geometry/offset
-  math, tested independently of React/Tauri), `structuralCommand.ts`
-  (M23 — runs a `wysiwygCommands.ts` PM command against a throwaway
-  `EditorState` for the Live cursor view's block-level toolbar), and
-  `editHistory.ts` (Phase 4 — cross-block undo/redo history: delta-based
-  entries, coalescing, pure and tested independently, same split as
-  `typstCursor.ts`).
-- `shell/` — app-level, non-editing concerns: `fileIO.ts`, `recentFiles.ts`,
-  `appMenu.ts`.
-- `util/` — small pure helpers: `offsets.ts`, `diagnosticPosition.ts`,
-  `svgGeometry.ts` (screen-pixel ⇄ SVG-viewBox-pt conversion, shared by the
-  split preview pane and `TypstLiveView.tsx`).
+### Different contracts for conversion and saving
 
-`App.tsx`/`main.tsx`/`App.css`/`loop.test.ts` (the cross-spoke round-trip suite,
-spanning `model` + `spokes`) stay at `src/` root. `src-tauri/src` is deliberately flat
-— each file is one Tauri command or the `World` impl, already single-purpose; `geometry.rs`
-(M14A/M20 — per-source-range rendered geometry, `geometry_for_range`/`page_offsets_pt`,
-backing the `block_geometry` command) is the one exception with meaningful internal
-structure of its own.
+Model equivalence within the supported subset, text preservation in raw nodes, and whole-file byte identity are separate guarantees. Markdown may normalize markers; GFM has no column widths, and image alt text is not a caption. Structural tools and view switches rebuild through the model, so local raw-node preservation does not imply an unchanged whole document. Saving current text directly in its original format avoids additional rewriting solely for saving. See [Phase 2](phase2-content-io.md#cross-format-losses-must-be-explicit) for the full loss inventory.
 
-## Key technical decisions
+Earlier documentation described the model as the sole authoritative state for the entire session, which does not match current source/draft buffers. Choose content by purpose: compilation reads committed source; save/export reads current drafts; geometry reads source matching the display; structural commands build a temporary model. These must not be collapsed merely to simplify a “single source of truth” diagram.
 
-- **Typst crates** (all pinned `= "0.15"`): `typst`, `typst-syntax`, `typst-layout`
-  (`PagedDocument`/`Page` aren't re-exported through the `typst` facade), `typst-kit`
-  (font/file/date helpers), `typst-render`/`typst-svg`, `typst-ide` (click/cursor
-  position mapping).
+### Rationale for editor and native integration choices
 
-- **Bidirectional position mapping via `typst-ide`**: `jump_from_click_in_frame`/
-  `jump_from_cursor` give a direct, library-backed link between Typst source and the
-  rendered preview (a small `IdeWorld` impl on `TauriWorld`). This backs the WYSIWYG
-  view's split-pane click/cursor sync only — Live cursor uses a different mechanism
-  entirely (`geometry_for_range`/`block_geometry`, no PM position map involved); see
-  Hub-and-spoke above and [design-principles.md](design-principles.md)'s M15 revision
-  for why they don't share one.
-  - **Risk**: `typst-ide` is pre-1.0, versioned in lockstep with core `typst` — even
-    `tinymist` hand-rolls its own equivalent rather than depending on it. Pin tightly,
-    expect signature churn on `typst` upgrades.
-  - **Precision** comes from these Rust-side functions running on the compiled
-    `Frame`, not the output format — SVG was chosen over canvas for being
-    resolution-independent, not for any precision difference between them.
-  - **WYSIWYG-specific approximation** (M5): `pmDocToTypstWithPositions` maps PM
-    positions to Typst byte ranges per inline leaf, interpolating within a run — still
-    approximate *inside* a run, since marks/escaping make a run's Typst byte length
-    diverge from its PM character length. Accepted MVP limitation.
+Using the underlying ProseMirror schema and commands reuses existing conversion and structural editing, without introducing another framework to restate the schema, NodeViews, and position mapping. Live cursor uses PM only for structural operations; ordinary text input does not use a permanently mounted PM editing DOM.
 
-- **No WASM.** Tauri gives a native Rust backend; embed Typst natively (same pattern as
-  `typst-cli`/`tinymist`), not compiled to WASM (that's for browser-only apps).
+CodeMirror 6 currently uses a plain-text configuration without full Typst language parsing/syntax highlighting. It includes generic facilities such as basic bracket matching, but automatic bracket insertion was removed to avoid unexpected insertions in Typst function arguments and content brackets. The extensibility of a generic editor component must not be presented as an integrated Typst language service.
 
-- **World implementation**: `TauriWorld` implements `typst::World`'s 7 methods
-  (`library`, `book`, `main`, `source`, `file`, `font`, `today`), shaped like
-  `typst-cli`'s `SystemWorld`. Uses `typst_kit::fonts::embedded()` for default
-  (Latin/math) faces. **Revised during M1**: embedded fonts alone have no CJK coverage
-  (blank CJK text), fixed by also merging `typst_kit::fonts::system()` so glyph
-  fallback finds installed CJK fonts, matching `typst-cli`'s default behavior. Trades
-  portability (CJK rendering depends on the host machine's fonts) for correctness.
-  Font-metadata scan is cached once per process (`LazyLock`); font bytes still load
-  lazily per compile. Pinned by a `cargo test` asserting CJK fallback coverage.
+Typst uses native Rust rather than WASM because the desktop backend already provides native compilation and font/file access. SVG supports scaling and shared scenes; position precision comes from compiled Frames and mapping, not an assumption that “SVG is inherently more precise than canvas.” typst-ide is tightly coupled to the core version, so upgrades require rechecking navigation and semantic interfaces, not merely successful dependency resolution.
 
-- **Diagnostics carry a source line, not just a message**: `SourceDiagnostic` carries a
-  `Span`, resolved back to 1-indexed `(line, column)` via the compiling `Source`
-  (`source.range(span)` then `byte_to_line`/`byte_to_column`), added to
-  `CompileDiagnostic`. Frontend shows this as a CodeMirror gutter/inline marker (M1),
-  and once WYSIWYG exists, resolves through the M5 position map to highlight the
-  originating block instead of a raw generated-source line number.
+## Backend interfaces and boundaries
 
-- **Editor**: raw ProseMirror (`prosemirror-model`/`-view`/`-state`/`-commands`/
-  `-keymap`), custom schema — not Milkdown (markdown-first, would fight a second Typst
-  source format on the same schema). Source-mode views use CodeMirror 6 in plain-text
-  mode, `basicSetup` minus `closeBrackets()` (its auto-closing of `(`/`[`/`{` corrupted
-  content that uses them as plain syntax, e.g. `#table(columns: (1fr, 2fr), [a], [b])`).
+This table describes command responsibilities; it does not promise identical exceptions for every failure. Parameter and serialization types are defined by the corresponding Rust files and TS callers.
 
-- **React + TypeScript + Vite** frontend, **Tauri v2** shell.
+| Interface | Input and result | Important constraints |
+|---|---|---|
+| parse_typst_ast | Source→supported AST and raw fragments | Parsing is not compilation; a recoverable syntax tree does not prove successful layout |
+| compile_typst | Source, directory, optional output mode/known page version→result, diagnostics, page offsets/optional deltas | Compilation errors may yield null SVG; diagnostics are independent of the last successful result; the new page path remains pending validation |
+| block_geometry | Source, directory, list of UTF-8 ranges→range-box arrays in the same order | Still compiles/traverses; empty results may mean no ink or compilation failure, and alone cannot establish that content is absent |
+| jump_from_click / jump_from_cursor | Merged-view coordinates or source position→source offset/page position | Convert pt and screen px; currently creates a new World and compiles |
+| find_block_references | Current block byte range→actual references and definition ranges | Depends on scope/label semantics; not complete visible-binding autocomplete or #set effect tracking |
+| export_pdf | Current full text, destination path, directory→disk-write result | May include uncommitted drafts; compilation errors produce no valid PDF, and write errors must preserve a retryable state |
+| read_image_as_data_url | Relative image path, document directory→data URL | Restricted resource reading; does not open arbitrary system paths |
+
+Diagnostic positions are optional 1-based lines/columns and byte ranges; they may be absent when a Span cannot be resolved. Source views can use lines/columns; Live cursor should provide Locate to the block rather than require users to infer locations from hidden line numbers. Convert UTF-8 byte ranges and UTF-16 DOM positions at boundaries; a missing position does not mean no error.
+
+## Compilation and result consistency
+
+1. Wait 150ms after committed source changes.
+2. `compile_typst` acquires the persistent `Mutex<TauriWorld>`, applies differential edits to `Source` through `sync_session`, and reuses Typst/comemo caches.
+3. Default merged mode calls `typst_svg::svg_merged` to generate a whole-document SVG, returned over IPC with page offsets and diagnostics. Optional workspace pages mode uses page fingerprints and PageDelta to send changed pages only; this path is still under development.
+4. The frontend updates the successful result and `lastGoodSource`; diagnostics update independently. Compilation failures do not replace the last successful result.
+
+Live cursor mounts no additional right-hand preview. Compiled SVG content is mounted once; the composite view and individual blocks reference it through `<use>`. SVG content extraction is cached by result. Clipping viewport width and height both use pt, with explicit overflow limits; the page-width container and focused textarea scale proportionally.
+
+Default mode still generates, transfers, parses, and replaces the entire SVG. Clipped references do not establish that the browser avoids offscreen painting. The new `usePreviewCompiler` has one request in flight, retains the latest pending request, and rejects stale results. The page path checks baseline versions, performs a full reset after failure, and reuses page content, but has not completed native acceptance checks and does not unmount pages by viewport. See [performance analysis](preview-performance.md).
+
+pages mode is enabled by `?preview=pages` or the local `typst.preview.mode` setting. The backend conservatively fingerprints all page attributes and SVG options; the frontend namespaces each page's internal IDs and references to avoid conflicts among page definitions. The double requestAnimationFrame in `previewMetrics` estimates a paint opportunity, not actual compositor presentation time. This section describes current uncommitted code; the fixed exe does not necessarily contain all subsequent changes.
+
+## Geometry, block splitting, and coordinates
+
+Backend source positions use UTF-8 byte offsets; DOM/JavaScript uses UTF-16. Conversion must go through `util/offsets.ts`. UTF-16 boundaries for focused drafts are precomputed by source/focus, avoiding repeated whole-document encoding on each keystroke.
+
+`block_geometry` traverses the Frame tree once for a batch of ranges. Glyph ownership is found through sorted ranges; images/shapes are still compared against each range. Batch ranges currently assume no overlap. Geometry requests still compile and scan the document, without a shared final compiled-document cache. Click/cursor queries in `jump.rs` still create a new World and compile.
+
+Text range boxes are clustered by page and baseline, with text height approximated from font size; images use actual bounds. These range boxes are not textareas. Only group translations are accumulated correctly at present; same-baseline columns may merge, and rotation/scaling is incomplete. Page offsets provide absolute coordinates within the merged SVG.
+
+Splitting occurs only at top-level blank lines, skipping blank lines in brackets, strings, single-backtick spans, and comments. Triple-backtick fences remain a gap. Rendered blocks allocate spacing using midpoints between neighboring text boundaries, retaining page margins at page starts/ends. Confirmed invisible blocks are recorded separately from blocks not yet queried. Geometry prioritizes the focused block and its neighbors; other blocks load lazily through IntersectionObserver.
+
+## Live cursor input and history
+
+Single-block input uses an uncontrolled native textarea, preserving browser IME and local history. Height includes borders and is remeasured after actual width changes; internal scrolling begins at a 60vh cap.
+
+Cross-block selection uses SVG selection and a hidden input. Native dragging outside the textarea records a handoff; after mouse release, it commits first, waits for matching source/rendering, then resolves the final position. This avoids continuously converting between coordinates from two different layouts. Asynchronous focus requests use sequence numbers to prevent old clicks from overriding newer ones.
+
+Native block undo takes priority; application history handles it only if the next animation frame confirms that native history made no change. `editHistory.ts` merges adjacent short-interval text diffs and stores document snapshots for structural operations. Cut/paste are separate history steps; remounting on a new document isolates history. There is no history memory limit yet, nor a guarantee of restoring the exact cursor before every step.
+
+The structural toolbar temporarily parses into a PM document, executes commands, then serializes and restores source positions. Mark toggles on collapsed selections have no persistent storedMarks and currently do nothing; position mapping within marked text remains approximate.
+
+## Saving, files, and closing
+
+Saving reads current text from the active view. Live cursor uses a draft snapshot rather than waiting for block commitment. Original-format saves write text directly; cross-format saves convert it. With an existing path, autosave runs after 2000ms of inactivity and pauses during IME composition; there is no separate recovery file.
+
+The disk-write queue follows request order. Save completion updates only the corresponding snapshot; document generations prevent old requests from contaminating a new document. Saving does not commit or remount the textarea or reset native undo.
+
+File menus use native accelerators without duplicate DOM shortcuts. Window closing checks unsaved content through `onCloseRequested`; the SDK waits for the asynchronous handler and then calls `destroy()`. The main window therefore needs `core:window:allow-destroy`; `core:default` alone does not include it.
+
+## Compilation errors and resource boundaries
+
+On compilation failure, the last successful SVG and its source remain; the failing block displays source and diagnostics, while other blocks' geometry is computed from successful source. The last edited position takes priority when selecting the failing block, avoiding error localization at the document end due to parser recovery. Later correct edits still require whole-document compilation to recover before display. No successful result, multiple errors, and changing block counts still need acceptance checks.
+
+World currently provides a single detached source. Images resolve relative to the document directory, with VirtualPath preventing escape from the root. Rich-text images use backend-loaded data URLs; no arbitrary static-file protocol is exposed. Embedded and system-font metadata are combined; scan results are cached per process, and font bytes load on demand. Missing system glyphs may affect every view and are separate from IME composition issues.
+
+## Validation
+
+Frontend unit tests cover the model, conversions, UTF offsets, splitting, history, files, and React interaction; Tauri IPC, file access, and geometry are mocked. Rust tests cover real parsing, fonts, compilation of specified source, geometry, and PDF behavior. These are not a complete real TS/Rust round-trip rendering-diff suite; see [Phase 1](phase1-mvp.md) for the original goal and coverage gap. Historical results and scope are in [Phase 4](phase4-product-validation.md). Cross-platform behavior, the system clipboard, IME, and real multi-page layout require separate native acceptance checks.

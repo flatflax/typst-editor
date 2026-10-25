@@ -1,0 +1,203 @@
+{
+  "browser": "155.0.4283.62",
+  "results": [
+    {
+      "mode": "merged",
+      "sample": 0,
+      "parse_ms": 4.899999976158142,
+      "apply_ms": 0,
+      "commit_ms": 123.90000003576279,
+      "paint_opportunity_ms": 948.1999999880791,
+      "retained_page_zero": false,
+      "page_nodes": 0,
+      "nodes": 30683
+    },
+    {
+      "mode": "merged",
+      "sample": 1,
+      "parse_ms": 4.600000023841858,
+      "apply_ms": 0,
+      "commit_ms": 111.69999998807907,
+      "paint_opportunity_ms": 804.3000000119209,
+      "retained_page_zero": false,
+      "page_nodes": 0,
+      "nodes": 30683
+    },
+    {
+      "mode": "merged",
+      "sample": 2,
+      "parse_ms": 4.800000011920929,
+      "apply_ms": 0,
+      "commit_ms": 122.29999995231628,
+      "paint_opportunity_ms": 958.5,
+      "retained_page_zero": false,
+      "page_nodes": 0,
+      "nodes": 30683
+    },
+    {
+      "mode": "merged",
+      "sample": 3,
+      "parse_ms": 4,
+      "apply_ms": 0,
+      "commit_ms": 127,
+      "paint_opportunity_ms": 850,
+      "retained_page_zero": false,
+      "page_nodes": 0,
+      "nodes": 30683
+    },
+    {
+      "mode": "merged",
+      "sample": 4,
+      "parse_ms": 4.100000023841858,
+      "apply_ms": 0,
+      "commit_ms": 124.79999995231628,
+      "paint_opportunity_ms": 1202.699999988079,
+      "retained_page_zero": false,
+      "page_nodes": 0,
+      "nodes": 30683
+    },
+    {
+      "mode": "merged",
+      "sample": 5,
+      "parse_ms": 4,
+      "apply_ms": 0,
+      "commit_ms": 151.39999997615814,
+      "paint_opportunity_ms": 997.8999999761581,
+      "retained_page_zero": false,
+      "page_nodes": 0,
+      "nodes": 30683
+    },
+    {
+      "mode": "merged",
+      "sample": 6,
+      "parse_ms": 4.400000035762787,
+      "apply_ms": 0,
+      "commit_ms": 117.69999998807907,
+      "paint_opportunity_ms": 785.1000000238419,
+      "retained_page_zero": false,
+      "page_nodes": 0,
+      "nodes": 30683
+    },
+    {
+      "mode": "merged",
+      "sample": 7,
+      "parse_ms": 4.099999964237213,
+      "apply_ms": 0,
+      "commit_ms": 119.90000003576279,
+      "paint_opportunity_ms": 903.5,
+      "retained_page_zero": false,
+      "page_nodes": 0,
+      "nodes": 30683
+    },
+    {
+      "mode": "merged",
+      "sample": 8,
+      "parse_ms": 5.699999988079071,
+      "apply_ms": 0,
+      "commit_ms": 135.80000001192093,
+      "paint_opportunity_ms": 1100.199999988079,
+      "retained_page_zero": false,
+      "page_nodes": 0,
+      "nodes": 30683
+    },
+    {
+      "mode": "paged",
+      "sample": 0,
+      "parse_ms": 0.5,
+      "apply_ms": 1.199999988079071,
+      "commit_ms": 13.5,
+      "paint_opportunity_ms": 682.1000000238419,
+      "retained_page_zero": true,
+      "page_nodes": 14,
+      "nodes": 31815
+    },
+    {
+      "mode": "paged",
+      "sample": 1,
+      "parse_ms": 0.3999999761581421,
+      "apply_ms": 1.100000023841858,
+      "commit_ms": 13.300000011920929,
+      "paint_opportunity_ms": 554.3000000119209,
+      "retained_page_zero": true,
+      "page_nodes": 14,
+      "nodes": 31815
+    },
+    {
+      "mode": "paged",
+      "sample": 2,
+      "parse_ms": 0.30000001192092896,
+      "apply_ms": 0.6000000238418579,
+      "commit_ms": 8.299999952316284,
+      "paint_opportunity_ms": 492.69999998807907,
+      "retained_page_zero": true,
+      "page_nodes": 14,
+      "nodes": 31815
+    },
+    {
+      "mode": "paged",
+      "sample": 3,
+      "parse_ms": 0.40000003576278687,
+      "apply_ms": 0.5999999642372131,
+      "commit_ms": 9.300000011920929,
+      "paint_opportunity_ms": 472.9000000357628,
+      "retained_page_zero": true,
+      "page_nodes": 14,
+      "nodes": 31815
+    },
+    {
+      "mode": "paged",
+      "sample": 4,
+      "parse_ms": 0.3999999761581421,
+      "apply_ms": 0.6000000238418579,
+      "commit_ms": 8.899999976158142,
+      "paint_opportunity_ms": 471.89999997615814,
+      "retained_page_zero": true,
+      "page_nodes": 14,
+      "nodes": 31815
+    },
+    {
+      "mode": "paged",
+      "sample": 5,
+      "parse_ms": 0.3999999761581421,
+      "apply_ms": 0.6000000238418579,
+      "commit_ms": 9.099999964237213,
+      "paint_opportunity_ms": 474.39999997615814,
+      "retained_page_zero": true,
+      "page_nodes": 14,
+      "nodes": 31815
+    },
+    {
+      "mode": "paged",
+      "sample": 6,
+      "parse_ms": 0.3999999761581421,
+      "apply_ms": 0.6000000238418579,
+      "commit_ms": 8.800000011920929,
+      "paint_opportunity_ms": 681.3999999761581,
+      "retained_page_zero": true,
+      "page_nodes": 14,
+      "nodes": 31815
+    },
+    {
+      "mode": "paged",
+      "sample": 7,
+      "parse_ms": 0.3999999761581421,
+      "apply_ms": 0.6000000238418579,
+      "commit_ms": 8.399999976158142,
+      "paint_opportunity_ms": 451.60000002384186,
+      "retained_page_zero": true,
+      "page_nodes": 14,
+      "nodes": 31815
+    },
+    {
+      "mode": "paged",
+      "sample": 8,
+      "parse_ms": 0.30000001192092896,
+      "apply_ms": 0.5999999642372131,
+      "commit_ms": 7.400000035762787,
+      "paint_opportunity_ms": 447,
+      "retained_page_zero": true,
+      "page_nodes": 14,
+      "nodes": 31815
+    }
+  ]
+}
